@@ -31,6 +31,7 @@ pub struct XsdElement {
     pub name: String,
     pub occurs: XsdOccurs,
     pub type_name: Option<String>,
+    pub form: Option<String>,
 }
 
 /// Restriction simple portée par un type XSD.
@@ -52,6 +53,8 @@ pub struct XsdRestriction {
 #[derive(Debug, Default, PartialEq, Eq, Clone)]
 pub struct XsdSchema {
     pub target_namespace: Option<String>,
+    pub element_form_default: Option<String>,
+    pub attribute_form_default: Option<String>,
     pub elements: Vec<XsdElement>,
     pub children: HashMap<String, Vec<String>>,
     pub choices: HashMap<String, Vec<String>>,
@@ -72,6 +75,12 @@ pub fn merge_schemas(schemas: impl IntoIterator<Item = XsdSchema>) -> XsdSchema 
     for schema in schemas {
         if merged.target_namespace.is_none() {
             merged.target_namespace = schema.target_namespace;
+        }
+        if merged.element_form_default.is_none() {
+            merged.element_form_default = schema.element_form_default;
+        }
+        if merged.attribute_form_default.is_none() {
+            merged.attribute_form_default = schema.attribute_form_default;
         }
         merged.elements.extend(schema.elements);
         merge_string_lists(&mut merged.children, schema.children);
@@ -236,6 +245,8 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                 simple_type_stack.push(simple_name);
                 if current_name == "schema" {
                     schema.target_namespace = attribute(&element, "targetNamespace");
+                    schema.element_form_default = attribute(&element, "elementFormDefault");
+                    schema.attribute_form_default = attribute(&element, "attributeFormDefault");
                 }
                 if current_name == "include"
                     && let Some(location) = attribute(&element, "schemaLocation")
@@ -323,6 +334,7 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                             max: parse_max_occurs(attribute(&element, "maxOccurs"))?,
                         },
                         type_name: attribute(&element, "type"),
+                        form: attribute(&element, "form"),
                     });
                     model_stack.push(name.clone());
                     element_stack.push(Some(name));
@@ -335,6 +347,8 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                 let current_name = local_name(element_name.as_ref());
                 if current_name == "schema" {
                     schema.target_namespace = attribute(&element, "targetNamespace");
+                    schema.element_form_default = attribute(&element, "elementFormDefault");
+                    schema.attribute_form_default = attribute(&element, "attributeFormDefault");
                 }
                 if current_name == "include"
                     && let Some(location) = attribute(&element, "schemaLocation")
@@ -495,6 +509,7 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                             max: parse_max_occurs(attribute(&element, "maxOccurs"))?,
                         },
                         type_name: attribute(&element, "type"),
+                        form: attribute(&element, "form"),
                     });
                 }
             }
@@ -1384,6 +1399,26 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.message.contains("trop d’éléments <second>"))
         );
+    }
+
+    #[test]
+    fn preserves_schema_namespace_form_defaults() {
+        let schema = parse_xsd(
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+                targetNamespace="urn:test" elementFormDefault="qualified"
+                attributeFormDefault="unqualified">
+                <xs:element name="root" form="qualified"/>
+            </xs:schema>"#,
+        )
+        .unwrap();
+
+        assert_eq!(schema.target_namespace.as_deref(), Some("urn:test"));
+        assert_eq!(schema.element_form_default.as_deref(), Some("qualified"));
+        assert_eq!(
+            schema.attribute_form_default.as_deref(),
+            Some("unqualified")
+        );
+        assert_eq!(schema.elements[0].form.as_deref(), Some("qualified"));
     }
 
     #[test]
