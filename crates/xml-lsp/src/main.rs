@@ -34,6 +34,13 @@ const COMPLETION_METHOD: &str = "textDocument/completion";
 
 type SchemaCache = HashMap<PathBuf, (SystemTime, XsdSchema)>;
 
+#[derive(Debug)]
+struct SchemaLoadError {
+    path: PathBuf,
+    message: String,
+    offset: usize,
+}
+
 struct XmlLanguageServer {
     documents: HashMap<String, String>,
     schema_cache: SchemaCache,
@@ -249,7 +256,7 @@ impl XmlLanguageServer {
             load_schema_graph(references, &mut self.schema_cache, &mut self.schema_index);
         let mut diagnostics = errors
             .into_iter()
-            .map(xsd_error_diagnostic)
+            .map(xsd_schema_error_diagnostic)
             .collect::<Vec<_>>();
         if !schemas.is_empty() {
             let schema = merge_schemas(schemas);
@@ -560,7 +567,7 @@ fn load_schema_graph(
     references: Vec<xsd_core::SchemaReference>,
     cache: &mut SchemaCache,
     index: &mut HashMap<String, Vec<PathBuf>>,
-) -> (Vec<XsdSchema>, Vec<String>) {
+) -> (Vec<XsdSchema>, Vec<SchemaLoadError>) {
     let mut queue = references;
     let mut visited = HashSet::new();
     let mut schemas = Vec::new();
@@ -577,10 +584,11 @@ fn load_schema_graph(
         let schema_source = match fs::read_to_string(&path) {
             Ok(source) => source,
             Err(error) => {
-                errors.push(format!(
-                    "impossible de lire le schéma {} : {error}",
-                    path.display()
-                ));
+                errors.push(SchemaLoadError {
+                    path: path.clone(),
+                    message: format!("impossible de lire le schéma : {error}"),
+                    offset: 0,
+                });
                 continue;
             }
         };
@@ -592,7 +600,11 @@ fn load_schema_graph(
             let schema = match parse_xsd(&schema_source) {
                 Ok(schema) => schema,
                 Err(error) => {
-                    errors.push(format!("schéma XSD invalide ({}): {error}", path.display()));
+                    errors.push(SchemaLoadError {
+                        path: path.clone(),
+                        message: format!("schéma XSD invalide : {error}"),
+                        offset: xsd_parse_error_offset(&schema_source),
+                    });
                     continue;
                 }
             };
@@ -607,10 +619,11 @@ fn load_schema_graph(
         }
         match resolve_schema_dependencies(&schema_source, &path) {
             Ok(dependencies) => queue.extend(dependencies),
-            Err(error) => errors.push(format!(
-                "dépendances XSD invalides ({}): {error}",
-                path.display()
-            )),
+            Err(error) => errors.push(SchemaLoadError {
+                path: path.clone(),
+                message: format!("dépendances XSD invalides : {error}"),
+                offset: xsd_parse_error_offset(&schema_source),
+            }),
         }
         schemas.push(schema);
     }
@@ -630,6 +643,25 @@ fn xsd_error_diagnostic_at(message: &str, source: &str, offset: usize) -> Value 
     })
 }
 
+fn xsd_schema_error_diagnostic(error: SchemaLoadError) -> Value {
+    json!({
+        "range": {
+            "start": {"line": 0, "character": 0},
+            "end": {"line": 0, "character": 0},
+        },
+        "severity": 1,
+        "source": "xml-lsp",
+        "code": "xsd-validation",
+        "data": {
+            "category": "xsd",
+            "kind": "loading",
+            "schemaUri": path_to_uri(&error.path),
+            "schemaOffset": error.offset,
+        },
+        "message": error.message,
+    })
+}
+
 fn xsd_error_diagnostic(diagnostic: impl Into<String>) -> Value {
     json!({
         "range": {
@@ -642,6 +674,17 @@ fn xsd_error_diagnostic(diagnostic: impl Into<String>) -> Value {
         "data": {"category": "xsd", "kind": "loading"},
         "message": diagnostic.into(),
     })
+}
+
+fn xsd_parse_error_offset(source: &str) -> usize {
+    let mut reader = Reader::from_str(source);
+    loop {
+        match reader.read_event() {
+            Ok(Event::Eof) => return source.len(),
+            Err(_) => return reader.buffer_position() as usize,
+            Ok(_) => {}
+        }
+    }
 }
 
 fn element_name_at(source: &str, offset: usize) -> Option<String> {
@@ -1449,6 +1492,14 @@ mod tests {
             position_at("é\n😀<root>", 7),
             json!({"line": 1, "character": 2})
         );
+    }
+
+    #[test]
+    fn locates_xsd_parse_errors() {
+        let source = r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"><xs:element name="root"></xs:schema>"#;
+        let offset = xsd_parse_error_offset(source);
+        assert!(offset > source.find("</xs:schema>").unwrap());
+        assert!(offset <= source.len());
     }
 
     #[test]
