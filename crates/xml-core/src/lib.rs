@@ -4,6 +4,9 @@ use std::collections::BTreeSet;
 
 use quick_xml::{Reader, Writer, events::Event};
 
+const MAX_XML_SOURCE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_XML_DEPTH: usize = 512;
+
 /// Document XML partiellement analysé.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct XmlDocument {
@@ -46,6 +49,16 @@ pub struct XmlParseResult {
 
 /// Analyse une source XML et retourne les diagnostics récupérables pendant l'édition.
 pub fn parse_xml(source: &str) -> XmlParseResult {
+    if source.len() > MAX_XML_SOURCE_BYTES {
+        return XmlParseResult {
+            document: XmlDocument::default(),
+            diagnostics: vec![XmlDiagnostic {
+                kind: XmlDiagnosticKind::Syntax,
+                message: "document XML trop volumineux".to_owned(),
+                offset: 0,
+            }],
+        };
+    }
     let mut reader = Reader::from_str(source);
     let mut stack = Vec::new();
     let mut document = XmlDocument::default();
@@ -54,6 +67,14 @@ pub fn parse_xml(source: &str) -> XmlParseResult {
     loop {
         match reader.read_event() {
             Ok(Event::Start(element)) => {
+                if stack.len() >= MAX_XML_DEPTH {
+                    diagnostics.push(XmlDiagnostic {
+                        kind: XmlDiagnosticKind::Structure,
+                        message: "profondeur XML maximale dépassée".to_owned(),
+                        offset: reader.buffer_position() as usize,
+                    });
+                    break;
+                }
                 let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
                 if stack.is_empty() {
                     if document.root.is_some() {
@@ -443,6 +464,28 @@ mod tests {
         assert_eq!(result.diagnostics.len(), 1);
         assert_eq!(result.diagnostics[0].offset, "<root><child>".len());
         assert!(result.diagnostics[0].message.contains("non fermée <child>"));
+    }
+
+    #[test]
+    fn rejects_xml_sources_exceeding_safety_limits() {
+        let source = "<root>".to_owned() + &"x".repeat(16 * 1024 * 1024);
+        let result = parse_xml(&source);
+        assert_eq!(
+            result.diagnostics[0].message,
+            "document XML trop volumineux"
+        );
+
+        let nested = (0..513).fold(String::new(), |mut source, _| {
+            source.push_str("<node>");
+            source
+        });
+        let result = parse_xml(&nested);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("profondeur XML"))
+        );
     }
 
     #[test]

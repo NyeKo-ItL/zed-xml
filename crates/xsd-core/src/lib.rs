@@ -9,6 +9,8 @@ use std::{
 use quick_xml::{Reader, events::Event};
 use regex::Regex;
 
+const MAX_XSD_SOURCE_BYTES: usize = 16 * 1024 * 1024;
+
 /// Cardinalité d'un élément XSD.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct XsdOccurs {
@@ -73,6 +75,7 @@ pub struct XsdSchema {
     pub unions: HashMap<String, Vec<String>>,
     pub attribute_groups: HashMap<String, Vec<String>>,
     pub model_groups: HashMap<String, Vec<String>>,
+    pub substitution_groups: HashMap<String, Vec<String>>,
     pub any_children: HashMap<String, bool>,
     pub any_attributes: HashMap<String, bool>,
     pub complex_extensions: HashMap<String, String>,
@@ -108,6 +111,7 @@ pub fn merge_schemas(schemas: impl IntoIterator<Item = XsdSchema>) -> XsdSchema 
         merged.unions.extend(schema.unions);
         merge_string_lists(&mut merged.attribute_groups, schema.attribute_groups);
         merge_string_lists(&mut merged.model_groups, schema.model_groups);
+        merge_string_lists(&mut merged.substitution_groups, schema.substitution_groups);
         merged.any_children.extend(schema.any_children);
         merged.any_attributes.extend(schema.any_attributes);
         merged.complex_extensions.extend(schema.complex_extensions);
@@ -161,6 +165,9 @@ pub struct LocatedXsdDiagnostic {
 
 /// Parse un `xs:schema`, ses éléments et une première `xs:sequence`.
 pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
+    if source.len() > MAX_XSD_SOURCE_BYTES {
+        return Err("schéma XSD trop volumineux".to_owned());
+    }
     let mut reader = Reader::from_str(source);
     let mut schema = XsdSchema::default();
     let mut element_stack = Vec::new();
@@ -396,6 +403,13 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                     }
                 }
                 if let Some(name) = declared_name {
+                    if let Some(head) = attribute(&element, "substitutionGroup") {
+                        schema
+                            .substitution_groups
+                            .entry(head)
+                            .or_default()
+                            .push(name.clone());
+                    }
                     schema.elements.push(XsdElement {
                         name: name.clone(),
                         occurs: XsdOccurs {
@@ -611,6 +625,13 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                                 .or_default()
                                 .push(name.clone());
                         }
+                    }
+                    if let Some(head) = attribute(&element, "substitutionGroup") {
+                        schema
+                            .substitution_groups
+                            .entry(head)
+                            .or_default()
+                            .push(name.clone());
                     }
                     schema.elements.push(XsdElement {
                         name,
@@ -1127,8 +1148,44 @@ pub fn complete_elements(source: &str, offset: usize, schema: &XsdSchema) -> Vec
         .last()
         .map(|parent| {
             let mut names = schema.children.get(parent).cloned().unwrap_or_default();
+            let existing = direct_children(&prefix[..opening]);
+            if !names.is_empty() {
+                names.retain(|name| {
+                    let count = existing.iter().filter(|child| *child == name).count();
+                    let max = schema
+                        .elements
+                        .iter()
+                        .find(|element| element.name == *name)
+                        .and_then(|element| element.occurs.max);
+                    max.is_none_or(|maximum| count < maximum)
+                });
+                if let Some(last) = existing.last()
+                    && let Some(index) = schema
+                        .children
+                        .get(parent)
+                        .and_then(|children| children.iter().position(|child| child == last))
+                {
+                    names.retain(|name| {
+                        schema
+                            .children
+                            .get(parent)
+                            .and_then(|children| children.iter().position(|child| child == name))
+                            .is_some_and(|candidate| candidate >= index)
+                    });
+                }
+            }
             names.extend(schema.choices.get(parent).cloned().unwrap_or_default());
             names.extend(schema.alls.get(parent).cloned().unwrap_or_default());
+            let heads = names.clone();
+            for head in heads {
+                names.extend(
+                    schema
+                        .substitution_groups
+                        .get(&head)
+                        .cloned()
+                        .unwrap_or_default(),
+                );
+            }
             names.sort();
             names.dedup();
             names
@@ -1150,6 +1207,34 @@ pub fn complete_elements(source: &str, offset: usize, schema: &XsdSchema) -> Vec
             insert_text: name,
         })
         .collect()
+}
+
+fn direct_children(source: &str) -> Vec<String> {
+    let mut reader = Reader::from_str(source);
+    let mut stack = Vec::new();
+    let mut children = Vec::new();
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element)) => {
+                let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
+                if !stack.is_empty() && stack.len() == 1 {
+                    children.push(name.clone());
+                }
+                stack.push(name);
+            }
+            Ok(Event::Empty(element)) => {
+                if !stack.is_empty() && stack.len() == 1 {
+                    children.push(String::from_utf8_lossy(element.name().as_ref()).into_owned());
+                }
+            }
+            Ok(Event::End(_)) => {
+                stack.pop();
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            Ok(_) => {}
+        }
+    }
+    children
 }
 
 fn open_xml_elements(source: &str) -> Vec<String> {
@@ -1297,7 +1382,17 @@ fn validate_sequence_frame(frame: &XmlFrame, schema: &XsdSchema) -> Vec<XsdDiagn
         }
     }
     for child in expected {
-        let count = frame.children.iter().filter(|name| *name == child).count();
+        let count = frame
+            .children
+            .iter()
+            .filter(|name| {
+                *name == child
+                    || schema
+                        .substitution_groups
+                        .get(child)
+                        .is_some_and(|members| members.iter().any(|member| member == *name))
+            })
+            .count();
         if let Some(element) = schema
             .elements
             .iter()
@@ -1652,6 +1747,16 @@ fn validate_attributes(
     diagnostics
 }
 
+fn child_allowed_by_substitution(schema: &XsdSchema, allowed: &[String], child: &str) -> bool {
+    allowed.iter().any(|name| {
+        name == child
+            || schema
+                .substitution_groups
+                .get(name)
+                .is_some_and(|members| members.iter().any(|member| member == child))
+    })
+}
+
 fn is_allowed_child(schema: &XsdSchema, parent: &str, child: &str) -> bool {
     let sequence = schema.children.get(parent);
     let choice = schema.choices.get(parent);
@@ -1662,9 +1767,9 @@ fn is_allowed_child(schema: &XsdSchema, parent: &str, child: &str) -> bool {
     if sequence.is_none() && choice.is_none() && all.is_none() {
         return true;
     }
-    sequence.is_some_and(|children| children.iter().any(|name| name == child))
-        || choice.is_some_and(|children| children.iter().any(|name| name == child))
-        || all.is_some_and(|children| children.iter().any(|name| name == child))
+    sequence.is_some_and(|children| child_allowed_by_substitution(schema, children, child))
+        || choice.is_some_and(|children| child_allowed_by_substitution(schema, children, child))
+        || all.is_some_and(|children| child_allowed_by_substitution(schema, children, child))
 }
 
 /// Vérifie que le nom de la racine XML est déclaré par le schéma.
@@ -2356,6 +2461,48 @@ mod tests {
     }
 
     #[test]
+    fn supports_substitution_groups_in_validation_and_completion() {
+        let schema = parse_xsd(
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+                <xs:element name="head"/>
+                <xs:element name="member" substitutionGroup="head"/>
+                <xs:element name="root"><xs:complexType><xs:sequence>
+                    <xs:element ref="head"/>
+                </xs:sequence></xs:complexType></xs:element>
+            </xs:schema>"#,
+        )
+        .unwrap();
+        let source = "<root><";
+        assert!(
+            complete_elements(source, source.len(), &schema)
+                .iter()
+                .any(|completion| completion.label == "member")
+        );
+        assert!(validate_document("<root><member /></root>", &schema).is_empty());
+    }
+
+    #[test]
+    fn completion_respects_sequence_order_and_max_occurs() {
+        let schema = parse_xsd(
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+                <xs:element name="root"><xs:complexType><xs:sequence>
+                    <xs:element name="first"/>
+                    <xs:element name="second"/>
+                </xs:sequence></xs:complexType></xs:element>
+            </xs:schema>"#,
+        )
+        .unwrap();
+        let source = "<root><first /><";
+        assert_eq!(
+            complete_elements(source, source.len(), &schema),
+            vec![XsdCompletion {
+                label: "second".to_owned(),
+                insert_text: "second".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
     fn merges_components_from_multiple_schemas() {
         let first = parse_xsd(
             r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"><xs:element name="root"/></xs:schema>"#,
@@ -2428,6 +2575,16 @@ mod tests {
                 "document.xml"
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_oversized_xsd_sources() {
+        let source = "<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\">".to_owned()
+            + &"x".repeat(16 * 1024 * 1024);
+        assert_eq!(
+            parse_xsd(&source),
+            Err("schéma XSD trop volumineux".to_owned())
         );
     }
 
