@@ -5,7 +5,10 @@ use std::{collections::HashMap, error::Error, fs, path::PathBuf};
 use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
 use serde_json::{Value, json};
 use xml_core::{XmlDiagnostic, auto_close_tag, complete_xml, format_xml, parse_xml};
-use xsd_core::{complete_elements, parse_xsd, resolve_schema_locations, validate_document};
+use xsd_core::{
+    complete_attribute_values, complete_elements, parse_xsd, resolve_schema_locations,
+    validate_document,
+};
 
 const INITIALIZE_METHOD: &str = "initialize";
 const EXIT_METHOD: &str = "exit";
@@ -88,6 +91,7 @@ impl XmlLanguageServer {
             }));
         }
         items.extend(self.schema_completions(uri, source, offset));
+        items.extend(self.schema_attribute_values(uri, source, offset));
         Some(json!({"isIncomplete": false, "items": items}))
     }
 
@@ -100,6 +104,24 @@ impl XmlLanguageServer {
             .filter_map(|reference| fs::read_to_string(reference.path).ok())
             .filter_map(|schema_source| parse_xsd(&schema_source).ok())
             .flat_map(|schema| complete_elements(source, offset, &schema))
+            .map(|completion| {
+                json!({
+                    "label": completion.label,
+                    "insertText": completion.insert_text,
+                })
+            })
+            .collect()
+    }
+
+    fn schema_attribute_values(&self, uri: &str, source: &str, offset: usize) -> Vec<Value> {
+        let document_path = uri_to_path(uri);
+        let references = resolve_schema_locations(schema_resolution_source(source), document_path)
+            .unwrap_or_default();
+        references
+            .into_iter()
+            .filter_map(|reference| fs::read_to_string(reference.path).ok())
+            .filter_map(|schema_source| parse_xsd(&schema_source).ok())
+            .flat_map(|schema| complete_attribute_values(source, offset, &schema))
             .map(|completion| {
                 json!({
                     "label": completion.label,

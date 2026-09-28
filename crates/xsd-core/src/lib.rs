@@ -29,6 +29,7 @@ impl Default for XsdOccurs {
 pub struct XsdElement {
     pub name: String,
     pub occurs: XsdOccurs,
+    pub type_name: Option<String>,
 }
 
 /// Schéma XSD minimal.
@@ -38,6 +39,7 @@ pub struct XsdSchema {
     pub elements: Vec<XsdElement>,
     pub children: HashMap<String, Vec<String>>,
     pub choices: HashMap<String, Vec<String>>,
+    pub enumerations: HashMap<String, Vec<String>>,
 }
 
 /// Référence XSD extraite d'un document XML.
@@ -68,12 +70,32 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
     let mut model_stack: Vec<String> = Vec::new();
     let mut sequence_depth = 0usize;
     let mut choice_depth = 0usize;
+    let mut simple_type_stack: Vec<Option<String>> = Vec::new();
 
     loop {
         match reader.read_event() {
             Ok(Event::Start(element)) => {
                 let element_name = element.name();
                 let current_name = local_name(element_name.as_ref());
+                let simple_name = if current_name == "simpleType" {
+                    attribute(&element, "name")
+                } else {
+                    None
+                };
+                if current_name == "enumeration"
+                    && let Some(simple_type) = simple_type_stack
+                        .iter()
+                        .rev()
+                        .find_map(|name| name.as_ref())
+                    && let Some(value) = attribute(&element, "value")
+                {
+                    schema
+                        .enumerations
+                        .entry(simple_type.clone())
+                        .or_default()
+                        .push(value);
+                }
+                simple_type_stack.push(simple_name);
                 if current_name == "schema" {
                     schema.target_namespace = attribute(&element, "targetNamespace");
                 }
@@ -115,6 +137,7 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                                 .map_err(|_| "minOccurs invalide".to_owned())?,
                             max: parse_max_occurs(attribute(&element, "maxOccurs"))?,
                         },
+                        type_name: attribute(&element, "type"),
                     });
                     model_stack.push(name.clone());
                     element_stack.push(Some(name));
@@ -127,6 +150,19 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                 let current_name = local_name(element_name.as_ref());
                 if current_name == "schema" {
                     schema.target_namespace = attribute(&element, "targetNamespace");
+                }
+                if current_name == "enumeration"
+                    && let Some(simple_type) = simple_type_stack
+                        .iter()
+                        .rev()
+                        .find_map(|name| name.as_ref())
+                    && let Some(value) = attribute(&element, "value")
+                {
+                    schema
+                        .enumerations
+                        .entry(simple_type.clone())
+                        .or_default()
+                        .push(value);
                 }
                 if current_name == "element"
                     && let Some(name) = attribute(&element, "name")
@@ -157,10 +193,12 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                                 .map_err(|_| "minOccurs invalide".to_owned())?,
                             max: parse_max_occurs(attribute(&element, "maxOccurs"))?,
                         },
+                        type_name: attribute(&element, "type"),
                     });
                 }
             }
             Ok(Event::End(element)) => {
+                simple_type_stack.pop();
                 let element_name = element.name();
                 let current_name = local_name(element_name.as_ref());
                 if current_name == "sequence" {
@@ -256,6 +294,59 @@ fn normalize_path(path: &Path) -> PathBuf {
 }
 
 /// Retourne les éléments XSD adaptés au contexte XML courant.
+pub fn complete_attribute_values(
+    source: &str,
+    offset: usize,
+    schema: &XsdSchema,
+) -> Vec<XsdCompletion> {
+    let prefix = &source[..offset.min(source.len())];
+    let Some(opening) = prefix.rfind('<') else {
+        return Vec::new();
+    };
+    let fragment = &prefix[opening + 1..];
+    let Some(equals) = fragment.rfind('=') else {
+        return Vec::new();
+    };
+    let attribute_name = fragment[..equals]
+        .split_whitespace()
+        .last()
+        .unwrap_or_default();
+    let typed = fragment[equals + 1..].trim_matches([' ', '\"', '\'']);
+    let mut open_elements = open_xml_elements(&prefix[..opening]);
+    if let Some(current_element) = fragment.split_whitespace().next()
+        && !current_element.is_empty()
+    {
+        open_elements.push(current_element.to_owned());
+    }
+    let Some(parent) = open_elements.last() else {
+        return Vec::new();
+    };
+    let Some(element) = schema
+        .elements
+        .iter()
+        .find(|element| element.name == *parent)
+    else {
+        return Vec::new();
+    };
+    let Some(type_name) = element.type_name.as_deref() else {
+        return Vec::new();
+    };
+    if attribute_name.is_empty() {
+        return Vec::new();
+    }
+    schema
+        .enumerations
+        .get(type_name)
+        .into_iter()
+        .flatten()
+        .filter(|value| value.starts_with(typed))
+        .map(|value| XsdCompletion {
+            label: value.clone(),
+            insert_text: value.clone(),
+        })
+        .collect()
+}
+
 pub fn complete_elements(source: &str, offset: usize, schema: &XsdSchema) -> Vec<XsdCompletion> {
     let prefix = &source[..offset.min(source.len())];
     let Some(opening) = prefix.rfind('<') else {
@@ -459,6 +550,17 @@ mod tests {
             </xs:element>
         </xs:schema>
     "#;
+    const ENUMERATION: &str = r#"
+        <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+            <xs:simpleType name="Color">
+                <xs:restriction base="xs:string">
+                    <xs:enumeration value="red"/>
+                    <xs:enumeration value="blue"/>
+                </xs:restriction>
+            </xs:simpleType>
+            <xs:element name="item" type="Color"/>
+        </xs:schema>
+    "#;
 
     #[test]
     fn parses_schema_namespace_elements_and_cardinalities() {
@@ -498,6 +600,17 @@ mod tests {
         assert_eq!(schema.choices["root"], vec!["text", "number"]);
         assert!(validate_document("<root><number /></root>", &schema).is_empty());
         assert_eq!(complete_elements("<root><n", 9, &schema)[0].label, "number");
+    }
+
+    #[test]
+    fn completes_enumerated_attribute_values() {
+        let schema = parse_xsd(ENUMERATION).unwrap();
+
+        assert_eq!(schema.enumerations["Color"], vec!["red", "blue"]);
+        assert_eq!(
+            complete_attribute_values("<item color=\"b", 15, &schema)[0].label,
+            "blue"
+        );
     }
 
     #[test]
