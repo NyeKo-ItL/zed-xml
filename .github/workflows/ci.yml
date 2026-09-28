@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  checks:
+    name: Format and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+      - run: cargo test --workspace
+      - name: Verify generated files are not tracked
+        shell: bash
+        run: |
+          test -z "$(git ls-files -- 'grammars/**' '*.wasm' 'target/**')"
+
+  native:
+    name: Build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary: xml-lsp.exe
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary: xml-lsp
+          - os: macos-13
+            target: x86_64-apple-darwin
+            binary: xml-lsp
+          - os: macos-14
+            target: aarch64-apple-darwin
+            binary: xml-lsp
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build -p xml-lsp --release --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xml-lsp-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/${{ matrix.binary }}
+          if-no-files-found: error
