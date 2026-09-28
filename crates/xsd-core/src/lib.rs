@@ -1,6 +1,7 @@
 //! Modèle et parsing XSD partagés par le serveur LSP.
 
 use std::{
+    collections::HashMap,
     path::{Component, Path, PathBuf},
     str,
 };
@@ -35,6 +36,7 @@ pub struct XsdElement {
 pub struct XsdSchema {
     pub target_namespace: Option<String>,
     pub elements: Vec<XsdElement>,
+    pub children: HashMap<String, Vec<String>>,
 }
 
 /// Référence XSD extraite d'un document XML.
@@ -50,21 +52,75 @@ pub struct XsdDiagnostic {
     pub message: String,
 }
 
-/// Parse un `xs:schema` et ses déclarations `xs:element`.
+/// Parse un `xs:schema`, ses éléments et une première `xs:sequence`.
 pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
     let mut reader = Reader::from_str(source);
     let mut schema = XsdSchema::default();
+    let mut element_stack = Vec::new();
+    let mut model_stack: Vec<String> = Vec::new();
+    let mut sequence_depth = 0usize;
 
     loop {
         match reader.read_event() {
-            Ok(Event::Start(element)) | Ok(Event::Empty(element)) => {
+            Ok(Event::Start(element)) => {
                 let element_name = element.name();
-                let local_name = local_name(element_name.as_ref());
-                if local_name == "schema" {
+                let current_name = local_name(element_name.as_ref());
+                if current_name == "schema" {
                     schema.target_namespace = attribute(&element, "targetNamespace");
-                } else if local_name == "element"
+                }
+                if current_name == "sequence" {
+                    sequence_depth += 1;
+                }
+                let declared_name = if current_name == "element" {
+                    attribute(&element, "name")
+                } else {
+                    None
+                };
+                if let (Some(parent), Some(child)) = (model_stack.last(), declared_name.as_ref())
+                    && sequence_depth > 0
+                {
+                    schema
+                        .children
+                        .entry(parent.clone())
+                        .or_default()
+                        .push(child.clone());
+                }
+                if let Some(name) = declared_name {
+                    schema.elements.push(XsdElement {
+                        name: name.clone(),
+                        occurs: XsdOccurs {
+                            min: attribute(&element, "minOccurs")
+                                .as_deref()
+                                .unwrap_or("1")
+                                .parse()
+                                .map_err(|_| "minOccurs invalide".to_owned())?,
+                            max: parse_max_occurs(attribute(&element, "maxOccurs"))?,
+                        },
+                    });
+                    model_stack.push(name.clone());
+                    element_stack.push(Some(name));
+                } else {
+                    element_stack.push(None);
+                }
+            }
+            Ok(Event::Empty(element)) => {
+                let element_name = element.name();
+                let current_name = local_name(element_name.as_ref());
+                if current_name == "schema" {
+                    schema.target_namespace = attribute(&element, "targetNamespace");
+                }
+                if current_name == "element"
                     && let Some(name) = attribute(&element, "name")
                 {
+                    if let Some(parent) = model_stack.last()
+                        && sequence_depth > 0
+                    {
+                        schema
+                            .children
+                            .entry(parent.clone())
+                            .or_default()
+                            .push(name.clone());
+                    }
                     schema.elements.push(XsdElement {
                         name,
                         occurs: XsdOccurs {
@@ -76,6 +132,16 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                             max: parse_max_occurs(attribute(&element, "maxOccurs"))?,
                         },
                     });
+                }
+            }
+            Ok(Event::End(element)) => {
+                let element_name = element.name();
+                let current_name = local_name(element_name.as_ref());
+                if current_name == "sequence" {
+                    sequence_depth = sequence_depth.saturating_sub(1);
+                }
+                if element_stack.pop().flatten().is_some() {
+                    model_stack.pop();
                 }
             }
             Ok(Event::Eof) => break,
@@ -176,12 +242,49 @@ pub fn root_element_name(source: &str) -> Option<String> {
 
 /// Vérifie le document XML contre les éléments déclarés par le schéma.
 pub fn validate_document(source: &str, schema: &XsdSchema) -> Vec<XsdDiagnostic> {
-    match root_element_name(source) {
+    let mut diagnostics = match root_element_name(source) {
         Some(root) => validate_root(&root, schema),
         None => vec![XsdDiagnostic {
             message: "document XML sans élément racine".to_owned(),
         }],
+    };
+    let mut reader = Reader::from_str(source);
+    let mut stack = Vec::new();
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element)) => {
+                let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
+                if let Some(parent) = stack.last()
+                    && let Some(allowed) = schema.children.get(parent)
+                    && !allowed.iter().any(|child| child == &name)
+                {
+                    diagnostics.push(XsdDiagnostic {
+                        message: format!("élément <{name}> interdit dans <{parent}>"),
+                    });
+                }
+                stack.push(name);
+            }
+            Ok(Event::Empty(element)) => {
+                let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
+                if let Some(parent) = stack.last()
+                    && let Some(allowed) = schema.children.get(parent)
+                    && !allowed.iter().any(|child| child == &name)
+                {
+                    diagnostics.push(XsdDiagnostic {
+                        message: format!("élément <{name}> interdit dans <{parent}>"),
+                    });
+                }
+            }
+            Ok(Event::End(_)) => {
+                stack.pop();
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            Ok(_) => {}
+        }
     }
+
+    diagnostics
 }
 
 /// Vérifie que le nom de la racine XML est déclaré par le schéma.
@@ -234,6 +337,17 @@ mod tests {
             <xs:element name="item" minOccurs="0" maxOccurs="unbounded"/>
         </xs:schema>
     "#;
+    const SEQUENCE: &str = r#"
+        <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+            <xs:element name="root">
+                <xs:complexType>
+                    <xs:sequence>
+                        <xs:element name="child"/>
+                    </xs:sequence>
+                </xs:complexType>
+            </xs:element>
+        </xs:schema>
+    "#;
 
     #[test]
     fn parses_schema_namespace_elements_and_cardinalities() {
@@ -252,6 +366,18 @@ mod tests {
 
         assert!(validate_root("root", &schema).is_empty());
         assert_eq!(validate_root("unknown", &schema).len(), 1);
+    }
+
+    #[test]
+    fn validates_children_declared_by_a_sequence() {
+        let schema = parse_xsd(SEQUENCE).unwrap();
+
+        assert_eq!(schema.children["root"], vec!["child"]);
+        assert!(validate_document("<root><child /></root>", &schema).is_empty());
+        assert_eq!(
+            validate_document("<root><other /></root>", &schema)[0].message,
+            "élément <other> interdit dans <root>"
+        );
     }
 
     #[test]

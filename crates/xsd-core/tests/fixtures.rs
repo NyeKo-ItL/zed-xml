@@ -1,9 +1,11 @@
 use std::path::PathBuf;
 
-use xsd_core::{XsdOccurs, parse_xsd, resolve_schema_locations, validate_root};
+use xsd_core::{XsdOccurs, parse_xsd, resolve_schema_locations, validate_document, validate_root};
 
 const SIMPLE: &str = include_str!("../../../tests/fixtures/xsd/simple.xsd");
 const SCHEMA_LOCATION_XML: &str = include_str!("../../../tests/fixtures/xml/schema-location.xml");
+const SEQUENCE: &str = include_str!("../../../tests/fixtures/xsd/sequence.xsd");
+const INVALID_CHILD: &str = include_str!("../../../tests/fixtures/xml/invalid-child.xml");
 
 #[test]
 fn parses_the_shared_simple_schema() {
@@ -32,6 +34,17 @@ fn resolves_the_shared_schema_location_fixture() {
     assert_eq!(
         references[0].path,
         PathBuf::from("tests/fixtures/xsd/simple.xsd")
+    );
+}
+
+#[test]
+fn validates_sequence_children_against_the_shared_schema() {
+    let schema = parse_xsd(SEQUENCE).unwrap();
+
+    assert!(validate_document("<catalog><book /></catalog>", &schema).is_empty());
+    assert_eq!(
+        validate_document(INVALID_CHILD, &schema)[0].message,
+        "élément <magazine> interdit dans <catalog>"
     );
 }
 
