@@ -1,10 +1,11 @@
 //! Serveur LSP XML natif.
 
-use std::{collections::HashMap, error::Error};
+use std::{collections::HashMap, error::Error, fs, path::PathBuf};
 
 use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
 use serde_json::{Value, json};
 use xml_core::{XmlDiagnostic, auto_close_tag, complete_xml, format_xml, parse_xml};
+use xsd_core::{parse_xsd, resolve_schema_locations, validate_document};
 
 const INITIALIZE_METHOD: &str = "initialize";
 const EXIT_METHOD: &str = "exit";
@@ -44,10 +45,11 @@ impl XmlLanguageServer {
 
         self.documents.insert(uri.clone(), text.clone());
         let diagnostics = parse_xml(&text).diagnostics;
+        let schema_diagnostics = self.schema_diagnostics(&uri, &text);
         connection.sender.send(
             Notification {
                 method: PUBLISH_DIAGNOSTICS_METHOD.to_owned(),
-                params: diagnostics_params(&uri, &text, &diagnostics),
+                params: diagnostics_params(&uri, &text, &diagnostics, &schema_diagnostics),
             }
             .into(),
         )?;
@@ -88,6 +90,45 @@ impl XmlLanguageServer {
         Some(json!({"isIncomplete": false, "items": items}))
     }
 
+    fn schema_diagnostics(&self, uri: &str, source: &str) -> Vec<Value> {
+        let document_path = uri_to_path(uri);
+        let references = match resolve_schema_locations(source, &document_path) {
+            Ok(references) => references,
+            Err(error) => return vec![xsd_error_diagnostic(error)],
+        };
+        let mut diagnostics = Vec::new();
+
+        for reference in references {
+            let schema_source = match fs::read_to_string(&reference.path) {
+                Ok(source) => source,
+                Err(error) => {
+                    diagnostics.push(xsd_error_diagnostic(format!(
+                        "impossible de lire le schéma {} : {error}",
+                        reference.path.display()
+                    )));
+                    continue;
+                }
+            };
+            let schema = match parse_xsd(&schema_source) {
+                Ok(schema) => schema,
+                Err(error) => {
+                    diagnostics.push(xsd_error_diagnostic(format!(
+                        "schéma XSD invalide ({}): {error}",
+                        reference.path.display()
+                    )));
+                    continue;
+                }
+            };
+            diagnostics.extend(
+                validate_document(source, &schema)
+                    .into_iter()
+                    .map(|diagnostic| xsd_error_diagnostic(diagnostic.message)),
+            );
+        }
+
+        diagnostics
+    }
+
     fn formatting(&self, params: &Value) -> Option<Value> {
         let uri = params.get("textDocument")?.get("uri")?.as_str()?;
         let source = self.documents.get(uri)?;
@@ -113,6 +154,25 @@ impl XmlLanguageServer {
             .to_owned();
         Some((uri, text))
     }
+}
+
+fn uri_to_path(uri: &str) -> PathBuf {
+    let raw = uri.strip_prefix("file://").unwrap_or(uri);
+    let raw = raw.strip_prefix('/').unwrap_or(raw);
+    PathBuf::from(raw.replace("%20", " "))
+}
+
+fn xsd_error_diagnostic(diagnostic: impl Into<String>) -> Value {
+    json!({
+        "range": {
+            "start": {"line": 0, "character": 0},
+            "end": {"line": 0, "character": 0},
+        },
+        "severity": 1,
+        "source": "xml-lsp",
+        "code": "xsd-validation",
+        "message": diagnostic.into(),
+    })
 }
 
 fn server_capabilities() -> Value {
@@ -162,7 +222,12 @@ fn position_at(source: &str, offset: usize) -> Value {
     json!({ "line": line, "character": character })
 }
 
-fn diagnostics_params(uri: &str, source: &str, diagnostics: &[XmlDiagnostic]) -> Value {
+fn diagnostics_params(
+    uri: &str,
+    source: &str,
+    diagnostics: &[XmlDiagnostic],
+    schema_diagnostics: &[Value],
+) -> Value {
     let diagnostics = diagnostics.iter().map(|diagnostic| {
         let position = position_at(source, diagnostic.offset);
         json!({
@@ -177,9 +242,11 @@ fn diagnostics_params(uri: &str, source: &str, diagnostics: &[XmlDiagnostic]) ->
         })
     });
 
+    let mut diagnostics = diagnostics.collect::<Vec<_>>();
+    diagnostics.extend(schema_diagnostics.iter().cloned());
     json!({
         "uri": uri,
-        "diagnostics": diagnostics.collect::<Vec<_>>(),
+        "diagnostics": diagnostics,
     })
 }
 
@@ -560,5 +627,38 @@ mod tests {
             position_at("é\n😀<root>", 7),
             json!({"line": 1, "character": 2})
         );
+    }
+
+    #[test]
+    fn publishes_xsd_diagnostics_for_a_referenced_schema() {
+        let schema_path =
+            std::env::temp_dir().join(format!("xml-lsp-schema-{}.xsd", std::process::id()));
+        std::fs::write(
+            &schema_path,
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"><xs:element name="root"/></xs:schema>"#,
+        )
+        .expect("schema should be written");
+
+        let document_path = schema_path.with_file_name("document.xml");
+        let uri = format!(
+            "file:///{}",
+            document_path.to_string_lossy().replace('\\', "/")
+        );
+        let source = format!(
+            "<wrong xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:noNamespaceSchemaLocation=\"{}\" />",
+            schema_path.file_name().unwrap().to_string_lossy()
+        );
+        let server = XmlLanguageServer::new();
+        let diagnostics = server.schema_diagnostics(&uri, &source);
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0]["code"], "xsd-validation");
+        assert!(
+            diagnostics[0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("<wrong>")
+        );
+        std::fs::remove_file(schema_path).expect("schema should be removed");
     }
 }

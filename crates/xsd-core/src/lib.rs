@@ -160,6 +160,30 @@ fn normalize_path(path: &Path) -> PathBuf {
     normalized
 }
 
+/// Retourne le nom du premier élément XML rencontré.
+pub fn root_element_name(source: &str) -> Option<String> {
+    let mut reader = Reader::from_str(source);
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element)) | Ok(Event::Empty(element)) => {
+                return Some(String::from_utf8_lossy(element.name().as_ref()).into_owned());
+            }
+            Ok(Event::Eof) | Err(_) => return None,
+            Ok(_) => {}
+        }
+    }
+}
+
+/// Vérifie le document XML contre les éléments déclarés par le schéma.
+pub fn validate_document(source: &str, schema: &XsdSchema) -> Vec<XsdDiagnostic> {
+    match root_element_name(source) {
+        Some(root) => validate_root(&root, schema),
+        None => vec![XsdDiagnostic {
+            message: "document XML sans élément racine".to_owned(),
+        }],
+    }
+}
+
 /// Vérifie que le nom de la racine XML est déclaré par le schéma.
 pub fn validate_root(root_name: &str, schema: &XsdSchema) -> Vec<XsdDiagnostic> {
     if schema
