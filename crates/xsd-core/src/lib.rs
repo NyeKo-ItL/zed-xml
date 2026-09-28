@@ -422,6 +422,11 @@ pub fn root_element_name(source: &str) -> Option<String> {
     }
 }
 
+struct XmlFrame {
+    name: String,
+    children: Vec<String>,
+}
+
 /// Vérifie le document XML contre les éléments déclarés par le schéma.
 pub fn validate_document(source: &str, schema: &XsdSchema) -> Vec<XsdDiagnostic> {
     let mut diagnostics = match root_element_name(source) {
@@ -431,39 +436,86 @@ pub fn validate_document(source: &str, schema: &XsdSchema) -> Vec<XsdDiagnostic>
         }],
     };
     let mut reader = Reader::from_str(source);
-    let mut stack: Vec<String> = Vec::new();
+    let mut stack: Vec<XmlFrame> = Vec::new();
 
     loop {
         match reader.read_event() {
             Ok(Event::Start(element)) => {
                 let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
-                if let Some(parent) = stack.last()
-                    && !is_allowed_child(schema, parent, &name)
-                {
-                    diagnostics.push(XsdDiagnostic {
-                        message: format!("élément <{name}> interdit dans <{parent}>"),
-                    });
+                if let Some(parent) = stack.last_mut() {
+                    if !is_allowed_child(schema, &parent.name, &name) {
+                        diagnostics.push(XsdDiagnostic {
+                            message: format!("élément <{name}> interdit dans <{}>", parent.name),
+                        });
+                    }
+                    parent.children.push(name.clone());
                 }
-                stack.push(name);
+                stack.push(XmlFrame {
+                    name,
+                    children: Vec::new(),
+                });
             }
             Ok(Event::Empty(element)) => {
                 let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
-                if let Some(parent) = stack.last()
-                    && !is_allowed_child(schema, parent, &name)
-                {
-                    diagnostics.push(XsdDiagnostic {
-                        message: format!("élément <{name}> interdit dans <{parent}>"),
-                    });
+                if let Some(parent) = stack.last_mut() {
+                    if !is_allowed_child(schema, &parent.name, &name) {
+                        diagnostics.push(XsdDiagnostic {
+                            message: format!("élément <{name}> interdit dans <{}>", parent.name),
+                        });
+                    }
+                    parent.children.push(name);
                 }
             }
             Ok(Event::End(_)) => {
-                stack.pop();
+                if let Some(frame) = stack.pop() {
+                    diagnostics.extend(validate_sequence_frame(&frame, schema));
+                }
             }
             Ok(Event::Eof) | Err(_) => break,
             Ok(_) => {}
         }
     }
 
+    diagnostics
+}
+
+fn validate_sequence_frame(frame: &XmlFrame, schema: &XsdSchema) -> Vec<XsdDiagnostic> {
+    let Some(expected) = schema.children.get(&frame.name) else {
+        return Vec::new();
+    };
+    let mut diagnostics = Vec::new();
+    let mut previous_index = 0;
+    for child in &frame.children {
+        if let Some(index) = expected.iter().position(|name| name == child) {
+            if index < previous_index {
+                diagnostics.push(XsdDiagnostic {
+                    message: format!("ordre inattendu de <{child}> dans <{}>", frame.name),
+                });
+            }
+            previous_index = index;
+        }
+    }
+    for child in expected {
+        let count = frame.children.iter().filter(|name| *name == child).count();
+        if let Some(element) = schema
+            .elements
+            .iter()
+            .find(|element| element.name == *child)
+        {
+            if count < element.occurs.min {
+                diagnostics.push(XsdDiagnostic {
+                    message: format!("élément <{child}> requis dans <{}>", frame.name),
+                });
+            }
+            if let Some(max) = element.occurs.max
+                && count > max
+            {
+                diagnostics.push(XsdDiagnostic {
+                    message: format!("trop d’éléments <{child}> dans <{}>", frame.name),
+                });
+            }
+        }
+    }
     diagnostics
 }
 
@@ -590,6 +642,36 @@ mod tests {
         assert_eq!(
             validate_document("<root><other /></root>", &schema)[0].message,
             "élément <other> interdit dans <root>"
+        );
+    }
+
+    #[test]
+    fn validates_sequence_order_and_cardinality() {
+        let schema = parse_xsd(
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+                <xs:element name="root"><xs:complexType><xs:sequence>
+                    <xs:element name="first"/>
+                    <xs:element name="second" minOccurs="0" maxOccurs="2"/>
+                </xs:sequence></xs:complexType></xs:element>
+            </xs:schema>"#,
+        )
+        .unwrap();
+
+        let order = validate_document("<root><second/><first/></root>", &schema);
+        assert!(
+            order
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("ordre inattendu"))
+        );
+        assert!(
+            validate_document("<root></root>", &schema)[0]
+                .message
+                .contains("<first> requis")
+        );
+        assert!(
+            validate_document("<root><first/><second/><second/><second/></root>", &schema)
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("trop d’éléments <second>"))
         );
     }
 
