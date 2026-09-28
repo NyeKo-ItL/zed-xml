@@ -453,6 +453,37 @@ mod tests {
     }
 
     #[test]
+    fn indents_deeply_nested_documents_with_existing_whitespace() {
+        let source = r#"<?xml version="1.0" encoding="iso-8859-1" ?>
+<SampleEnvelope>
+<Connection>
+<EnvelopeNumber>EXAMPLE-001</EnvelopeNumber>
+<Timestamp>
+<Date>2099-01-02</Date>
+<Time>03:04:05</Time>
+</Timestamp>
+</Connection>
+<Payload>
+<Header>
+<TransportData>
+<AccessId />
+<Direction />
+</TransportData>
+</Header>
+<Charges>
+<Charge><Code>TEST</Code><Amount>123</Amount></Charge>
+</Charges>
+</Payload>
+</SampleEnvelope>"#;
+        let formatted = format_xml(source).expect("nested XML should be formatted");
+        assert!(formatted.contains("\n  <Connection>\n    <EnvelopeNumber>"));
+        assert!(formatted.contains("\n      <Date>2099-01-02</Date>"));
+        assert!(formatted.contains("\n        <AccessId />"));
+        assert!(formatted.contains("\n    <Charges>\n      <Charge>\n        <Code>"));
+        assert_eq!(format_xml(&formatted).unwrap(), formatted);
+    }
+
+    #[test]
     fn preserves_mixed_content_and_comments() {
         let formatted = format_xml("<root>Hello <b>world</b><!-- note --></root>").unwrap();
         assert_eq!(formatted, "<root>Hello <b>world</b><!-- note --></root>\n");

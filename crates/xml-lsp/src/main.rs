@@ -1407,6 +1407,22 @@ mod tests {
     }
 
     #[test]
+    fn formats_nested_xml_through_lsp_request() {
+        let uri = "file:///document.xml";
+        let source =
+            "<?xml version=\"1.0\" encoding=\"iso-8859-1\" ?><root><outer><inner /></outer></root>";
+        let mut server = XmlLanguageServer::new();
+        server.documents.insert(uri.to_owned(), source.to_owned());
+        let response = server
+            .formatting(&json!({"textDocument": {"uri": uri}}))
+            .expect("formatting should return a workspace edit");
+        assert_eq!(
+            response[0]["newText"],
+            "<?xml version=\"1.0\" encoding=\"iso-8859-1\" ?>\n<root>\n  <outer>\n    <inner />\n  </outer>\n</root>\n"
+        );
+    }
+
+    #[test]
     fn converts_unicode_offsets_to_utf16_positions() {
         assert_eq!(
             position_at("é\n😀<root>", 7),
