@@ -37,6 +37,7 @@ type SchemaCache = HashMap<PathBuf, (SystemTime, XsdSchema)>;
 struct XmlLanguageServer {
     documents: HashMap<String, String>,
     schema_cache: SchemaCache,
+    schema_index: HashMap<String, Vec<PathBuf>>,
 }
 
 impl XmlLanguageServer {
@@ -44,6 +45,7 @@ impl XmlLanguageServer {
         Self {
             documents: HashMap::new(),
             schema_cache: HashMap::new(),
+            schema_index: HashMap::new(),
         }
     }
 
@@ -177,7 +179,8 @@ impl XmlLanguageServer {
         let document_path = uri_to_path(uri);
         let references = resolve_schema_locations(schema_resolution_source(source), document_path)
             .unwrap_or_default();
-        let (schemas, _) = load_schema_graph(references, &mut self.schema_cache);
+        let (schemas, _) =
+            load_schema_graph(references, &mut self.schema_cache, &mut self.schema_index);
         (!schemas.is_empty()).then(|| merge_schemas(schemas))
     }
 
@@ -242,7 +245,8 @@ impl XmlLanguageServer {
                 Ok(references) => references,
                 Err(error) => return vec![xsd_error_diagnostic(error)],
             };
-        let (schemas, errors) = load_schema_graph(references, &mut self.schema_cache);
+        let (schemas, errors) =
+            load_schema_graph(references, &mut self.schema_cache, &mut self.schema_index);
         let mut diagnostics = errors
             .into_iter()
             .map(xsd_error_diagnostic)
@@ -555,6 +559,7 @@ fn xsd_element_name_offset(source: &str, expected_name: &str) -> Option<usize> {
 fn load_schema_graph(
     references: Vec<xsd_core::SchemaReference>,
     cache: &mut SchemaCache,
+    index: &mut HashMap<String, Vec<PathBuf>>,
 ) -> (Vec<XsdSchema>, Vec<String>) {
     let mut queue = references;
     let mut visited = HashSet::new();
@@ -594,6 +599,12 @@ fn load_schema_graph(
             cache.insert(path.clone(), (modified, schema.clone()));
             schema
         };
+        if let Some(namespace) = &schema.target_namespace {
+            let paths = index.entry(namespace.clone()).or_default();
+            if !paths.contains(&path) {
+                paths.push(path.clone());
+            }
+        }
         match resolve_schema_dependencies(&schema_source, &path) {
             Ok(dependencies) => queue.extend(dependencies),
             Err(error) => errors.push(format!(
@@ -1446,7 +1457,7 @@ mod tests {
             std::env::temp_dir().join(format!("xml-lsp-schema-{}.xsd", std::process::id()));
         std::fs::write(
             &schema_path,
-            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"><xs:element name="root"><xs:complexType><xs:sequence><xs:element name="child"/></xs:sequence></xs:complexType></xs:element></xs:schema>"#,
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:test"><xs:element name="root"><xs:complexType><xs:sequence><xs:element name="child"/></xs:sequence></xs:complexType></xs:element></xs:schema>"#,
         )
         .expect("schema should be written");
 
@@ -1469,6 +1480,12 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("<wrong>")
+        );
+        assert!(
+            server
+                .schema_index
+                .get("urn:test")
+                .is_some_and(|paths| paths.contains(&schema_path))
         );
 
         let completion_source = format!(
