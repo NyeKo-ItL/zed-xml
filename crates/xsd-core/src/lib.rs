@@ -9,6 +9,8 @@ use std::{
 use quick_xml::{Reader, events::Event};
 use regex::Regex;
 
+const MAX_XSD_SOURCE_BYTES: usize = 16 * 1024 * 1024;
+
 /// Cardinalité d'un élément XSD.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct XsdOccurs {
@@ -163,6 +165,9 @@ pub struct LocatedXsdDiagnostic {
 
 /// Parse un `xs:schema`, ses éléments et une première `xs:sequence`.
 pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
+    if source.len() > MAX_XSD_SOURCE_BYTES {
+        return Err("schéma XSD trop volumineux".to_owned());
+    }
     let mut reader = Reader::from_str(source);
     let mut schema = XsdSchema::default();
     let mut element_stack = Vec::new();
@@ -2570,6 +2575,16 @@ mod tests {
                 "document.xml"
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_oversized_xsd_sources() {
+        let source = "<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\">".to_owned()
+            + &"x".repeat(16 * 1024 * 1024);
+        assert_eq!(
+            parse_xsd(&source),
+            Err("schéma XSD trop volumineux".to_owned())
         );
     }
 
