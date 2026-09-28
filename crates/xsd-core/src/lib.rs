@@ -32,6 +32,8 @@ pub struct XsdElement {
     pub occurs: XsdOccurs,
     pub type_name: Option<String>,
     pub form: Option<String>,
+    pub default: Option<String>,
+    pub fixed: Option<String>,
 }
 
 /// Restriction simple portée par un type XSD.
@@ -372,6 +374,8 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                         },
                         type_name: attribute(&element, "type"),
                         form: attribute(&element, "form"),
+                        default: attribute(&element, "default"),
+                        fixed: attribute(&element, "fixed"),
                     });
                     model_stack.push(name.clone());
                     element_stack.push(Some(name));
@@ -568,6 +572,8 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                         },
                         type_name: attribute(&element, "type"),
                         form: attribute(&element, "form"),
+                        default: attribute(&element, "default"),
+                        fixed: attribute(&element, "fixed"),
                     });
                 }
             }
@@ -1251,7 +1257,15 @@ fn validate_text_content(frame: &XmlFrame, schema: &XsdSchema) -> Vec<XsdDiagnos
         .map(str::to_owned)
         .unwrap_or_else(|| format!("__anonymous:{}", frame.name));
     let value = frame.text.trim();
-    let mut diagnostics = validate_list_union(&frame.name, &type_name, value, schema);
+    let mut diagnostics = Vec::new();
+    if let Some(fixed) = &element.fixed
+        && value != fixed
+    {
+        diagnostics.push(XsdDiagnostic {
+            message: format!("contenu de <{}> différent de la valeur fixed", frame.name),
+        });
+    }
+    diagnostics.extend(validate_list_union(&frame.name, &type_name, value, schema));
     diagnostics.extend(validate_builtin_type(&frame.name, &type_name, value));
     let Some(restriction) = schema.restrictions.get(&type_name) else {
         return diagnostics;
@@ -1701,6 +1715,26 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.message.contains("trop d’éléments <second>"))
         );
+    }
+
+    #[test]
+    fn preserves_defaults_and_validates_fixed_values() {
+        let schema = parse_xsd(
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+                <xs:element name="status" default="new"/>
+                <xs:element name="version" fixed="1"/>
+            </xs:schema>"#,
+        )
+        .unwrap();
+
+        assert_eq!(schema.elements[0].default.as_deref(), Some("new"));
+        assert_eq!(schema.elements[1].fixed.as_deref(), Some("1"));
+        assert!(
+            validate_document("<version>2</version>", &schema)[0]
+                .message
+                .contains("fixed")
+        );
+        assert!(validate_document("<version>1</version>", &schema).is_empty());
     }
 
     #[test]
