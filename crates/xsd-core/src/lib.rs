@@ -49,6 +49,7 @@ pub struct XsdRestriction {
     pub max_exclusive: Option<String>,
     pub total_digits: Option<usize>,
     pub fraction_digits: Option<usize>,
+    pub white_space: Option<String>,
     pub pattern: Option<String>,
 }
 
@@ -1317,6 +1318,8 @@ fn validate_text_content(frame: &XmlFrame, schema: &XsdSchema) -> Vec<XsdDiagnos
     let Some(restriction) = schema.restrictions.get(&type_name) else {
         return diagnostics;
     };
+    let normalized = normalize_whitespace(value, restriction.white_space.as_deref());
+    let value = normalized.as_str();
     diagnostics.extend(validate_numeric_facets(
         &frame.name,
         &type_name,
@@ -1363,6 +1366,20 @@ fn validate_text_content(frame: &XmlFrame, schema: &XsdSchema) -> Vec<XsdDiagnos
         });
     }
     diagnostics
+}
+
+fn normalize_whitespace(value: &str, mode: Option<&str>) -> String {
+    match mode {
+        Some("replace") => value
+            .chars()
+            .map(|character| match character {
+                '\t' | '\n' | '\r' => ' ',
+                character => character,
+            })
+            .collect(),
+        Some("collapse") => value.split_whitespace().collect::<Vec<_>>().join(" "),
+        _ => value.to_owned(),
+    }
 }
 
 fn validate_numeric_facets(
@@ -1468,7 +1485,7 @@ fn set_digit_facet(restriction: &mut XsdRestriction, facet: &str, value: usize) 
 fn numeric_facet(name: &str) -> Option<&str> {
     matches!(
         name,
-        "minInclusive" | "maxInclusive" | "minExclusive" | "maxExclusive"
+        "minInclusive" | "maxInclusive" | "minExclusive" | "maxExclusive" | "whiteSpace"
     )
     .then_some(name)
 }
@@ -1479,6 +1496,7 @@ fn set_numeric_facet(restriction: &mut XsdRestriction, facet: &str, value: Strin
         "maxInclusive" => restriction.max_inclusive = Some(value),
         "minExclusive" => restriction.min_exclusive = Some(value),
         "maxExclusive" => restriction.max_exclusive = Some(value),
+        "whiteSpace" => restriction.white_space = Some(value),
         _ => {}
     }
 }
@@ -1811,6 +1829,26 @@ mod tests {
             validate_document("<root><first/><second/><second/><second/></root>", &schema)
                 .iter()
                 .any(|diagnostic| diagnostic.message.contains("trop d’éléments <second>"))
+        );
+    }
+
+    #[test]
+    fn normalizes_whitespace_restrictions_before_validation() {
+        let schema = parse_xsd(
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+                <xs:simpleType name="Code"><xs:restriction base="xs:string">
+                    <xs:whiteSpace value="collapse"/><xs:length value="3"/>
+                </xs:restriction></xs:simpleType>
+                <xs:element name="code" type="Code"/>
+            </xs:schema>"#,
+        )
+        .unwrap();
+
+        assert!(validate_document("<code> A B </code>", &schema).is_empty());
+        assert!(
+            validate_document("<code>A B C</code>", &schema)[0]
+                .message
+                .contains("longueur")
         );
     }
 
