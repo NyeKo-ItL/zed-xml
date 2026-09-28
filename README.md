@@ -34,6 +34,18 @@ Then install the repository as a development extension in Zed. The **Rebuild** b
 
 The native server is still an evolving subset of XML/XSD support. Full XSD conformance, XML catalogs and release-time native binary distribution remain separate tasks.
 
+If Zed has a user or project formatter override, force XML formatting through the LSP with this setting:
+
+```json
+{
+  "languages": {
+    "XML": {
+      "formatter": "language_server"
+    }
+  }
+}
+```
+
 ## Development extension
 
 1. Open the repository in Zed.
