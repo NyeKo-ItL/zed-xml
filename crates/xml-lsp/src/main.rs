@@ -27,6 +27,7 @@ const FORMATTING_METHOD: &str = "textDocument/formatting";
 const RANGE_FORMATTING_METHOD: &str = "textDocument/rangeFormatting";
 const SYMBOL_METHOD: &str = "textDocument/documentSymbol";
 const HOVER_METHOD: &str = "textDocument/hover";
+const DEFINITION_METHOD: &str = "textDocument/definition";
 const COMPLETION_METHOD: &str = "textDocument/completion";
 
 type SchemaCache = HashMap<PathBuf, (SystemTime, XsdSchema)>;
@@ -198,6 +199,24 @@ impl XmlLanguageServer {
         }
 
         diagnostics
+    }
+
+    fn definition(&self, params: &Value) -> Option<Value> {
+        let uri = params.get("textDocument")?.get("uri")?.as_str()?;
+        let source = self.documents.get(uri)?;
+        let position = params.get("position")?;
+        let line = position.get("line")?.as_u64()? as usize;
+        let character = position.get("character")?.as_u64()? as usize;
+        let offset = offset_at(source, line, character);
+        let name = element_name_at(source, offset)?;
+        let declaration = source.find(&format!("<{name}"))?;
+        Some(json!([{
+            "uri": uri,
+            "range": {
+                "start": position_at(source, declaration),
+                "end": position_at(source, declaration + name.len() + 1),
+            },
+        }]))
     }
 
     fn hover(&mut self, params: &Value) -> Option<Value> {
@@ -421,6 +440,7 @@ fn server_capabilities() -> Value {
         "documentRangeFormattingProvider": true,
         "documentSymbolProvider": true,
         "hoverProvider": true,
+        "definitionProvider": true,
     })
 }
 
@@ -514,6 +534,16 @@ fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
                     connection
                         .sender
                         .send(Response::new_ok(request.id, symbols).into())?;
+                    continue;
+                }
+
+                if request.method == DEFINITION_METHOD {
+                    let definition = server
+                        .definition(&request.params)
+                        .unwrap_or_else(|| json!([]));
+                    connection
+                        .sender
+                        .send(Response::new_ok(request.id, definition).into())?;
                     continue;
                 }
 
@@ -611,6 +641,7 @@ mod tests {
                             "documentRangeFormattingProvider": true,
                             "documentSymbolProvider": true,
                             "hoverProvider": true,
+                            "definitionProvider": true,
                         }
                     }))
                 );
@@ -908,6 +939,27 @@ mod tests {
             .expect("exit should be sent");
 
         server_thread.join().expect("server thread should stop");
+    }
+
+    #[test]
+    fn resolves_local_xml_element_definitions() {
+        let mut server = XmlLanguageServer::new();
+        server.documents.insert(
+            "file:///document.xml".to_owned(),
+            "<root><child /></root>".to_owned(),
+        );
+        let definition = server
+            .definition(&json!({
+                "textDocument": {"uri": "file:///document.xml"},
+                "position": {"line": 0, "character": 12},
+            }))
+            .unwrap();
+
+        assert_eq!(definition[0]["uri"], "file:///document.xml");
+        assert_eq!(
+            definition[0]["range"]["start"],
+            json!({"line": 0, "character": 6})
+        );
     }
 
     #[test]
