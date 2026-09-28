@@ -5,6 +5,7 @@ use std::{
     error::Error,
     fs,
     path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
@@ -24,14 +25,18 @@ const PUBLISH_DIAGNOSTICS_METHOD: &str = "textDocument/publishDiagnostics";
 const FORMATTING_METHOD: &str = "textDocument/formatting";
 const COMPLETION_METHOD: &str = "textDocument/completion";
 
+type SchemaCache = HashMap<PathBuf, (SystemTime, XsdSchema)>;
+
 struct XmlLanguageServer {
     documents: HashMap<String, String>,
+    schema_cache: SchemaCache,
 }
 
 impl XmlLanguageServer {
     fn new() -> Self {
         Self {
             documents: HashMap::new(),
+            schema_cache: HashMap::new(),
         }
     }
 
@@ -92,14 +97,14 @@ impl XmlLanguageServer {
         ))
     }
 
-    fn completion(&self, params: &Value) -> Option<Value> {
+    fn completion(&mut self, params: &Value) -> Option<Value> {
         let uri = params.get("textDocument")?.get("uri")?.as_str()?;
-        let source = self.documents.get(uri)?;
+        let source = self.documents.get(uri)?.clone();
         let position = params.get("position")?;
         let line = position.get("line")?.as_u64()? as usize;
         let character = position.get("character")?.as_u64()? as usize;
-        let offset = offset_at(source, line, character);
-        let mut items = complete_xml(source, offset)
+        let offset = offset_at(&source, line, character);
+        let mut items = complete_xml(&source, offset)
             .into_iter()
             .map(|completion| {
                 json!({
@@ -108,27 +113,27 @@ impl XmlLanguageServer {
                 })
             })
             .collect::<Vec<_>>();
-        if let Some(completion) = auto_close_tag(source, offset) {
+        if let Some(completion) = auto_close_tag(&source, offset) {
             items.push(json!({
                 "label": completion.label,
                 "insertText": completion.insert_text,
             }));
         }
-        items.extend(self.schema_completions(uri, source, offset));
-        items.extend(self.schema_attributes(uri, source, offset));
-        items.extend(self.schema_attribute_values(uri, source, offset));
+        items.extend(self.schema_completions(uri, &source, offset));
+        items.extend(self.schema_attributes(uri, &source, offset));
+        items.extend(self.schema_attribute_values(uri, &source, offset));
         Some(json!({"isIncomplete": false, "items": items}))
     }
 
-    fn load_schema(&self, uri: &str, source: &str) -> Option<XsdSchema> {
+    fn load_schema(&mut self, uri: &str, source: &str) -> Option<XsdSchema> {
         let document_path = uri_to_path(uri);
         let references = resolve_schema_locations(schema_resolution_source(source), document_path)
             .unwrap_or_default();
-        let (schemas, _) = load_schema_graph(references);
+        let (schemas, _) = load_schema_graph(references, &mut self.schema_cache);
         (!schemas.is_empty()).then(|| merge_schemas(schemas))
     }
 
-    fn schema_completions(&self, uri: &str, source: &str, offset: usize) -> Vec<Value> {
+    fn schema_completions(&mut self, uri: &str, source: &str, offset: usize) -> Vec<Value> {
         self.load_schema(uri, source)
             .into_iter()
             .flat_map(|schema| complete_elements(source, offset, &schema))
@@ -141,7 +146,7 @@ impl XmlLanguageServer {
             .collect()
     }
 
-    fn schema_attributes(&self, uri: &str, source: &str, offset: usize) -> Vec<Value> {
+    fn schema_attributes(&mut self, uri: &str, source: &str, offset: usize) -> Vec<Value> {
         self.load_schema(uri, source)
             .into_iter()
             .flat_map(|schema| complete_attributes(source, offset, &schema))
@@ -154,7 +159,7 @@ impl XmlLanguageServer {
             .collect()
     }
 
-    fn schema_attribute_values(&self, uri: &str, source: &str, offset: usize) -> Vec<Value> {
+    fn schema_attribute_values(&mut self, uri: &str, source: &str, offset: usize) -> Vec<Value> {
         self.load_schema(uri, source)
             .into_iter()
             .flat_map(|schema| complete_attribute_values(source, offset, &schema))
@@ -167,14 +172,14 @@ impl XmlLanguageServer {
             .collect()
     }
 
-    fn schema_diagnostics(&self, uri: &str, source: &str) -> Vec<Value> {
+    fn schema_diagnostics(&mut self, uri: &str, source: &str) -> Vec<Value> {
         let document_path = uri_to_path(uri);
         let references =
             match resolve_schema_locations(schema_resolution_source(source), &document_path) {
                 Ok(references) => references,
                 Err(error) => return vec![xsd_error_diagnostic(error)],
             };
-        let (schemas, errors) = load_schema_graph(references);
+        let (schemas, errors) = load_schema_graph(references, &mut self.schema_cache);
         let mut diagnostics = errors
             .into_iter()
             .map(xsd_error_diagnostic)
@@ -228,7 +233,10 @@ fn uri_to_path(uri: &str) -> PathBuf {
     PathBuf::from(raw.replace("%20", " "))
 }
 
-fn load_schema_graph(references: Vec<xsd_core::SchemaReference>) -> (Vec<XsdSchema>, Vec<String>) {
+fn load_schema_graph(
+    references: Vec<xsd_core::SchemaReference>,
+    cache: &mut SchemaCache,
+) -> (Vec<XsdSchema>, Vec<String>) {
     let mut queue = references;
     let mut visited = HashSet::new();
     let mut schemas = Vec::new();
@@ -239,6 +247,9 @@ fn load_schema_graph(references: Vec<xsd_core::SchemaReference>) -> (Vec<XsdSche
         if !visited.insert(path.clone()) {
             continue;
         }
+        let modified = fs::metadata(&path)
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(UNIX_EPOCH);
         let schema_source = match fs::read_to_string(&path) {
             Ok(source) => source,
             Err(error) => {
@@ -249,12 +260,20 @@ fn load_schema_graph(references: Vec<xsd_core::SchemaReference>) -> (Vec<XsdSche
                 continue;
             }
         };
-        let schema = match parse_xsd(&schema_source) {
-            Ok(schema) => schema,
-            Err(error) => {
-                errors.push(format!("schéma XSD invalide ({}): {error}", path.display()));
-                continue;
-            }
+        let schema = if let Some((cached_time, schema)) = cache.get(&path)
+            && *cached_time == modified
+        {
+            schema.clone()
+        } else {
+            let schema = match parse_xsd(&schema_source) {
+                Ok(schema) => schema,
+                Err(error) => {
+                    errors.push(format!("schéma XSD invalide ({}): {error}", path.display()));
+                    continue;
+                }
+            };
+            cache.insert(path.clone(), (modified, schema.clone()));
+            schema
         };
         match resolve_schema_dependencies(&schema_source, &path) {
             Ok(dependencies) => queue.extend(dependencies),
@@ -780,7 +799,7 @@ mod tests {
             "<wrong xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:noNamespaceSchemaLocation=\"{}\" />",
             schema_path.file_name().unwrap().to_string_lossy()
         );
-        let server = XmlLanguageServer::new();
+        let mut server = XmlLanguageServer::new();
         let diagnostics = server.schema_diagnostics(&uri, &source);
 
         assert_eq!(diagnostics.len(), 1);

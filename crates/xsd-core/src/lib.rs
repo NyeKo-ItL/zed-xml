@@ -26,7 +26,7 @@ impl Default for XsdOccurs {
 }
 
 /// Élément déclaré par un schéma XSD.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct XsdElement {
     pub name: String,
     pub occurs: XsdOccurs,
@@ -49,7 +49,7 @@ pub struct XsdRestriction {
 }
 
 /// Schéma XSD minimal.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq, Clone)]
 pub struct XsdSchema {
     pub target_namespace: Option<String>,
     pub elements: Vec<XsdElement>,
