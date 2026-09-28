@@ -36,6 +36,7 @@ pub struct XsdElement {
 /// Restriction simple portée par un type XSD.
 #[derive(Debug, Default, PartialEq, Eq, Clone)]
 pub struct XsdRestriction {
+    pub length: Option<usize>,
     pub min_length: Option<usize>,
     pub max_length: Option<usize>,
     pub pattern: Option<String>,
@@ -124,7 +125,7 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                         .or_default()
                         .pattern = Some(pattern);
                 }
-                if matches!(current_name, "minLength" | "maxLength")
+                if matches!(current_name, "length" | "minLength" | "maxLength")
                     && let Some(simple_type) = simple_type_stack
                         .iter()
                         .rev()
@@ -132,10 +133,10 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                     && let Some(value) = parse_optional_usize(attribute(&element, "value"))?
                 {
                     let restriction = schema.restrictions.entry(simple_type.clone()).or_default();
-                    if current_name == "minLength" {
-                        restriction.min_length = Some(value);
-                    } else {
-                        restriction.max_length = Some(value);
+                    match current_name {
+                        "length" => restriction.length = Some(value),
+                        "minLength" => restriction.min_length = Some(value),
+                        _ => restriction.max_length = Some(value),
                     }
                 }
                 simple_type_stack.push(simple_name);
@@ -237,7 +238,7 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                         .or_default()
                         .pattern = Some(pattern);
                 }
-                if matches!(current_name, "minLength" | "maxLength")
+                if matches!(current_name, "length" | "minLength" | "maxLength")
                     && let Some(simple_type) = simple_type_stack
                         .iter()
                         .rev()
@@ -245,10 +246,10 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                     && let Some(value) = parse_optional_usize(attribute(&element, "value"))?
                 {
                     let restriction = schema.restrictions.entry(simple_type.clone()).or_default();
-                    if current_name == "minLength" {
-                        restriction.min_length = Some(value);
-                    } else {
-                        restriction.max_length = Some(value);
+                    match current_name {
+                        "length" => restriction.length = Some(value),
+                        "minLength" => restriction.min_length = Some(value),
+                        _ => restriction.max_length = Some(value),
                     }
                 }
                 if current_name == "attribute"
@@ -693,6 +694,16 @@ fn validate_text_content(frame: &XmlFrame, schema: &XsdSchema) -> Vec<XsdDiagnos
         return diagnostics;
     };
     let length = value.chars().count();
+    if let Some(expected) = restriction.length
+        && length != expected
+    {
+        diagnostics.push(XsdDiagnostic {
+            message: format!(
+                "contenu de <{}> de longueur incorrecte (attendu {expected} caractères)",
+                frame.name
+            ),
+        });
+    }
     if let Some(min) = restriction.min_length
         && length < min
     {
@@ -1048,6 +1059,27 @@ mod tests {
                 .contains("integer")
         );
         assert!(validate_document("<price>12.50</price>", &schema).is_empty());
+    }
+
+    #[test]
+    fn validates_exact_length_restrictions() {
+        let schema = parse_xsd(
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+                <xs:simpleType name="Code"><xs:restriction base="xs:string">
+                    <xs:length value="3"/>
+                </xs:restriction></xs:simpleType>
+                <xs:element name="code" type="Code"/>
+            </xs:schema>"#,
+        )
+        .unwrap();
+
+        assert_eq!(schema.restrictions["Code"].length, Some(3));
+        assert!(
+            validate_document("<code>AB</code>", &schema)[0]
+                .message
+                .contains("longueur incorrecte")
+        );
+        assert!(validate_document("<code>ABC</code>", &schema).is_empty());
     }
 
     #[test]
