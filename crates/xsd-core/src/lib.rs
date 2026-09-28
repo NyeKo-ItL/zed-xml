@@ -73,6 +73,7 @@ pub struct XsdSchema {
     pub unions: HashMap<String, Vec<String>>,
     pub attribute_groups: HashMap<String, Vec<String>>,
     pub model_groups: HashMap<String, Vec<String>>,
+    pub substitution_groups: HashMap<String, Vec<String>>,
     pub any_children: HashMap<String, bool>,
     pub any_attributes: HashMap<String, bool>,
     pub complex_extensions: HashMap<String, String>,
@@ -108,6 +109,7 @@ pub fn merge_schemas(schemas: impl IntoIterator<Item = XsdSchema>) -> XsdSchema 
         merged.unions.extend(schema.unions);
         merge_string_lists(&mut merged.attribute_groups, schema.attribute_groups);
         merge_string_lists(&mut merged.model_groups, schema.model_groups);
+        merge_string_lists(&mut merged.substitution_groups, schema.substitution_groups);
         merged.any_children.extend(schema.any_children);
         merged.any_attributes.extend(schema.any_attributes);
         merged.complex_extensions.extend(schema.complex_extensions);
@@ -396,6 +398,13 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                     }
                 }
                 if let Some(name) = declared_name {
+                    if let Some(head) = attribute(&element, "substitutionGroup") {
+                        schema
+                            .substitution_groups
+                            .entry(head)
+                            .or_default()
+                            .push(name.clone());
+                    }
                     schema.elements.push(XsdElement {
                         name: name.clone(),
                         occurs: XsdOccurs {
@@ -611,6 +620,13 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                                 .or_default()
                                 .push(name.clone());
                         }
+                    }
+                    if let Some(head) = attribute(&element, "substitutionGroup") {
+                        schema
+                            .substitution_groups
+                            .entry(head)
+                            .or_default()
+                            .push(name.clone());
                     }
                     schema.elements.push(XsdElement {
                         name,
@@ -1155,6 +1171,16 @@ pub fn complete_elements(source: &str, offset: usize, schema: &XsdSchema) -> Vec
             }
             names.extend(schema.choices.get(parent).cloned().unwrap_or_default());
             names.extend(schema.alls.get(parent).cloned().unwrap_or_default());
+            let heads = names.clone();
+            for head in heads {
+                names.extend(
+                    schema
+                        .substitution_groups
+                        .get(&head)
+                        .cloned()
+                        .unwrap_or_default(),
+                );
+            }
             names.sort();
             names.dedup();
             names
@@ -1351,7 +1377,17 @@ fn validate_sequence_frame(frame: &XmlFrame, schema: &XsdSchema) -> Vec<XsdDiagn
         }
     }
     for child in expected {
-        let count = frame.children.iter().filter(|name| *name == child).count();
+        let count = frame
+            .children
+            .iter()
+            .filter(|name| {
+                *name == child
+                    || schema
+                        .substitution_groups
+                        .get(child)
+                        .is_some_and(|members| members.iter().any(|member| member == *name))
+            })
+            .count();
         if let Some(element) = schema
             .elements
             .iter()
@@ -1706,6 +1742,16 @@ fn validate_attributes(
     diagnostics
 }
 
+fn child_allowed_by_substitution(schema: &XsdSchema, allowed: &[String], child: &str) -> bool {
+    allowed.iter().any(|name| {
+        name == child
+            || schema
+                .substitution_groups
+                .get(name)
+                .is_some_and(|members| members.iter().any(|member| member == child))
+    })
+}
+
 fn is_allowed_child(schema: &XsdSchema, parent: &str, child: &str) -> bool {
     let sequence = schema.children.get(parent);
     let choice = schema.choices.get(parent);
@@ -1716,9 +1762,9 @@ fn is_allowed_child(schema: &XsdSchema, parent: &str, child: &str) -> bool {
     if sequence.is_none() && choice.is_none() && all.is_none() {
         return true;
     }
-    sequence.is_some_and(|children| children.iter().any(|name| name == child))
-        || choice.is_some_and(|children| children.iter().any(|name| name == child))
-        || all.is_some_and(|children| children.iter().any(|name| name == child))
+    sequence.is_some_and(|children| child_allowed_by_substitution(schema, children, child))
+        || choice.is_some_and(|children| child_allowed_by_substitution(schema, children, child))
+        || all.is_some_and(|children| child_allowed_by_substitution(schema, children, child))
 }
 
 /// Vérifie que le nom de la racine XML est déclaré par le schéma.
@@ -2407,6 +2453,27 @@ mod tests {
                 insert_text: "child".to_owned(),
             }]
         );
+    }
+
+    #[test]
+    fn supports_substitution_groups_in_validation_and_completion() {
+        let schema = parse_xsd(
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+                <xs:element name="head"/>
+                <xs:element name="member" substitutionGroup="head"/>
+                <xs:element name="root"><xs:complexType><xs:sequence>
+                    <xs:element ref="head"/>
+                </xs:sequence></xs:complexType></xs:element>
+            </xs:schema>"#,
+        )
+        .unwrap();
+        let source = "<root><";
+        assert!(
+            complete_elements(source, source.len(), &schema)
+                .iter()
+                .any(|completion| completion.label == "member")
+        );
+        assert!(validate_document("<root><member /></root>", &schema).is_empty());
     }
 
     #[test]
