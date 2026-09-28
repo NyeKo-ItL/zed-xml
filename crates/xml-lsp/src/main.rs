@@ -212,23 +212,34 @@ impl XmlLanguageServer {
         diagnostics
     }
 
-    fn references(&self, params: &Value) -> Option<Value> {
+    fn references(&mut self, params: &Value) -> Option<Value> {
         let uri = params.get("textDocument")?.get("uri")?.as_str()?;
-        let source = self.documents.get(uri)?;
+        let source = self.documents.get(uri)?.clone();
         let position = params.get("position")?;
         let line = position.get("line")?.as_u64()? as usize;
         let character = position.get("character")?.as_u64()? as usize;
-        let offset = offset_at(source, line, character);
-        let name = element_name_at(source, offset)?;
+        let offset = offset_at(&source, line, character);
+        let name = element_name_at(&source, offset)?;
         let mut locations = Vec::new();
+        if let Some((path, schema_source, declaration_offset)) =
+            self.xsd_definition(uri, &source, &name)
+        {
+            locations.push(json!({
+                "uri": path_to_uri(&path),
+                "range": {
+                    "start": position_at(&schema_source, declaration_offset),
+                    "end": position_at(&schema_source, declaration_offset + name.len()),
+                },
+            }));
+        }
         let mut search_from = 0usize;
         while let Some(relative) = source[search_from..].find(&format!("<{name}")) {
             let start = search_from + relative;
             locations.push(json!({
                 "uri": uri,
                 "range": {
-                    "start": position_at(source, start),
-                    "end": position_at(source, start + name.len() + 1),
+                    "start": position_at(&source, start),
+                    "end": position_at(&source, start + name.len() + 1),
                 },
             }));
             search_from = start + name.len() + 1;
@@ -1181,6 +1192,32 @@ mod tests {
             position_at(schema_source, expected_offset + "root".len())
         );
 
+        std::fs::remove_file(schema_path).expect("schema should be removed");
+    }
+
+    #[test]
+    fn finds_xsd_and_xml_element_references() {
+        let schema_path =
+            std::env::temp_dir().join(format!("xml-lsp-references-{}.xsd", std::process::id()));
+        let schema_source = r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"><xs:element name="root"/></xs:schema>"#;
+        std::fs::write(&schema_path, schema_source).expect("schema should be written");
+        let uri = path_to_uri(&schema_path.with_file_name("references.xml"));
+        let schema_name = schema_path.file_name().unwrap().to_string_lossy();
+        let source = format!(
+            "<root xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:noNamespaceSchemaLocation=\"{schema_name}\"><root /></root>"
+        );
+        let mut server = XmlLanguageServer::new();
+        server.documents.insert(uri.clone(), source);
+        let references = server
+            .references(&json!({
+                "textDocument": {"uri": uri},
+                "position": {"line": 0, "character": 5},
+            }))
+            .expect("references should be returned");
+        assert_eq!(references.as_array().unwrap().len(), 3);
+        assert_eq!(references[0]["uri"], path_to_uri(&schema_path));
+        assert_eq!(references[1]["uri"], uri);
+        assert_eq!(references[2]["uri"], uri);
         std::fs::remove_file(schema_path).expect("schema should be removed");
     }
 
