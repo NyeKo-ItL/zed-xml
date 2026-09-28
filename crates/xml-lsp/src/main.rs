@@ -1,13 +1,18 @@
 //! Serveur LSP XML natif.
 
-use std::{collections::HashMap, error::Error, fs, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    error::Error,
+    fs,
+    path::PathBuf,
+};
 
 use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
 use serde_json::{Value, json};
 use xml_core::{XmlDiagnostic, auto_close_tag, complete_xml, format_xml, parse_xml};
 use xsd_core::{
-    complete_attribute_values, complete_attributes, complete_elements, parse_xsd,
-    resolve_schema_locations, validate_document,
+    XsdSchema, complete_attribute_values, complete_attributes, complete_elements, parse_xsd,
+    resolve_schema_dependencies, resolve_schema_locations, validate_document,
 };
 
 const INITIALIZE_METHOD: &str = "initialize";
@@ -115,14 +120,16 @@ impl XmlLanguageServer {
         Some(json!({"isIncomplete": false, "items": items}))
     }
 
-    fn schema_completions(&self, uri: &str, source: &str, offset: usize) -> Vec<Value> {
+    fn load_schemas(&self, uri: &str, source: &str) -> Vec<XsdSchema> {
         let document_path = uri_to_path(uri);
         let references = resolve_schema_locations(schema_resolution_source(source), document_path)
             .unwrap_or_default();
-        references
+        load_schema_graph(references).0
+    }
+
+    fn schema_completions(&self, uri: &str, source: &str, offset: usize) -> Vec<Value> {
+        self.load_schemas(uri, source)
             .into_iter()
-            .filter_map(|reference| fs::read_to_string(reference.path).ok())
-            .filter_map(|schema_source| parse_xsd(&schema_source).ok())
             .flat_map(|schema| complete_elements(source, offset, &schema))
             .map(|completion| {
                 json!({
@@ -134,13 +141,8 @@ impl XmlLanguageServer {
     }
 
     fn schema_attributes(&self, uri: &str, source: &str, offset: usize) -> Vec<Value> {
-        let document_path = uri_to_path(uri);
-        let references = resolve_schema_locations(schema_resolution_source(source), document_path)
-            .unwrap_or_default();
-        references
+        self.load_schemas(uri, source)
             .into_iter()
-            .filter_map(|reference| fs::read_to_string(reference.path).ok())
-            .filter_map(|schema_source| parse_xsd(&schema_source).ok())
             .flat_map(|schema| complete_attributes(source, offset, &schema))
             .map(|completion| {
                 json!({
@@ -152,13 +154,8 @@ impl XmlLanguageServer {
     }
 
     fn schema_attribute_values(&self, uri: &str, source: &str, offset: usize) -> Vec<Value> {
-        let document_path = uri_to_path(uri);
-        let references = resolve_schema_locations(schema_resolution_source(source), document_path)
-            .unwrap_or_default();
-        references
+        self.load_schemas(uri, source)
             .into_iter()
-            .filter_map(|reference| fs::read_to_string(reference.path).ok())
-            .filter_map(|schema_source| parse_xsd(&schema_source).ok())
             .flat_map(|schema| complete_attribute_values(source, offset, &schema))
             .map(|completion| {
                 json!({
@@ -176,29 +173,12 @@ impl XmlLanguageServer {
                 Ok(references) => references,
                 Err(error) => return vec![xsd_error_diagnostic(error)],
             };
-        let mut diagnostics = Vec::new();
-
-        for reference in references {
-            let schema_source = match fs::read_to_string(&reference.path) {
-                Ok(source) => source,
-                Err(error) => {
-                    diagnostics.push(xsd_error_diagnostic(format!(
-                        "impossible de lire le schéma {} : {error}",
-                        reference.path.display()
-                    )));
-                    continue;
-                }
-            };
-            let schema = match parse_xsd(&schema_source) {
-                Ok(schema) => schema,
-                Err(error) => {
-                    diagnostics.push(xsd_error_diagnostic(format!(
-                        "schéma XSD invalide ({}): {error}",
-                        reference.path.display()
-                    )));
-                    continue;
-                }
-            };
+        let (schemas, errors) = load_schema_graph(references);
+        let mut diagnostics = errors
+            .into_iter()
+            .map(xsd_error_diagnostic)
+            .collect::<Vec<_>>();
+        for schema in schemas {
             diagnostics.extend(
                 validate_document(source, &schema)
                     .into_iter()
@@ -244,6 +224,47 @@ fn uri_to_path(uri: &str) -> PathBuf {
     let raw = uri.strip_prefix("file://").unwrap_or(uri);
     let raw = raw.strip_prefix('/').unwrap_or(raw);
     PathBuf::from(raw.replace("%20", " "))
+}
+
+fn load_schema_graph(references: Vec<xsd_core::SchemaReference>) -> (Vec<XsdSchema>, Vec<String>) {
+    let mut queue = references;
+    let mut visited = HashSet::new();
+    let mut schemas = Vec::new();
+    let mut errors = Vec::new();
+
+    while let Some(reference) = queue.pop() {
+        let path = reference.path;
+        if !visited.insert(path.clone()) {
+            continue;
+        }
+        let schema_source = match fs::read_to_string(&path) {
+            Ok(source) => source,
+            Err(error) => {
+                errors.push(format!(
+                    "impossible de lire le schéma {} : {error}",
+                    path.display()
+                ));
+                continue;
+            }
+        };
+        let schema = match parse_xsd(&schema_source) {
+            Ok(schema) => schema,
+            Err(error) => {
+                errors.push(format!("schéma XSD invalide ({}): {error}", path.display()));
+                continue;
+            }
+        };
+        match resolve_schema_dependencies(&schema_source, &path) {
+            Ok(dependencies) => queue.extend(dependencies),
+            Err(error) => errors.push(format!(
+                "dépendances XSD invalides ({}): {error}",
+                path.display()
+            )),
+        }
+        schemas.push(schema);
+    }
+
+    (schemas, errors)
 }
 
 fn xsd_error_diagnostic(diagnostic: impl Into<String>) -> Value {
