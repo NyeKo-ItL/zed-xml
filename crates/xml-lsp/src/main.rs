@@ -172,6 +172,7 @@ fn diagnostics_params(uri: &str, source: &str, diagnostics: &[XmlDiagnostic]) ->
             },
             "severity": 1,
             "source": "xml-lsp",
+            "code": diagnostic.code(),
             "message": diagnostic.message,
         })
     });
@@ -325,6 +326,10 @@ mod tests {
                     json!({"line": 0, "character": 6})
                 );
                 assert_eq!(notification.params["diagnostics"][0]["severity"], 1);
+                assert_eq!(
+                    notification.params["diagnostics"][0]["code"],
+                    "xml-structure"
+                );
             }
             message => panic!("expected diagnostics notification, got {message:?}"),
         }

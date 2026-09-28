@@ -1,0 +1,3 @@
+<x:note xmlns:x="urn:example:note">
+  <x:to>Alice</x:to>
+</x:note>

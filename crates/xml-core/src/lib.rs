@@ -13,11 +13,28 @@ pub struct XmlDocument {
     pub element_count: usize,
 }
 
+/// Catégorie d'un diagnostic XML.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum XmlDiagnosticKind {
+    Syntax,
+    Structure,
+}
+
 /// Diagnostic d'analyse exprimé avec un offset UTF-8 dans la source.
 #[derive(Debug, PartialEq, Eq)]
 pub struct XmlDiagnostic {
+    pub kind: XmlDiagnosticKind,
     pub message: String,
     pub offset: usize,
+}
+
+impl XmlDiagnostic {
+    pub fn code(&self) -> &'static str {
+        match self.kind {
+            XmlDiagnosticKind::Syntax => "xml-syntax",
+            XmlDiagnosticKind::Structure => "xml-structure",
+        }
+    }
 }
 
 /// Résultat d'analyse conservant le modèle partiel même si la source est invalide.
@@ -41,6 +58,7 @@ pub fn parse_xml(source: &str) -> XmlParseResult {
                 if stack.is_empty() {
                     if document.root.is_some() {
                         diagnostics.push(XmlDiagnostic {
+                            kind: XmlDiagnosticKind::Structure,
                             message: "XML doit contenir un seul élément racine".to_owned(),
                             offset: reader.buffer_position() as usize,
                         });
@@ -56,6 +74,7 @@ pub fn parse_xml(source: &str) -> XmlParseResult {
                 if stack.is_empty() {
                     if document.root.is_some() {
                         diagnostics.push(XmlDiagnostic {
+                            kind: XmlDiagnosticKind::Structure,
                             message: "XML doit contenir un seul élément racine".to_owned(),
                             offset: reader.buffer_position() as usize,
                         });
@@ -70,10 +89,12 @@ pub fn parse_xml(source: &str) -> XmlParseResult {
                 match stack.pop() {
                     Some(open_name) if open_name == name => {}
                     Some(open_name) => diagnostics.push(XmlDiagnostic {
+                        kind: XmlDiagnosticKind::Structure,
                         message: format!("balise fermante </{name}> attend </{open_name}>"),
                         offset: reader.buffer_position() as usize,
                     }),
                     None => diagnostics.push(XmlDiagnostic {
+                        kind: XmlDiagnosticKind::Structure,
                         message: format!("balise fermante inattendue </{name}>"),
                         offset: reader.buffer_position() as usize,
                     }),
@@ -83,6 +104,7 @@ pub fn parse_xml(source: &str) -> XmlParseResult {
             Ok(_) => {}
             Err(error) => {
                 diagnostics.push(XmlDiagnostic {
+                    kind: XmlDiagnosticKind::Syntax,
                     message: format!("erreur XML : {error}"),
                     offset: reader.buffer_position() as usize,
                 });
@@ -93,6 +115,7 @@ pub fn parse_xml(source: &str) -> XmlParseResult {
 
     if let Some(open_name) = stack.last() {
         diagnostics.push(XmlDiagnostic {
+            kind: XmlDiagnosticKind::Structure,
             message: format!("balise non fermée <{open_name}>"),
             offset: source.len(),
         });
