@@ -8,5 +8,7 @@ name = "xml-lsp"
 path = "src/main.rs"
 
 [dependencies]
+lsp-server = "0.7"
+serde_json = "1"
 xml-core = { path = "../xml-core" }
 xsd-core = { path = "../xsd-core" }
