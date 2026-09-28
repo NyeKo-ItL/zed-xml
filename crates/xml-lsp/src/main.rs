@@ -14,6 +14,7 @@ const INITIALIZE_METHOD: &str = "initialize";
 const EXIT_METHOD: &str = "exit";
 const DID_OPEN_METHOD: &str = "textDocument/didOpen";
 const DID_CHANGE_METHOD: &str = "textDocument/didChange";
+const DID_CLOSE_METHOD: &str = "textDocument/didClose";
 const PUBLISH_DIAGNOSTICS_METHOD: &str = "textDocument/publishDiagnostics";
 const FORMATTING_METHOD: &str = "textDocument/formatting";
 const COMPLETION_METHOD: &str = "textDocument/completion";
@@ -36,6 +37,24 @@ impl XmlLanguageServer {
     ) -> Result<bool, Box<dyn Error + Send + Sync>> {
         if notification.method == EXIT_METHOD {
             return Ok(true);
+        }
+        if notification.method == DID_CLOSE_METHOD {
+            if let Some(uri) = notification
+                .params
+                .get("textDocument")
+                .and_then(|document| document.get("uri"))
+                .and_then(Value::as_str)
+            {
+                self.documents.remove(uri);
+                connection.sender.send(
+                    Notification {
+                        method: PUBLISH_DIAGNOSTICS_METHOD.to_owned(),
+                        params: json!({"uri": uri, "diagnostics": []}),
+                    }
+                    .into(),
+                )?;
+            }
+            return Ok(false);
         }
 
         let Some((uri, text)) = (match notification.method.as_str() {
@@ -646,6 +665,31 @@ mod tests {
                 );
             }
             message => panic!("expected auto-close response, got {message:?}"),
+        }
+
+        client
+            .sender
+            .send(
+                Notification {
+                    method: DID_CLOSE_METHOD.to_owned(),
+                    params: json!({
+                        "textDocument": {"uri": "file:///document.xml"},
+                    }),
+                }
+                .into(),
+            )
+            .expect("didClose should be sent");
+
+        let close_notification = client
+            .receiver
+            .recv()
+            .expect("clear diagnostics should be published on close");
+        match close_notification {
+            Message::Notification(notification) => {
+                assert_eq!(notification.method, PUBLISH_DIAGNOSTICS_METHOD);
+                assert_eq!(notification.params["diagnostics"], json!([]));
+            }
+            message => panic!("expected close diagnostics notification, got {message:?}"),
         }
 
         client
