@@ -26,6 +26,7 @@ const PUBLISH_DIAGNOSTICS_METHOD: &str = "textDocument/publishDiagnostics";
 const FORMATTING_METHOD: &str = "textDocument/formatting";
 const RANGE_FORMATTING_METHOD: &str = "textDocument/rangeFormatting";
 const SYMBOL_METHOD: &str = "textDocument/documentSymbol";
+const HOVER_METHOD: &str = "textDocument/hover";
 const COMPLETION_METHOD: &str = "textDocument/completion";
 
 type SchemaCache = HashMap<PathBuf, (SystemTime, XsdSchema)>;
@@ -199,6 +200,36 @@ impl XmlLanguageServer {
         diagnostics
     }
 
+    fn hover(&mut self, params: &Value) -> Option<Value> {
+        let uri = params.get("textDocument")?.get("uri")?.as_str()?;
+        let source = self.documents.get(uri)?.clone();
+        let position = params.get("position")?;
+        let line = position.get("line")?.as_u64()? as usize;
+        let character = position.get("character")?.as_u64()? as usize;
+        let offset = offset_at(&source, line, character);
+        let element_name = element_name_at(&source, offset)?;
+        let schema = self.load_schema(uri, &source);
+        let detail = schema
+            .as_ref()
+            .and_then(|schema| {
+                schema
+                    .elements
+                    .iter()
+                    .find(|element| element.name == element_name)
+            })
+            .map(|element| {
+                format!(
+                    "Élément `<{}>`\n\nType : `{}`",
+                    element.name,
+                    element.type_name.as_deref().unwrap_or("complexType")
+                )
+            })
+            .unwrap_or_else(|| format!("Élément XML `<{element_name}>`"));
+        Some(json!({
+            "contents": {"kind": "markdown", "value": detail},
+        }))
+    }
+
     fn symbols(&self, params: &Value) -> Option<Value> {
         let uri = params.get("textDocument")?.get("uri")?.as_str()?;
         let source = self.documents.get(uri)?;
@@ -323,6 +354,14 @@ fn xsd_error_diagnostic(diagnostic: impl Into<String>) -> Value {
     })
 }
 
+fn element_name_at(source: &str, offset: usize) -> Option<String> {
+    let prefix = &source[..offset.min(source.len())];
+    let opening = prefix.rfind('<')?;
+    let fragment = &prefix[opening + 1..];
+    let fragment = fragment.strip_prefix('/').unwrap_or(fragment);
+    fragment.split_whitespace().next().map(str::to_owned)
+}
+
 fn xml_symbols(source: &str) -> Value {
     let mut reader = Reader::from_str(source);
     let mut stack: Vec<(String, usize)> = Vec::new();
@@ -381,6 +420,7 @@ fn server_capabilities() -> Value {
         "documentFormattingProvider": true,
         "documentRangeFormattingProvider": true,
         "documentSymbolProvider": true,
+        "hoverProvider": true,
     })
 }
 
@@ -477,6 +517,14 @@ fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
                     continue;
                 }
 
+                if request.method == HOVER_METHOD {
+                    let hover = server.hover(&request.params).unwrap_or(Value::Null);
+                    connection
+                        .sender
+                        .send(Response::new_ok(request.id, hover).into())?;
+                    continue;
+                }
+
                 if matches!(
                     request.method.as_str(),
                     FORMATTING_METHOD | RANGE_FORMATTING_METHOD
@@ -562,6 +610,7 @@ mod tests {
                             "documentFormattingProvider": true,
                             "documentRangeFormattingProvider": true,
                             "documentSymbolProvider": true,
+                            "hoverProvider": true,
                         }
                     }))
                 );
@@ -859,6 +908,28 @@ mod tests {
             .expect("exit should be sent");
 
         server_thread.join().expect("server thread should stop");
+    }
+
+    #[test]
+    fn provides_hover_for_xml_elements() {
+        let mut server = XmlLanguageServer::new();
+        server.documents.insert(
+            "file:///document.xml".to_owned(),
+            "<root><child /></root>".to_owned(),
+        );
+        let hover = server
+            .hover(&json!({
+                "textDocument": {"uri": "file:///document.xml"},
+                "position": {"line": 0, "character": 5},
+            }))
+            .unwrap();
+
+        assert!(
+            hover["contents"]["value"]
+                .as_str()
+                .unwrap()
+                .contains("root")
+        );
     }
 
     #[test]
