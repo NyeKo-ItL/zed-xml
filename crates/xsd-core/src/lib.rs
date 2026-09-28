@@ -453,6 +453,45 @@ pub fn complete_attribute_values(
         .collect()
 }
 
+/// Retourne les attributs XSD adaptés à l’élément ouvert courant.
+pub fn complete_attributes(source: &str, offset: usize, schema: &XsdSchema) -> Vec<XsdCompletion> {
+    let prefix = &source[..offset.min(source.len())];
+    let Some(opening) = prefix.rfind('<') else {
+        return Vec::new();
+    };
+    if prefix[opening..].contains('>') {
+        return Vec::new();
+    }
+    let fragment = &prefix[opening + 1..];
+    if fragment.starts_with('/') {
+        return Vec::new();
+    }
+    let mut tokens = fragment.split_whitespace();
+    let Some(element_name) = tokens.next() else {
+        return Vec::new();
+    };
+    let typed = if fragment
+        .chars()
+        .last()
+        .is_some_and(|character| character.is_whitespace())
+    {
+        ""
+    } else {
+        tokens.last().unwrap_or("")
+    };
+    schema
+        .attributes
+        .get(element_name)
+        .into_iter()
+        .flatten()
+        .filter(|name| name.starts_with(typed))
+        .map(|name| XsdCompletion {
+            label: name.clone(),
+            insert_text: name.clone(),
+        })
+        .collect()
+}
+
 pub fn complete_elements(source: &str, offset: usize, schema: &XsdSchema) -> Vec<XsdCompletion> {
     let prefix = &source[..offset.min(source.len())];
     let Some(opening) = prefix.rfind('<') else {
@@ -1022,6 +1061,21 @@ mod tests {
             complete_attribute_values("<item color=\"b", 15, &schema)[0].label,
             "blue"
         );
+    }
+
+    #[test]
+    fn completes_declared_attributes() {
+        let schema = parse_xsd(
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+                <xs:element name="item"><xs:complexType>
+                    <xs:attribute name="id"/><xs:attribute name="name"/>
+                </xs:complexType></xs:element>
+            </xs:schema>"#,
+        )
+        .unwrap();
+
+        assert_eq!(complete_attributes("<item n", 7, &schema)[0].label, "name");
+        assert_eq!(complete_attributes("<item ", 6, &schema).len(), 2);
     }
 
     #[test]
