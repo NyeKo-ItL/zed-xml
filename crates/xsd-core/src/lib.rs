@@ -65,6 +65,7 @@ pub struct XsdSchema {
     pub restrictions: HashMap<String, XsdRestriction>,
     pub lists: HashMap<String, String>,
     pub unions: HashMap<String, Vec<String>>,
+    pub attribute_groups: HashMap<String, Vec<String>>,
     pub includes: Vec<String>,
     pub imports: Vec<(Option<String>, String)>,
 }
@@ -92,6 +93,7 @@ pub fn merge_schemas(schemas: impl IntoIterator<Item = XsdSchema>) -> XsdSchema 
         merged.restrictions.extend(schema.restrictions);
         merged.lists.extend(schema.lists);
         merged.unions.extend(schema.unions);
+        merge_string_lists(&mut merged.attribute_groups, schema.attribute_groups);
         merged.includes.extend(schema.includes);
         merged.imports.extend(schema.imports);
     }
@@ -536,6 +538,7 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
         }
     }
 
+    apply_attribute_group_references(source, &mut schema)?;
     if schema.elements.is_empty() {
         return Err("le schéma XSD ne contient aucun xs:element".to_owned());
     }
@@ -628,6 +631,106 @@ pub fn resolve_schema_dependencies(
         }
     }
     Ok(references)
+}
+
+fn apply_attribute_group_references(source: &str, schema: &mut XsdSchema) -> Result<(), String> {
+    let mut reader = Reader::from_str(source);
+    let mut current_group: Option<String> = None;
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element)) => {
+                let qname = element.name();
+                let name = local_name(qname.as_ref());
+                if name == "attributeGroup" {
+                    current_group = attribute(&element, "name");
+                    if let Some(group) = &current_group {
+                        schema.attribute_groups.entry(group.clone()).or_default();
+                    }
+                } else if name == "attribute"
+                    && let Some(group) = &current_group
+                    && let Some(attribute_name) = attribute(&element, "name")
+                {
+                    schema
+                        .attribute_groups
+                        .entry(group.clone())
+                        .or_default()
+                        .push(attribute_name);
+                }
+            }
+            Ok(Event::Empty(element)) => {
+                let qname = element.name();
+                let name = local_name(qname.as_ref());
+                if name == "attributeGroup"
+                    && let Some(group) = attribute(&element, "name")
+                {
+                    schema.attribute_groups.entry(group).or_default();
+                } else if name == "attribute"
+                    && let Some(group) = &current_group
+                    && let Some(attribute_name) = attribute(&element, "name")
+                {
+                    schema
+                        .attribute_groups
+                        .entry(group.clone())
+                        .or_default()
+                        .push(attribute_name);
+                }
+            }
+            Ok(Event::End(element)) => {
+                if local_name(element.name().as_ref()) == "attributeGroup" {
+                    current_group = None;
+                }
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(error) => return Err(format!("erreur XSD : {error}")),
+        }
+    }
+
+    let mut reader = Reader::from_str(source);
+    let mut elements = Vec::new();
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element)) => {
+                let qname = element.name();
+                let name = local_name(qname.as_ref());
+                if name == "element"
+                    && let Some(element_name) = attribute(&element, "name")
+                {
+                    elements.push(element_name);
+                }
+            }
+            Ok(Event::Empty(element)) => {
+                let qname = element.name();
+                let name = local_name(qname.as_ref());
+                if name == "element"
+                    && let Some(element_name) = attribute(&element, "name")
+                {
+                    elements.push(element_name);
+                }
+                if name == "attributeGroup"
+                    && let Some(group) = attribute(&element, "ref")
+                    && let Some(element_name) = elements.last()
+                    && let Some(attributes) = schema.attribute_groups.get(&group)
+                {
+                    let target = schema.attributes.entry(element_name.clone()).or_default();
+                    for attribute_name in attributes {
+                        if !target.contains(attribute_name) {
+                            target.push(attribute_name.clone());
+                        }
+                    }
+                }
+            }
+            Ok(Event::End(element)) => {
+                if local_name(element.name().as_ref()) == "element" {
+                    elements.pop();
+                }
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(error) => return Err(format!("erreur XSD : {error}")),
+        }
+    }
+    Ok(())
 }
 
 fn resolve_path(base_directory: &Path, value: &str) -> PathBuf {
@@ -1399,6 +1502,23 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.message.contains("trop d’éléments <second>"))
         );
+    }
+
+    #[test]
+    fn resolves_named_attribute_groups() {
+        let schema = parse_xsd(
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+                <xs:attributeGroup name="common"><xs:attribute name="id"/></xs:attributeGroup>
+                <xs:element name="item"><xs:complexType>
+                    <xs:attributeGroup ref="common"/>
+                </xs:complexType></xs:element>
+            </xs:schema>"#,
+        )
+        .unwrap();
+
+        assert_eq!(schema.attribute_groups["common"], vec!["id"]);
+        assert_eq!(schema.attributes["item"], vec!["id"]);
+        assert!(validate_document("<item id=\"1\"/>", &schema).is_empty());
     }
 
     #[test]
