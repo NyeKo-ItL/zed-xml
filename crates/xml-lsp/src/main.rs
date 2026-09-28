@@ -168,6 +168,7 @@ impl XmlLanguageServer {
         items.extend(self.schema_completions(uri, &source, offset));
         items.extend(self.schema_attributes(uri, &source, offset));
         items.extend(self.schema_attribute_values(uri, &source, offset));
+        deduplicate_completion_items(&mut items);
         Some(json!({"isIncomplete": false, "items": items}))
     }
 
@@ -429,6 +430,23 @@ fn is_xsd_uri(uri: &str) -> bool {
     uri_to_path(uri)
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("xsd"))
+}
+
+fn deduplicate_completion_items(items: &mut Vec<Value>) {
+    let mut seen = HashSet::new();
+    items.retain(|item| {
+        let key = (
+            item.get("label")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            item.get("insertText")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+        );
+        seen.insert(key)
+    });
 }
 
 fn schema_resolution_source(source: &str) -> &str {
@@ -855,6 +873,17 @@ fn main() {
 mod tests {
     use super::*;
     use std::thread;
+
+    #[test]
+    fn removes_duplicate_completion_items() {
+        let mut items = vec![
+            json!({"label": "child", "insertText": "child"}),
+            json!({"label": "child", "insertText": "child"}),
+            json!({"label": "other", "insertText": "other"}),
+        ];
+        deduplicate_completion_items(&mut items);
+        assert_eq!(items.len(), 2);
+    }
 
     #[test]
     fn tracks_open_workspace_documents_referencing_an_xsd() {
