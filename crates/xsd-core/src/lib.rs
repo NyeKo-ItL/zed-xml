@@ -1,5 +1,10 @@
 //! Modèle et parsing XSD partagés par le serveur LSP.
 
+use std::{
+    path::{Component, Path, PathBuf},
+    str,
+};
+
 use quick_xml::{Reader, events::Event};
 
 /// Cardinalité d'un élément XSD.
@@ -30,6 +35,13 @@ pub struct XsdElement {
 pub struct XsdSchema {
     pub target_namespace: Option<String>,
     pub elements: Vec<XsdElement>,
+}
+
+/// Référence XSD extraite d'un document XML.
+#[derive(Debug, PartialEq, Eq)]
+pub struct SchemaReference {
+    pub namespace: Option<String>,
+    pub path: PathBuf,
 }
 
 /// Diagnostic de validation XSD minimal.
@@ -77,6 +89,75 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
     }
 
     Ok(schema)
+}
+
+/// Résout les références XSD d'un document XML par rapport à son chemin.
+pub fn resolve_schema_locations(
+    source: &str,
+    document_path: impl AsRef<Path>,
+) -> Result<Vec<SchemaReference>, String> {
+    let mut reader = Reader::from_str(source);
+    let mut references = Vec::new();
+    let base_directory = document_path
+        .as_ref()
+        .parent()
+        .unwrap_or_else(|| Path::new(""));
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element)) | Ok(Event::Empty(element)) => {
+                if let Some(value) = attribute(&element, "schemaLocation") {
+                    let values = value.split_whitespace().collect::<Vec<_>>();
+                    if values.len() % 2 != 0 {
+                        return Err(
+                            "xsi:schemaLocation doit contenir des paires namespace/chemin"
+                                .to_owned(),
+                        );
+                    }
+                    for pair in values.chunks_exact(2) {
+                        references.push(SchemaReference {
+                            namespace: Some(pair[0].to_owned()),
+                            path: resolve_path(base_directory, pair[1]),
+                        });
+                    }
+                }
+                if let Some(value) = attribute(&element, "noNamespaceSchemaLocation") {
+                    references.push(SchemaReference {
+                        namespace: None,
+                        path: resolve_path(base_directory, value.trim()),
+                    });
+                }
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(error) => return Err(format!("erreur XML : {error}")),
+        }
+    }
+
+    Ok(references)
+}
+
+fn resolve_path(base_directory: &Path, value: &str) -> PathBuf {
+    let path = Path::new(value);
+    if path.is_absolute() {
+        path.to_owned()
+    } else {
+        normalize_path(&base_directory.join(path))
+    }
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
 }
 
 /// Vérifie que le nom de la racine XML est déclaré par le schéma.
@@ -147,6 +228,39 @@ mod tests {
 
         assert!(validate_root("root", &schema).is_empty());
         assert_eq!(validate_root("unknown", &schema).len(), 1);
+    }
+
+    #[test]
+    fn resolves_schema_location_pairs_and_no_namespace_location() {
+        let source = r#"
+            <root xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                xsi:schemaLocation="urn:test schemas/test.xsd urn:other other.xsd"
+                xsi:noNamespaceSchemaLocation="local.xsd" />
+        "#;
+
+        let references = resolve_schema_locations(source, "workspace/docs/document.xml").unwrap();
+        assert_eq!(references.len(), 3);
+        assert_eq!(references[0].namespace.as_deref(), Some("urn:test"));
+        assert_eq!(
+            references[0].path,
+            PathBuf::from("workspace/docs/schemas/test.xsd")
+        );
+        assert_eq!(references[2].namespace, None);
+        assert_eq!(
+            references[2].path,
+            PathBuf::from("workspace/docs/local.xsd")
+        );
+    }
+
+    #[test]
+    fn rejects_an_odd_schema_location_list() {
+        assert!(
+            resolve_schema_locations(
+                r#"<root xsi:schemaLocation="urn:test only.xsd extra"/>"#,
+                "document.xml"
+            )
+            .is_err()
+        );
     }
 
     #[test]
