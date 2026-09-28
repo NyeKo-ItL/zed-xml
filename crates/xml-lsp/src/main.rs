@@ -9,6 +9,7 @@ use std::{
 };
 
 use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
+use quick_xml::{Reader, events::Event};
 use serde_json::{Value, json};
 use xml_core::{XmlDiagnostic, auto_close_tag, complete_xml, format_xml, parse_xml};
 use xsd_core::{
@@ -24,6 +25,7 @@ const DID_CLOSE_METHOD: &str = "textDocument/didClose";
 const PUBLISH_DIAGNOSTICS_METHOD: &str = "textDocument/publishDiagnostics";
 const FORMATTING_METHOD: &str = "textDocument/formatting";
 const RANGE_FORMATTING_METHOD: &str = "textDocument/rangeFormatting";
+const SYMBOL_METHOD: &str = "textDocument/documentSymbol";
 const COMPLETION_METHOD: &str = "textDocument/completion";
 
 type SchemaCache = HashMap<PathBuf, (SystemTime, XsdSchema)>;
@@ -197,6 +199,12 @@ impl XmlLanguageServer {
         diagnostics
     }
 
+    fn symbols(&self, params: &Value) -> Option<Value> {
+        let uri = params.get("textDocument")?.get("uri")?.as_str()?;
+        let source = self.documents.get(uri)?;
+        Some(xml_symbols(source))
+    }
+
     fn formatting(&self, params: &Value) -> Option<Value> {
         let uri = params.get("textDocument")?.get("uri")?.as_str()?;
         let source = self.documents.get(uri)?;
@@ -315,11 +323,64 @@ fn xsd_error_diagnostic(diagnostic: impl Into<String>) -> Value {
     })
 }
 
+fn xml_symbols(source: &str) -> Value {
+    let mut reader = Reader::from_str(source);
+    let mut stack: Vec<(String, usize)> = Vec::new();
+    let mut search_from = 0usize;
+    let mut symbols = Vec::new();
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element)) => {
+                let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
+                let start = source[search_from..]
+                    .find(&format!("<{name}"))
+                    .map(|offset| search_from + offset)
+                    .unwrap_or(search_from);
+                search_from = start + name.len() + 1;
+                stack.push((name, start));
+            }
+            Ok(Event::Empty(element)) => {
+                let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
+                let start = source[search_from..]
+                    .find(&format!("<{name}"))
+                    .map(|offset| search_from + offset)
+                    .unwrap_or(search_from);
+                search_from = start + name.len() + 1;
+                let end = reader.buffer_position() as usize;
+                symbols.push(symbol_value(&name, start, end, source));
+            }
+            Ok(Event::End(_)) => {
+                if let Some((name, start)) = stack.pop() {
+                    symbols.push(symbol_value(
+                        &name,
+                        start,
+                        reader.buffer_position() as usize,
+                        source,
+                    ));
+                }
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            Ok(_) => {}
+        }
+    }
+    Value::Array(symbols)
+}
+
+fn symbol_value(name: &str, start: usize, end: usize, source: &str) -> Value {
+    json!({
+        "name": name,
+        "kind": 13,
+        "range": {"start": position_at(source, start), "end": position_at(source, end)},
+        "selectionRange": {"start": position_at(source, start), "end": position_at(source, start + name.len() + 1)},
+    })
+}
+
 fn server_capabilities() -> Value {
     json!({
         "completionProvider": {"triggerCharacters": ["<", " ", "/"]},
         "documentFormattingProvider": true,
         "documentRangeFormattingProvider": true,
+        "documentSymbolProvider": true,
     })
 }
 
@@ -408,6 +469,14 @@ fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
                     continue;
                 }
 
+                if request.method == SYMBOL_METHOD {
+                    let symbols = server.symbols(&request.params).unwrap_or_else(|| json!([]));
+                    connection
+                        .sender
+                        .send(Response::new_ok(request.id, symbols).into())?;
+                    continue;
+                }
+
                 if matches!(
                     request.method.as_str(),
                     FORMATTING_METHOD | RANGE_FORMATTING_METHOD
@@ -492,6 +561,7 @@ mod tests {
                             "completionProvider": {"triggerCharacters": ["<", " ", "/"]},
                             "documentFormattingProvider": true,
                             "documentRangeFormattingProvider": true,
+                            "documentSymbolProvider": true,
                         }
                     }))
                 );
@@ -789,6 +859,17 @@ mod tests {
             .expect("exit should be sent");
 
         server_thread.join().expect("server thread should stop");
+    }
+
+    #[test]
+    fn builds_document_symbols_from_xml_elements() {
+        let symbols = xml_symbols("<root><child /></root>");
+        let symbols = symbols.as_array().expect("symbols should be an array");
+
+        assert_eq!(symbols.len(), 2);
+        assert_eq!(symbols[0]["name"], "child");
+        assert_eq!(symbols[1]["name"], "root");
+        assert_eq!(symbols[0]["kind"], 13);
     }
 
     #[test]

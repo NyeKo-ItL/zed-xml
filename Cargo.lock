@@ -815,6 +815,7 @@ name = "xml-lsp"
 version = "0.1.0"
 dependencies = [
  "lsp-server",
+ "quick-xml",
  "serde_json",
  "xml-core",
  "xsd-core",
