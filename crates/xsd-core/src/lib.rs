@@ -67,6 +67,8 @@ pub struct XsdSchema {
     pub unions: HashMap<String, Vec<String>>,
     pub attribute_groups: HashMap<String, Vec<String>>,
     pub model_groups: HashMap<String, Vec<String>>,
+    pub complex_extensions: HashMap<String, String>,
+    pub simple_extensions: HashMap<String, String>,
     pub includes: Vec<String>,
     pub imports: Vec<(Option<String>, String)>,
 }
@@ -96,6 +98,8 @@ pub fn merge_schemas(schemas: impl IntoIterator<Item = XsdSchema>) -> XsdSchema 
         merged.unions.extend(schema.unions);
         merge_string_lists(&mut merged.attribute_groups, schema.attribute_groups);
         merge_string_lists(&mut merged.model_groups, schema.model_groups);
+        merged.complex_extensions.extend(schema.complex_extensions);
+        merged.simple_extensions.extend(schema.simple_extensions);
         merged.includes.extend(schema.includes);
         merged.imports.extend(schema.imports);
     }
@@ -145,6 +149,8 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
     let mut sequence_depth = 0usize;
     let mut choice_depth = 0usize;
     let mut all_depth = 0usize;
+    let mut complex_content_depth = 0usize;
+    let mut simple_content_depth = 0usize;
     let mut simple_type_stack: Vec<Option<String>> = Vec::new();
 
     loop {
@@ -273,6 +279,25 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                 if current_name == "all" {
                     all_depth += 1;
                 }
+                if current_name == "complexContent" {
+                    complex_content_depth += 1;
+                }
+                if current_name == "simpleContent" {
+                    simple_content_depth += 1;
+                }
+                if current_name == "extension"
+                    && let Some(base) = attribute(&element, "base")
+                    && let Some(element_name) = model_stack.last()
+                {
+                    if complex_content_depth > 0 {
+                        schema
+                            .complex_extensions
+                            .insert(element_name.clone(), base.clone());
+                    }
+                    if simple_content_depth > 0 {
+                        schema.simple_extensions.insert(element_name.clone(), base);
+                    }
+                }
                 let declared_name = if current_name == "element" {
                     attribute(&element, "name").or_else(|| {
                         attribute(&element, "ref").map(|reference| {
@@ -361,6 +386,19 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                     schema.target_namespace = attribute(&element, "targetNamespace");
                     schema.element_form_default = attribute(&element, "elementFormDefault");
                     schema.attribute_form_default = attribute(&element, "attributeFormDefault");
+                }
+                if current_name == "extension"
+                    && let Some(base) = attribute(&element, "base")
+                    && let Some(element_name) = model_stack.last()
+                {
+                    if complex_content_depth > 0 {
+                        schema
+                            .complex_extensions
+                            .insert(element_name.clone(), base.clone());
+                    }
+                    if simple_content_depth > 0 {
+                        schema.simple_extensions.insert(element_name.clone(), base);
+                    }
                 }
                 if current_name == "include"
                     && let Some(location) = attribute(&element, "schemaLocation")
@@ -545,6 +583,12 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                 }
                 if current_name == "all" {
                     all_depth = all_depth.saturating_sub(1);
+                }
+                if current_name == "complexContent" {
+                    complex_content_depth = complex_content_depth.saturating_sub(1);
+                }
+                if current_name == "simpleContent" {
+                    simple_content_depth = simple_content_depth.saturating_sub(1);
                 }
                 if element_stack.pop().flatten().is_some() {
                     model_stack.pop();
@@ -1635,6 +1679,24 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.message.contains("trop d’éléments <second>"))
         );
+    }
+
+    #[test]
+    fn parses_complex_and_simple_content_extensions() {
+        let schema = parse_xsd(
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+                <xs:element name="complex"><xs:complexType><xs:complexContent>
+                    <xs:extension base="Base"/>
+                </xs:complexContent></xs:complexType></xs:element>
+                <xs:element name="simple"><xs:complexType><xs:simpleContent>
+                    <xs:extension base="xs:string"/>
+                </xs:simpleContent></xs:complexType></xs:element>
+            </xs:schema>"#,
+        )
+        .unwrap();
+
+        assert_eq!(schema.complex_extensions["complex"], "Base");
+        assert_eq!(schema.simple_extensions["simple"], "xs:string");
     }
 
     #[test]
