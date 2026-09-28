@@ -28,6 +28,7 @@ const RANGE_FORMATTING_METHOD: &str = "textDocument/rangeFormatting";
 const SYMBOL_METHOD: &str = "textDocument/documentSymbol";
 const HOVER_METHOD: &str = "textDocument/hover";
 const DEFINITION_METHOD: &str = "textDocument/definition";
+const REFERENCES_METHOD: &str = "textDocument/references";
 const COMPLETION_METHOD: &str = "textDocument/completion";
 
 type SchemaCache = HashMap<PathBuf, (SystemTime, XsdSchema)>;
@@ -199,6 +200,30 @@ impl XmlLanguageServer {
         }
 
         diagnostics
+    }
+
+    fn references(&self, params: &Value) -> Option<Value> {
+        let uri = params.get("textDocument")?.get("uri")?.as_str()?;
+        let source = self.documents.get(uri)?;
+        let position = params.get("position")?;
+        let line = position.get("line")?.as_u64()? as usize;
+        let character = position.get("character")?.as_u64()? as usize;
+        let offset = offset_at(source, line, character);
+        let name = element_name_at(source, offset)?;
+        let mut locations = Vec::new();
+        let mut search_from = 0usize;
+        while let Some(relative) = source[search_from..].find(&format!("<{name}")) {
+            let start = search_from + relative;
+            locations.push(json!({
+                "uri": uri,
+                "range": {
+                    "start": position_at(source, start),
+                    "end": position_at(source, start + name.len() + 1),
+                },
+            }));
+            search_from = start + name.len() + 1;
+        }
+        Some(Value::Array(locations))
     }
 
     fn definition(&self, params: &Value) -> Option<Value> {
@@ -441,6 +466,7 @@ fn server_capabilities() -> Value {
         "documentSymbolProvider": true,
         "hoverProvider": true,
         "definitionProvider": true,
+        "referencesProvider": true,
     })
 }
 
@@ -547,6 +573,16 @@ fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
                     continue;
                 }
 
+                if request.method == REFERENCES_METHOD {
+                    let references = server
+                        .references(&request.params)
+                        .unwrap_or_else(|| json!([]));
+                    connection
+                        .sender
+                        .send(Response::new_ok(request.id, references).into())?;
+                    continue;
+                }
+
                 if request.method == HOVER_METHOD {
                     let hover = server.hover(&request.params).unwrap_or(Value::Null);
                     connection
@@ -642,6 +678,7 @@ mod tests {
                             "documentSymbolProvider": true,
                             "hoverProvider": true,
                             "definitionProvider": true,
+                            "referencesProvider": true,
                         }
                     }))
                 );
@@ -939,6 +976,23 @@ mod tests {
             .expect("exit should be sent");
 
         server_thread.join().expect("server thread should stop");
+    }
+
+    #[test]
+    fn finds_local_xml_element_references() {
+        let mut server = XmlLanguageServer::new();
+        server.documents.insert(
+            "file:///document.xml".to_owned(),
+            "<root><child /><child /></root>".to_owned(),
+        );
+        let references = server
+            .references(&json!({
+                "textDocument": {"uri": "file:///document.xml"},
+                "position": {"line": 0, "character": 12},
+            }))
+            .unwrap();
+
+        assert_eq!(references.as_array().unwrap().len(), 2);
     }
 
     #[test]
