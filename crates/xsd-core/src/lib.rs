@@ -66,6 +66,7 @@ pub struct XsdSchema {
     pub lists: HashMap<String, String>,
     pub unions: HashMap<String, Vec<String>>,
     pub attribute_groups: HashMap<String, Vec<String>>,
+    pub model_groups: HashMap<String, Vec<String>>,
     pub includes: Vec<String>,
     pub imports: Vec<(Option<String>, String)>,
 }
@@ -94,6 +95,7 @@ pub fn merge_schemas(schemas: impl IntoIterator<Item = XsdSchema>) -> XsdSchema 
         merged.lists.extend(schema.lists);
         merged.unions.extend(schema.unions);
         merge_string_lists(&mut merged.attribute_groups, schema.attribute_groups);
+        merge_string_lists(&mut merged.model_groups, schema.model_groups);
         merged.includes.extend(schema.includes);
         merged.imports.extend(schema.imports);
     }
@@ -539,6 +541,7 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
     }
 
     apply_attribute_group_references(source, &mut schema)?;
+    apply_model_group_references(source, &mut schema)?;
     if schema.elements.is_empty() {
         return Err("le schéma XSD ne contient aucun xs:element".to_owned());
     }
@@ -631,6 +634,120 @@ pub fn resolve_schema_dependencies(
         }
     }
     Ok(references)
+}
+
+fn apply_model_group_references(source: &str, schema: &mut XsdSchema) -> Result<(), String> {
+    let mut reader = Reader::from_str(source);
+    let mut current_group: Option<String> = None;
+    let mut group_depth = 0usize;
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element)) => {
+                let qname = element.name();
+                let name = local_name(qname.as_ref());
+                if name == "group" {
+                    if let Some(group) = attribute(&element, "name") {
+                        current_group = Some(group.clone());
+                        schema.model_groups.entry(group).or_default();
+                    }
+                } else if current_group.is_some() && name == "sequence" {
+                    group_depth += 1;
+                } else if current_group.is_some()
+                    && group_depth > 0
+                    && name == "element"
+                    && let Some(element_name) = attribute(&element, "name")
+                {
+                    schema
+                        .model_groups
+                        .entry(current_group.clone().unwrap())
+                        .or_default()
+                        .push(element_name);
+                }
+            }
+            Ok(Event::Empty(element)) => {
+                let qname = element.name();
+                let name = local_name(qname.as_ref());
+                if name == "group"
+                    && let Some(group) = attribute(&element, "name")
+                {
+                    schema.model_groups.entry(group).or_default();
+                } else if current_group.is_some()
+                    && group_depth > 0
+                    && name == "element"
+                    && let Some(element_name) = attribute(&element, "name")
+                {
+                    schema
+                        .model_groups
+                        .entry(current_group.clone().unwrap())
+                        .or_default()
+                        .push(element_name);
+                }
+            }
+            Ok(Event::End(element)) => {
+                let qname = element.name();
+                match local_name(qname.as_ref()) {
+                    "sequence" if current_group.is_some() => {
+                        group_depth = group_depth.saturating_sub(1)
+                    }
+                    "group" => {
+                        current_group = None;
+                        group_depth = 0;
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(error) => return Err(format!("erreur XSD : {error}")),
+        }
+    }
+
+    let mut reader = Reader::from_str(source);
+    let mut elements = Vec::new();
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element)) => {
+                let qname = element.name();
+                let name = local_name(qname.as_ref());
+                if name == "element"
+                    && let Some(element_name) = attribute(&element, "name")
+                {
+                    elements.push(element_name);
+                }
+            }
+            Ok(Event::Empty(element)) => {
+                let qname = element.name();
+                let name = local_name(qname.as_ref());
+                if name == "group"
+                    && let Some(group) = attribute(&element, "ref")
+                    && let Some(parent) = elements.last()
+                    && let Some(children) = schema.model_groups.get(&group)
+                {
+                    let target = schema.children.entry(parent.clone()).or_default();
+                    for child in children {
+                        if !target.contains(child) {
+                            target.push(child.clone());
+                        }
+                    }
+                }
+                if name == "element"
+                    && let Some(element_name) = attribute(&element, "name")
+                {
+                    elements.push(element_name);
+                    elements.pop();
+                }
+            }
+            Ok(Event::End(element)) => {
+                if local_name(element.name().as_ref()) == "element" {
+                    elements.pop();
+                }
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(error) => return Err(format!("erreur XSD : {error}")),
+        }
+    }
+    Ok(())
 }
 
 fn apply_attribute_group_references(source: &str, schema: &mut XsdSchema) -> Result<(), String> {
@@ -1502,6 +1619,23 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.message.contains("trop d’éléments <second>"))
         );
+    }
+
+    #[test]
+    fn resolves_named_model_groups() {
+        let schema = parse_xsd(
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+                <xs:group name="common"><xs:sequence><xs:element name="id"/></xs:sequence></xs:group>
+                <xs:element name="root"><xs:complexType><xs:sequence>
+                    <xs:group ref="common"/>
+                </xs:sequence></xs:complexType></xs:element>
+            </xs:schema>"#,
+        )
+        .unwrap();
+
+        assert_eq!(schema.model_groups["common"], vec!["id"]);
+        assert_eq!(schema.children["root"], vec!["id"]);
+        assert!(validate_document("<root><id/></root>", &schema).is_empty());
     }
 
     #[test]
