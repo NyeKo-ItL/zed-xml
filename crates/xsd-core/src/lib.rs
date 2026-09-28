@@ -61,6 +61,8 @@ pub struct XsdSchema {
     pub restrictions: HashMap<String, XsdRestriction>,
     pub lists: HashMap<String, String>,
     pub unions: HashMap<String, Vec<String>>,
+    pub includes: Vec<String>,
+    pub imports: Vec<(Option<String>, String)>,
 }
 
 /// Référence XSD extraite d'un document XML.
@@ -196,6 +198,18 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                 if current_name == "schema" {
                     schema.target_namespace = attribute(&element, "targetNamespace");
                 }
+                if current_name == "include"
+                    && let Some(location) = attribute(&element, "schemaLocation")
+                {
+                    schema.includes.push(location);
+                }
+                if current_name == "import"
+                    && let Some(location) = attribute(&element, "schemaLocation")
+                {
+                    schema
+                        .imports
+                        .push((attribute(&element, "namespace"), location));
+                }
                 if current_name == "sequence" {
                     sequence_depth += 1;
                 }
@@ -264,6 +278,18 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                 let current_name = local_name(element_name.as_ref());
                 if current_name == "schema" {
                     schema.target_namespace = attribute(&element, "targetNamespace");
+                }
+                if current_name == "include"
+                    && let Some(location) = attribute(&element, "schemaLocation")
+                {
+                    schema.includes.push(location);
+                }
+                if current_name == "import"
+                    && let Some(location) = attribute(&element, "schemaLocation")
+                {
+                    schema
+                        .imports
+                        .push((attribute(&element, "namespace"), location));
                 }
                 if current_name == "enumeration"
                     && let Some(simple_type) = simple_type_stack
@@ -470,6 +496,47 @@ pub fn resolve_schema_locations(
         }
     }
 
+    Ok(references)
+}
+
+/// Résout les dépendances `xs:include` et `xs:import` d’un schéma XSD.
+pub fn resolve_schema_dependencies(
+    source: &str,
+    schema_path: impl AsRef<Path>,
+) -> Result<Vec<SchemaReference>, String> {
+    let mut reader = Reader::from_str(source);
+    let base_directory = schema_path
+        .as_ref()
+        .parent()
+        .unwrap_or_else(|| Path::new(""));
+    let mut references = Vec::new();
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element)) | Ok(Event::Empty(element)) => {
+                let element_name = element.name();
+                let name = local_name(element_name.as_ref());
+                if name == "include"
+                    && let Some(path) = attribute(&element, "schemaLocation")
+                {
+                    references.push(SchemaReference {
+                        namespace: None,
+                        path: resolve_path(base_directory, &path),
+                    });
+                }
+                if name == "import"
+                    && let Some(path) = attribute(&element, "schemaLocation")
+                {
+                    references.push(SchemaReference {
+                        namespace: attribute(&element, "namespace"),
+                        path: resolve_path(base_directory, &path),
+                    });
+                }
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(error) => return Err(format!("erreur XSD : {error}")),
+        }
+    }
     Ok(references)
 }
 
@@ -1487,6 +1554,27 @@ mod tests {
                 insert_text: "child".to_owned(),
             }]
         );
+    }
+
+    #[test]
+    fn resolves_include_and_import_dependencies() {
+        let references = resolve_schema_dependencies(
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+                <xs:include schemaLocation="common/base.xsd"/>
+                <xs:import namespace="urn:other" schemaLocation="../other.xsd"/>
+            </xs:schema>"#,
+            "workspace/schema/root.xsd",
+        )
+        .unwrap();
+
+        assert_eq!(references.len(), 2);
+        assert_eq!(references[0].namespace, None);
+        assert_eq!(
+            references[0].path,
+            PathBuf::from("workspace/schema/common/base.xsd")
+        );
+        assert_eq!(references[1].namespace.as_deref(), Some("urn:other"));
+        assert_eq!(references[1].path, PathBuf::from("workspace/other.xsd"));
     }
 
     #[test]
