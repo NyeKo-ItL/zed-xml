@@ -259,7 +259,15 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                     all_depth += 1;
                 }
                 let declared_name = if current_name == "element" {
-                    attribute(&element, "name")
+                    attribute(&element, "name").or_else(|| {
+                        attribute(&element, "ref").map(|reference| {
+                            reference
+                                .rsplit(':')
+                                .next()
+                                .unwrap_or(&reference)
+                                .to_owned()
+                        })
+                    })
                 } else {
                     None
                 };
@@ -443,7 +451,15 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                     }
                 }
                 if current_name == "element"
-                    && let Some(name) = attribute(&element, "name")
+                    && let Some(name) = attribute(&element, "name").or_else(|| {
+                        attribute(&element, "ref").map(|reference| {
+                            reference
+                                .rsplit(':')
+                                .next()
+                                .unwrap_or(&reference)
+                                .to_owned()
+                        })
+                    })
                 {
                     if let Some(parent) = model_stack.last() {
                         if sequence_depth > 0 {
@@ -1368,6 +1384,23 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.message.contains("trop d’éléments <second>"))
         );
+    }
+
+    #[test]
+    fn resolves_element_references_in_model_groups() {
+        let schema = parse_xsd(
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+                <xs:element name="shared"/>
+                <xs:element name="root"><xs:complexType><xs:sequence>
+                    <xs:element ref="shared"/>
+                </xs:sequence></xs:complexType></xs:element>
+            </xs:schema>"#,
+        )
+        .unwrap();
+
+        assert_eq!(schema.children["root"], vec!["shared"]);
+        assert!(validate_document("<root><shared/></root>", &schema).is_empty());
+        assert_eq!(complete_elements("<root><s", 9, &schema)[0].label, "shared");
     }
 
     #[test]
