@@ -67,7 +67,7 @@ impl XmlExtension {
                 ("x86_64-pc-windows-msvc", "xml-lsp.exe")
             }
             (zed::Os::Linux, zed::Architecture::X8664) => ("x86_64-unknown-linux-gnu", "xml-lsp"),
-            (zed::Os::Mac, zed::Architecture::X8664) => ("x86_64-apple-darwin", "xml-lsp"),
+
             (zed::Os::Mac, zed::Architecture::Aarch64) => ("aarch64-apple-darwin", "xml-lsp"),
             _ => {
                 return Err(
