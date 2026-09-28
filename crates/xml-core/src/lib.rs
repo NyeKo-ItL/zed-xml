@@ -111,6 +111,56 @@ pub struct XmlCompletion {
     pub insert_text: String,
 }
 
+/// Retourne une balise fermante lorsque le curseur suit immédiatement une balise ouvrante.
+pub fn auto_close_tag(source: &str, offset: usize) -> Option<XmlCompletion> {
+    let prefix = &source[..offset.min(source.len())];
+    if !prefix.ends_with('>') {
+        return None;
+    }
+
+    let mut reader = Reader::from_str(prefix);
+    let mut stack = Vec::new();
+    let mut opening_is_last = false;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element)) => {
+                stack.push(String::from_utf8_lossy(element.name().as_ref()).into_owned());
+                opening_is_last = true;
+            }
+            Ok(Event::Empty(_)) => opening_is_last = false,
+            Ok(Event::End(_)) => {
+                stack.pop();
+                opening_is_last = false;
+            }
+            Ok(Event::Text(text)) => {
+                opening_is_last = text
+                    .decode()
+                    .map(|value| value.trim().is_empty())
+                    .unwrap_or(false);
+            }
+            Ok(
+                Event::CData(_)
+                | Event::Comment(_)
+                | Event::Decl(_)
+                | Event::DocType(_)
+                | Event::PI(_)
+                | Event::GeneralRef(_),
+            ) => opening_is_last = false,
+            Ok(Event::Eof) | Err(_) => break,
+        }
+    }
+
+    if opening_is_last {
+        stack.last().map(|name| XmlCompletion {
+            label: format!("</{name}>"),
+            insert_text: format!("</{name}>"),
+        })
+    } else {
+        None
+    }
+}
+
 /// Retourne des propositions locales à partir du document et du contexte courant.
 pub fn complete_xml(source: &str, offset: usize) -> Vec<XmlCompletion> {
     let offset = offset.min(source.len());
@@ -388,6 +438,19 @@ mod tests {
     fn preserves_mixed_content_and_comments() {
         let formatted = format_xml("<root>Hello <b>world</b><!-- note --></root>").unwrap();
         assert_eq!(formatted, "<root>Hello <b>world</b><!-- note --></root>\n");
+    }
+
+    #[test]
+    fn auto_closes_the_most_recent_opening_tag() {
+        assert_eq!(
+            auto_close_tag("<root>", 6),
+            Some(XmlCompletion {
+                label: "</root>".to_owned(),
+                insert_text: "</root>".to_owned(),
+            })
+        );
+        assert_eq!(auto_close_tag("<root />", 8), None);
+        assert_eq!(auto_close_tag("<root>text", 10), None);
     }
 
     #[test]

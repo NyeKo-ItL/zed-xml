@@ -4,7 +4,7 @@ use std::{collections::HashMap, error::Error};
 
 use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
 use serde_json::{Value, json};
-use xml_core::{XmlDiagnostic, complete_xml, format_xml, parse_xml};
+use xml_core::{XmlDiagnostic, auto_close_tag, complete_xml, format_xml, parse_xml};
 
 const INITIALIZE_METHOD: &str = "initialize";
 const EXIT_METHOD: &str = "exit";
@@ -70,7 +70,7 @@ impl XmlLanguageServer {
         let line = position.get("line")?.as_u64()? as usize;
         let character = position.get("character")?.as_u64()? as usize;
         let offset = offset_at(source, line, character);
-        let items = complete_xml(source, offset)
+        let mut items = complete_xml(source, offset)
             .into_iter()
             .map(|completion| {
                 json!({
@@ -79,6 +79,12 @@ impl XmlLanguageServer {
                 })
             })
             .collect::<Vec<_>>();
+        if let Some(completion) = auto_close_tag(source, offset) {
+            items.push(json!({
+                "label": completion.label,
+                "insertText": completion.insert_text,
+            }));
+        }
         Some(json!({"isIncomplete": false, "items": items}))
     }
 
@@ -452,6 +458,57 @@ mod tests {
                 );
             }
             message => panic!("expected formatting response, got {message:?}"),
+        }
+
+        client
+            .sender
+            .send(
+                Notification {
+                    method: DID_CHANGE_METHOD.to_owned(),
+                    params: json!({
+                        "textDocument": {"uri": "file:///document.xml", "version": 5},
+                        "contentChanges": [{"text": "<root>"}],
+                    }),
+                }
+                .into(),
+            )
+            .expect("auto-close source should be sent");
+        client
+            .receiver
+            .recv()
+            .expect("diagnostics for auto-close source should be published");
+
+        client
+            .sender
+            .send(
+                Request {
+                    id: RequestId::from(5),
+                    method: COMPLETION_METHOD.to_owned(),
+                    params: json!({
+                        "textDocument": {"uri": "file:///document.xml"},
+                        "position": {"line": 0, "character": 6},
+                    }),
+                }
+                .into(),
+            )
+            .expect("auto-close completion should be sent");
+
+        let auto_close_response = client
+            .receiver
+            .recv()
+            .expect("auto-close response should be received");
+        match auto_close_response {
+            Message::Response(response) => {
+                assert_eq!(response.id, RequestId::from(5));
+                assert_eq!(
+                    response.result,
+                    Some(json!({
+                        "isIncomplete": false,
+                        "items": [{"label": "</root>", "insertText": "</root>"}],
+                    }))
+                );
+            }
+            message => panic!("expected auto-close response, got {message:?}"),
         }
 
         client
