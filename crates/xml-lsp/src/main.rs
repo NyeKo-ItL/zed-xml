@@ -1,19 +1,127 @@
 //! Serveur LSP XML natif.
 
-use std::error::Error;
+use std::{collections::HashMap, error::Error};
 
 use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
-use serde_json::json;
+use serde_json::{Value, json};
+use xml_core::{XmlDiagnostic, parse_xml};
 
 const INITIALIZE_METHOD: &str = "initialize";
 const EXIT_METHOD: &str = "exit";
+const DID_OPEN_METHOD: &str = "textDocument/didOpen";
+const DID_CHANGE_METHOD: &str = "textDocument/didChange";
+const PUBLISH_DIAGNOSTICS_METHOD: &str = "textDocument/publishDiagnostics";
 
-fn server_capabilities() -> serde_json::Value {
+struct XmlLanguageServer {
+    documents: HashMap<String, String>,
+}
+
+impl XmlLanguageServer {
+    fn new() -> Self {
+        Self {
+            documents: HashMap::new(),
+        }
+    }
+
+    fn handle_notification(
+        &mut self,
+        connection: &Connection,
+        notification: Notification,
+    ) -> Result<bool, Box<dyn Error + Send + Sync>> {
+        if notification.method == EXIT_METHOD {
+            return Ok(true);
+        }
+
+        let Some((uri, text)) = (match notification.method.as_str() {
+            DID_OPEN_METHOD => Self::opened_document(&notification.params),
+            DID_CHANGE_METHOD => Self::changed_document(&notification.params),
+            _ => None,
+        }) else {
+            return Ok(false);
+        };
+
+        self.documents.insert(uri.clone(), text.clone());
+        let diagnostics = parse_xml(&text).diagnostics;
+        connection.sender.send(
+            Notification {
+                method: PUBLISH_DIAGNOSTICS_METHOD.to_owned(),
+                params: diagnostics_params(&uri, &text, &diagnostics),
+            }
+            .into(),
+        )?;
+
+        Ok(false)
+    }
+
+    fn opened_document(params: &Value) -> Option<(String, String)> {
+        let document = params.get("textDocument")?;
+        Some((
+            document.get("uri")?.as_str()?.to_owned(),
+            document.get("text")?.as_str()?.to_owned(),
+        ))
+    }
+
+    fn changed_document(params: &Value) -> Option<(String, String)> {
+        let document = params.get("textDocument")?;
+        let uri = document.get("uri")?.as_str()?.to_owned();
+        let text = params
+            .get("contentChanges")?
+            .as_array()?
+            .first()?
+            .get("text")?
+            .as_str()?
+            .to_owned();
+        Some((uri, text))
+    }
+}
+
+fn server_capabilities() -> Value {
     json!({})
+}
+
+fn position_at(source: &str, offset: usize) -> Value {
+    let mut line = 0;
+    let mut character = 0;
+    let bounded_offset = offset.min(source.len());
+
+    for (index, value) in source.char_indices() {
+        if index >= bounded_offset {
+            break;
+        }
+        if value == '\n' {
+            line += 1;
+            character = 0;
+        } else {
+            character += value.len_utf16();
+        }
+    }
+
+    json!({ "line": line, "character": character })
+}
+
+fn diagnostics_params(uri: &str, source: &str, diagnostics: &[XmlDiagnostic]) -> Value {
+    let diagnostics = diagnostics.iter().map(|diagnostic| {
+        let position = position_at(source, diagnostic.offset);
+        json!({
+            "range": {
+                "start": position,
+                "end": position_at(source, diagnostic.offset),
+            },
+            "severity": 1,
+            "source": "xml-lsp",
+            "message": diagnostic.message,
+        })
+    });
+
+    json!({
+        "uri": uri,
+        "diagnostics": diagnostics.collect::<Vec<_>>(),
+    })
 }
 
 fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
     connection.initialize(server_capabilities())?;
+    let mut server = XmlLanguageServer::new();
 
     for message in &connection.receiver {
         match message {
@@ -29,8 +137,11 @@ fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
                 );
                 connection.sender.send(response.into())?;
             }
-            Message::Notification(notification) if notification.method == EXIT_METHOD => break,
-            Message::Notification(_) => {}
+            Message::Notification(notification) => {
+                if server.handle_notification(&connection, notification)? {
+                    break;
+                }
+            }
             Message::Response(_) => {}
         }
     }
@@ -56,7 +167,7 @@ mod tests {
     use std::thread;
 
     #[test]
-    fn serves_initialize_shutdown_and_exit() {
+    fn serves_initialize_diagnostics_shutdown_and_exit() {
         let (server, client) = Connection::memory();
         let server_thread = thread::spawn(|| run(server).expect("server loop should succeed"));
 
@@ -98,6 +209,64 @@ mod tests {
         client
             .sender
             .send(
+                Notification {
+                    method: DID_OPEN_METHOD.to_owned(),
+                    params: json!({
+                        "textDocument": {
+                            "uri": "file:///document.xml",
+                            "text": "<root>",
+                        }
+                    }),
+                }
+                .into(),
+            )
+            .expect("didOpen should be sent");
+
+        let diagnostics_notification = client
+            .receiver
+            .recv()
+            .expect("diagnostics should be published");
+        match diagnostics_notification {
+            Message::Notification(notification) => {
+                assert_eq!(notification.method, PUBLISH_DIAGNOSTICS_METHOD);
+                assert_eq!(
+                    notification.params["diagnostics"][0]["range"]["start"],
+                    json!({"line": 0, "character": 6})
+                );
+                assert_eq!(notification.params["diagnostics"][0]["severity"], 1);
+            }
+            message => panic!("expected diagnostics notification, got {message:?}"),
+        }
+
+        client
+            .sender
+            .send(
+                Notification {
+                    method: DID_CHANGE_METHOD.to_owned(),
+                    params: json!({
+                        "textDocument": {"uri": "file:///document.xml", "version": 2},
+                        "contentChanges": [{"text": "<root />"}],
+                    }),
+                }
+                .into(),
+            )
+            .expect("didChange should be sent");
+
+        let clean_notification = client
+            .receiver
+            .recv()
+            .expect("clean diagnostics should be published");
+        match clean_notification {
+            Message::Notification(notification) => {
+                assert_eq!(notification.method, PUBLISH_DIAGNOSTICS_METHOD);
+                assert_eq!(notification.params["diagnostics"], json!([]));
+            }
+            message => panic!("expected clean diagnostics notification, got {message:?}"),
+        }
+
+        client
+            .sender
+            .send(
                 Request {
                     id: RequestId::from(2),
                     method: "shutdown".to_owned(),
@@ -131,5 +300,13 @@ mod tests {
             .expect("exit should be sent");
 
         server_thread.join().expect("server thread should stop");
+    }
+
+    #[test]
+    fn converts_unicode_offsets_to_utf16_positions() {
+        assert_eq!(
+            position_at("é\n😀<root>", 7),
+            json!({"line": 1, "character": 2})
+        );
     }
 }
