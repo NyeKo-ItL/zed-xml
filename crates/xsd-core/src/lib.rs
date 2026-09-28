@@ -72,6 +72,8 @@ pub struct XsdSchema {
     pub unions: HashMap<String, Vec<String>>,
     pub attribute_groups: HashMap<String, Vec<String>>,
     pub model_groups: HashMap<String, Vec<String>>,
+    pub any_children: HashMap<String, bool>,
+    pub any_attributes: HashMap<String, bool>,
     pub complex_extensions: HashMap<String, String>,
     pub simple_extensions: HashMap<String, String>,
     pub includes: Vec<String>,
@@ -105,6 +107,8 @@ pub fn merge_schemas(schemas: impl IntoIterator<Item = XsdSchema>) -> XsdSchema 
         merged.unions.extend(schema.unions);
         merge_string_lists(&mut merged.attribute_groups, schema.attribute_groups);
         merge_string_lists(&mut merged.model_groups, schema.model_groups);
+        merged.any_children.extend(schema.any_children);
+        merged.any_attributes.extend(schema.any_attributes);
         merged.complex_extensions.extend(schema.complex_extensions);
         merged.simple_extensions.extend(schema.simple_extensions);
         merged.includes.extend(schema.includes);
@@ -286,6 +290,16 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                 if current_name == "all" {
                     all_depth += 1;
                 }
+                if current_name == "any"
+                    && let Some(parent) = model_stack.last()
+                {
+                    schema.any_children.insert(parent.clone(), true);
+                }
+                if current_name == "anyAttribute"
+                    && let Some(parent) = model_stack.last()
+                {
+                    schema.any_attributes.insert(parent.clone(), true);
+                }
                 if current_name == "complexContent" {
                     complex_content_depth += 1;
                 }
@@ -403,6 +417,16 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                     schema.target_namespace = attribute(&element, "targetNamespace");
                     schema.element_form_default = attribute(&element, "elementFormDefault");
                     schema.attribute_form_default = attribute(&element, "attributeFormDefault");
+                }
+                if current_name == "any"
+                    && let Some(parent) = model_stack.last()
+                {
+                    schema.any_children.insert(parent.clone(), true);
+                }
+                if current_name == "anyAttribute"
+                    && let Some(parent) = model_stack.last()
+                {
+                    schema.any_attributes.insert(parent.clone(), true);
                 }
                 if current_name == "extension"
                     && let Some(base) = attribute(&element, "base")
@@ -1532,6 +1556,14 @@ fn validate_attributes(
     element_name: &str,
     element: &quick_xml::events::BytesStart<'_>,
 ) -> Vec<XsdDiagnostic> {
+    if schema
+        .any_attributes
+        .get(element_name)
+        .copied()
+        .unwrap_or(false)
+    {
+        return Vec::new();
+    }
     let Some(allowed) = schema.attributes.get(element_name) else {
         return Vec::new();
     };
@@ -1577,6 +1609,9 @@ fn is_allowed_child(schema: &XsdSchema, parent: &str, child: &str) -> bool {
     let sequence = schema.children.get(parent);
     let choice = schema.choices.get(parent);
     let all = schema.alls.get(parent);
+    if schema.any_children.get(parent).copied().unwrap_or(false) {
+        return true;
+    }
     if sequence.is_none() && choice.is_none() && all.is_none() {
         return true;
     }
@@ -1777,6 +1812,23 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.message.contains("trop d’éléments <second>"))
         );
+    }
+
+    #[test]
+    fn supports_any_elements_and_attributes() {
+        let schema = parse_xsd(
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+                <xs:element name="root"><xs:complexType><xs:sequence>
+                    <xs:any/>
+                </xs:sequence><xs:anyAttribute/></xs:complexType></xs:element>
+            </xs:schema>"#,
+        )
+        .unwrap();
+
+        assert!(schema.any_children["root"]);
+        assert!(schema.any_attributes["root"]);
+        assert!(validate_document("<root><unknown/><other/></root>", &schema).is_empty());
+        assert!(validate_document("<root arbitrary=\"1\"/>", &schema).is_empty());
     }
 
     #[test]
