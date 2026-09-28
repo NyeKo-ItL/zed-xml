@@ -64,6 +64,8 @@ pub struct XsdSchema {
     pub alls: HashMap<String, Vec<String>>,
     pub attributes: HashMap<String, Vec<String>>,
     pub required_attributes: HashMap<String, Vec<String>>,
+    pub attribute_defaults: HashMap<String, String>,
+    pub attribute_fixed: HashMap<String, String>,
     pub enumerations: HashMap<String, Vec<String>>,
     pub restrictions: HashMap<String, XsdRestriction>,
     pub lists: HashMap<String, String>,
@@ -95,6 +97,8 @@ pub fn merge_schemas(schemas: impl IntoIterator<Item = XsdSchema>) -> XsdSchema 
         merge_string_lists(&mut merged.alls, schema.alls);
         merge_string_lists(&mut merged.attributes, schema.attributes);
         merge_string_lists(&mut merged.required_attributes, schema.required_attributes);
+        merged.attribute_defaults.extend(schema.attribute_defaults);
+        merged.attribute_fixed.extend(schema.attribute_fixed);
         merge_string_lists(&mut merged.enumerations, schema.enumerations);
         merged.restrictions.extend(schema.restrictions);
         merged.lists.extend(schema.lists);
@@ -336,7 +340,14 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                             .required_attributes
                             .entry(parent.clone())
                             .or_default()
-                            .push(name);
+                            .push(name.clone());
+                    }
+                    let key = format!("{parent}:{name}");
+                    if let Some(value) = attribute(&element, "default") {
+                        schema.attribute_defaults.insert(key.clone(), value);
+                    }
+                    if let Some(value) = attribute(&element, "fixed") {
+                        schema.attribute_fixed.insert(key, value);
                     }
                 }
                 if let (Some(parent), Some(child)) = (model_stack.last(), declared_name.as_ref()) {
@@ -525,7 +536,14 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                             .required_attributes
                             .entry(parent.clone())
                             .or_default()
-                            .push(name);
+                            .push(name.clone());
+                    }
+                    let key = format!("{parent}:{name}");
+                    if let Some(value) = attribute(&element, "default") {
+                        schema.attribute_defaults.insert(key.clone(), value);
+                    }
+                    if let Some(value) = attribute(&element, "fixed") {
+                        schema.attribute_fixed.insert(key, value);
                     }
                 }
                 if current_name == "element"
@@ -1531,6 +1549,17 @@ fn validate_attributes(
                 message: format!("attribut @{name} interdit sur <{element_name}>"),
             });
         }
+        if let Some(fixed) = schema
+            .attribute_fixed
+            .get(&format!("{element_name}:{name}"))
+            && attribute
+                .unescape_value()
+                .is_ok_and(|value| value.as_ref() != fixed)
+        {
+            diagnostics.push(XsdDiagnostic {
+                message: format!("attribut @{name} différent de la valeur fixed"),
+            });
+        }
     }
     if let Some(required) = schema.required_attributes.get(element_name) {
         for name in required {
@@ -1748,6 +1777,28 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.message.contains("trop d’éléments <second>"))
         );
+    }
+
+    #[test]
+    fn preserves_attribute_defaults_and_validates_fixed_values() {
+        let schema = parse_xsd(
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+                <xs:element name="item"><xs:complexType>
+                    <xs:attribute name="kind" default="normal"/>
+                    <xs:attribute name="version" fixed="1"/>
+                </xs:complexType></xs:element>
+            </xs:schema>"#,
+        )
+        .unwrap();
+
+        assert_eq!(schema.attribute_defaults["item:kind"], "normal");
+        assert_eq!(schema.attribute_fixed["item:version"], "1");
+        assert!(
+            validate_document("<item version=\"2\"/>", &schema)[0]
+                .message
+                .contains("fixed")
+        );
+        assert!(validate_document("<item version=\"1\"/>", &schema).is_empty());
     }
 
     #[test]
