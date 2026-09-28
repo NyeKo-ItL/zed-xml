@@ -288,7 +288,15 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                 };
                 if current_name == "attribute"
                     && let Some(parent) = model_stack.last()
-                    && let Some(name) = attribute(&element, "name")
+                    && let Some(name) = attribute(&element, "name").or_else(|| {
+                        attribute(&element, "ref").map(|reference| {
+                            reference
+                                .rsplit(':')
+                                .next()
+                                .unwrap_or(&reference)
+                                .to_owned()
+                        })
+                    })
                 {
                     schema
                         .attributes
@@ -453,7 +461,15 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                 }
                 if current_name == "attribute"
                     && let Some(parent) = model_stack.last()
-                    && let Some(name) = attribute(&element, "name")
+                    && let Some(name) = attribute(&element, "name").or_else(|| {
+                        attribute(&element, "ref").map(|reference| {
+                            reference
+                                .rsplit(':')
+                                .next()
+                                .unwrap_or(&reference)
+                                .to_owned()
+                        })
+                    })
                 {
                     schema
                         .attributes
@@ -1619,6 +1635,22 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.message.contains("trop d’éléments <second>"))
         );
+    }
+
+    #[test]
+    fn resolves_attribute_references() {
+        let schema = parse_xsd(
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+                <xs:attribute name="id"/>
+                <xs:element name="item"><xs:complexType>
+                    <xs:attribute ref="id"/>
+                </xs:complexType></xs:element>
+            </xs:schema>"#,
+        )
+        .unwrap();
+
+        assert_eq!(schema.attributes["item"], vec!["id"]);
+        assert!(validate_document("<item id=\"1\"/>", &schema).is_empty());
     }
 
     #[test]
