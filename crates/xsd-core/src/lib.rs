@@ -79,7 +79,11 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                 let element_name = element.name();
                 let current_name = local_name(element_name.as_ref());
                 let simple_name = if current_name == "simpleType" {
-                    attribute(&element, "name")
+                    attribute(&element, "name").or_else(|| {
+                        model_stack
+                            .last()
+                            .map(|parent| format!("__anonymous:{parent}"))
+                    })
                 } else {
                     None
                 };
@@ -349,15 +353,17 @@ pub fn complete_attribute_values(
     else {
         return Vec::new();
     };
-    let Some(type_name) = element.type_name.as_deref() else {
-        return Vec::new();
-    };
+    let type_name = element
+        .type_name
+        .as_deref()
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("__anonymous:{parent}"));
     if attribute_name.is_empty() {
         return Vec::new();
     }
     schema
         .enumerations
-        .get(type_name)
+        .get(&type_name)
         .into_iter()
         .flatten()
         .filter(|value| value.starts_with(typed))
@@ -753,6 +759,19 @@ mod tests {
         assert_eq!(schema.choices["root"], vec!["text", "number"]);
         assert!(validate_document("<root><number /></root>", &schema).is_empty());
         assert_eq!(complete_elements("<root><n", 9, &schema)[0].label, "number");
+    }
+
+    #[test]
+    fn parses_anonymous_simple_types() {
+        let schema = parse_xsd(
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+                <xs:element name="item"><xs:simpleType><xs:restriction base="xs:string">
+                    <xs:enumeration value="one"/>
+                </xs:restriction></xs:simpleType></xs:element>
+            </xs:schema>"#,
+        )
+        .unwrap();
+        assert_eq!(schema.enumerations["__anonymous:item"], vec!["one"]);
     }
 
     #[test]
