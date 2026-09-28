@@ -23,6 +23,7 @@ const DID_CHANGE_METHOD: &str = "textDocument/didChange";
 const DID_CLOSE_METHOD: &str = "textDocument/didClose";
 const PUBLISH_DIAGNOSTICS_METHOD: &str = "textDocument/publishDiagnostics";
 const FORMATTING_METHOD: &str = "textDocument/formatting";
+const RANGE_FORMATTING_METHOD: &str = "textDocument/rangeFormatting";
 const COMPLETION_METHOD: &str = "textDocument/completion";
 
 type SchemaCache = HashMap<PathBuf, (SystemTime, XsdSchema)>;
@@ -305,6 +306,7 @@ fn server_capabilities() -> Value {
     json!({
         "completionProvider": {"triggerCharacters": ["<", " ", "/"]},
         "documentFormattingProvider": true,
+        "documentRangeFormattingProvider": true,
     })
 }
 
@@ -393,7 +395,10 @@ fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
                     continue;
                 }
 
-                if request.method == FORMATTING_METHOD {
+                if matches!(
+                    request.method.as_str(),
+                    FORMATTING_METHOD | RANGE_FORMATTING_METHOD
+                ) {
                     let edits = server
                         .formatting(&request.params)
                         .unwrap_or_else(|| json!([]));
@@ -473,6 +478,7 @@ mod tests {
                         "capabilities": {
                             "completionProvider": {"triggerCharacters": ["<", " ", "/"]},
                             "documentFormattingProvider": true,
+                            "documentRangeFormattingProvider": true,
                         }
                     }))
                 );
