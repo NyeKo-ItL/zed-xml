@@ -59,6 +59,8 @@ pub struct XsdSchema {
     pub required_attributes: HashMap<String, Vec<String>>,
     pub enumerations: HashMap<String, Vec<String>>,
     pub restrictions: HashMap<String, XsdRestriction>,
+    pub lists: HashMap<String, String>,
+    pub unions: HashMap<String, Vec<String>>,
 }
 
 /// Référence XSD extraite d'un document XML.
@@ -170,6 +172,25 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                         facet,
                         value,
                     );
+                }
+                if let Some(simple_type) = simple_type_stack
+                    .iter()
+                    .rev()
+                    .find_map(|name| name.as_ref())
+                {
+                    if current_name == "list"
+                        && let Some(item_type) = attribute(&element, "itemType")
+                    {
+                        schema.lists.insert(simple_type.clone(), item_type);
+                    }
+                    if current_name == "union"
+                        && let Some(member_types) = attribute(&element, "memberTypes")
+                    {
+                        schema.unions.insert(
+                            simple_type.clone(),
+                            member_types.split_whitespace().map(str::to_owned).collect(),
+                        );
+                    }
                 }
                 simple_type_stack.push(simple_name);
                 if current_name == "schema" {
@@ -309,6 +330,25 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                         facet,
                         value,
                     );
+                }
+                if let Some(simple_type) = simple_type_stack
+                    .iter()
+                    .rev()
+                    .find_map(|name| name.as_ref())
+                {
+                    if current_name == "list"
+                        && let Some(item_type) = attribute(&element, "itemType")
+                    {
+                        schema.lists.insert(simple_type.clone(), item_type);
+                    }
+                    if current_name == "union"
+                        && let Some(member_types) = attribute(&element, "memberTypes")
+                    {
+                        schema.unions.insert(
+                            simple_type.clone(),
+                            member_types.split_whitespace().map(str::to_owned).collect(),
+                        );
+                    }
                 }
                 if current_name == "attribute"
                     && let Some(parent) = model_stack.last()
@@ -747,7 +787,8 @@ fn validate_text_content(frame: &XmlFrame, schema: &XsdSchema) -> Vec<XsdDiagnos
         .map(str::to_owned)
         .unwrap_or_else(|| format!("__anonymous:{}", frame.name));
     let value = frame.text.trim();
-    let mut diagnostics = validate_builtin_type(&frame.name, &type_name, value);
+    let mut diagnostics = validate_list_union(&frame.name, &type_name, value, schema);
+    diagnostics.extend(validate_builtin_type(&frame.name, &type_name, value));
     let Some(restriction) = schema.restrictions.get(&type_name) else {
         return diagnostics;
     };
@@ -915,6 +956,30 @@ fn set_numeric_facet(restriction: &mut XsdRestriction, facet: &str, value: Strin
         "maxExclusive" => restriction.max_exclusive = Some(value),
         _ => {}
     }
+}
+
+fn validate_list_union(
+    element_name: &str,
+    type_name: &str,
+    value: &str,
+    schema: &XsdSchema,
+) -> Vec<XsdDiagnostic> {
+    if let Some(item_type) = schema.lists.get(type_name) {
+        return value
+            .split_whitespace()
+            .flat_map(|item| validate_builtin_type(element_name, item_type, item))
+            .collect();
+    }
+    if let Some(member_types) = schema.unions.get(type_name)
+        && !member_types
+            .iter()
+            .any(|member| validate_builtin_type(element_name, member, value).is_empty())
+    {
+        return vec![XsdDiagnostic {
+            message: format!("contenu de <{element_name}> invalide pour l’union {type_name}"),
+        }];
+    }
+    Vec::new()
 }
 
 fn validate_builtin_type(element_name: &str, type_name: &str, value: &str) -> Vec<XsdDiagnostic> {
@@ -1242,6 +1307,34 @@ mod tests {
                 .contains("integer")
         );
         assert!(validate_document("<price>12.50</price>", &schema).is_empty());
+    }
+
+    #[test]
+    fn parses_and_validates_list_and_union_types() {
+        let schema = parse_xsd(
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+                <xs:simpleType name="Numbers"><xs:list itemType="xs:integer"/></xs:simpleType>
+                <xs:simpleType name="Value"><xs:union memberTypes="xs:integer xs:boolean"/></xs:simpleType>
+                <xs:element name="numbers" type="Numbers"/>
+                <xs:element name="value" type="Value"/>
+            </xs:schema>"#,
+        )
+        .unwrap();
+
+        assert_eq!(schema.lists["Numbers"], "xs:integer");
+        assert_eq!(schema.unions["Value"], vec!["xs:integer", "xs:boolean"]);
+        assert!(validate_document("<numbers>1 2 3</numbers>", &schema).is_empty());
+        assert!(
+            validate_document("<numbers>1 nope</numbers>", &schema)
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("integer"))
+        );
+        assert!(validate_document("<value>false</value>", &schema).is_empty());
+        assert!(
+            validate_document("<value>nope</value>", &schema)[0]
+                .message
+                .contains("union")
+        );
     }
 
     #[test]
