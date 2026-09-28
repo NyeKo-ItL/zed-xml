@@ -11,6 +11,8 @@ const SEQUENCE: &str = include_str!("../../../tests/fixtures/xsd/sequence.xsd");
 const INVALID_CHILD: &str = include_str!("../../../tests/fixtures/xml/invalid-child.xml");
 const CHOICE: &str = include_str!("../../../tests/fixtures/xsd/choice.xsd");
 const ENUM: &str = include_str!("../../../tests/fixtures/xsd/enum.xsd");
+const RESTRICTIONS: &str = include_str!("../../../tests/fixtures/xsd/restrictions.xsd");
+const RESTRICTED: &str = include_str!("../../../tests/fixtures/xml/restricted.xml");
 
 #[test]
 fn parses_the_shared_simple_schema() {
@@ -40,6 +42,18 @@ fn resolves_the_shared_schema_location_fixture() {
         references[0].path,
         PathBuf::from("tests/fixtures/xsd/simple.xsd")
     );
+}
+
+#[test]
+fn validates_restrictions_from_shared_fixtures() {
+    let schema = parse_xsd(RESTRICTIONS).unwrap();
+
+    assert!(
+        validate_document(RESTRICTED, &schema)
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("trop court"))
+    );
+    assert!(validate_document("<code>valid</code>", &schema).is_empty());
 }
 
 #[test]

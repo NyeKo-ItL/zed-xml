@@ -32,6 +32,13 @@ pub struct XsdElement {
     pub type_name: Option<String>,
 }
 
+/// Restriction simple portée par un type XSD.
+#[derive(Debug, Default, PartialEq, Eq, Clone)]
+pub struct XsdRestriction {
+    pub min_length: Option<usize>,
+    pub max_length: Option<usize>,
+}
+
 /// Schéma XSD minimal.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct XsdSchema {
@@ -41,6 +48,7 @@ pub struct XsdSchema {
     pub choices: HashMap<String, Vec<String>>,
     pub attributes: HashMap<String, Vec<String>>,
     pub enumerations: HashMap<String, Vec<String>>,
+    pub restrictions: HashMap<String, XsdRestriction>,
 }
 
 /// Référence XSD extraite d'un document XML.
@@ -99,6 +107,20 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                         .entry(simple_type.clone())
                         .or_default()
                         .push(value);
+                }
+                if matches!(current_name, "minLength" | "maxLength")
+                    && let Some(simple_type) = simple_type_stack
+                        .iter()
+                        .rev()
+                        .find_map(|name| name.as_ref())
+                    && let Some(value) = parse_optional_usize(attribute(&element, "value"))?
+                {
+                    let restriction = schema.restrictions.entry(simple_type.clone()).or_default();
+                    if current_name == "minLength" {
+                        restriction.min_length = Some(value);
+                    } else {
+                        restriction.max_length = Some(value);
+                    }
                 }
                 simple_type_stack.push(simple_name);
                 if current_name == "schema" {
@@ -178,6 +200,20 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                         .entry(simple_type.clone())
                         .or_default()
                         .push(value);
+                }
+                if matches!(current_name, "minLength" | "maxLength")
+                    && let Some(simple_type) = simple_type_stack
+                        .iter()
+                        .rev()
+                        .find_map(|name| name.as_ref())
+                    && let Some(value) = parse_optional_usize(attribute(&element, "value"))?
+                {
+                    let restriction = schema.restrictions.entry(simple_type.clone()).or_default();
+                    if current_name == "minLength" {
+                        restriction.min_length = Some(value);
+                    } else {
+                        restriction.max_length = Some(value);
+                    }
                 }
                 if current_name == "attribute"
                     && let Some(parent) = model_stack.last()
@@ -452,6 +488,7 @@ pub fn root_element_name(source: &str) -> Option<String> {
 struct XmlFrame {
     name: String,
     children: Vec<String>,
+    text: String,
 }
 
 /// Vérifie le document XML contre les éléments déclarés par le schéma.
@@ -481,6 +518,7 @@ pub fn validate_document(source: &str, schema: &XsdSchema) -> Vec<XsdDiagnostic>
                 stack.push(XmlFrame {
                     name,
                     children: Vec::new(),
+                    text: String::new(),
                 });
             }
             Ok(Event::Empty(element)) => {
@@ -498,6 +536,12 @@ pub fn validate_document(source: &str, schema: &XsdSchema) -> Vec<XsdDiagnostic>
             Ok(Event::End(_)) => {
                 if let Some(frame) = stack.pop() {
                     diagnostics.extend(validate_sequence_frame(&frame, schema));
+                    diagnostics.extend(validate_text_content(&frame, schema));
+                }
+            }
+            Ok(Event::Text(text)) => {
+                if let Some(frame) = stack.last_mut() {
+                    frame.text.push_str(&String::from_utf8_lossy(text.as_ref()));
                 }
             }
             Ok(Event::Eof) | Err(_) => break,
@@ -544,6 +588,48 @@ fn validate_sequence_frame(frame: &XmlFrame, schema: &XsdSchema) -> Vec<XsdDiagn
                 });
             }
         }
+    }
+    diagnostics
+}
+
+fn validate_text_content(frame: &XmlFrame, schema: &XsdSchema) -> Vec<XsdDiagnostic> {
+    let Some(element) = schema
+        .elements
+        .iter()
+        .find(|element| element.name == frame.name)
+    else {
+        return Vec::new();
+    };
+    let type_name = element
+        .type_name
+        .as_deref()
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("__anonymous:{}", frame.name));
+    let Some(restriction) = schema.restrictions.get(&type_name) else {
+        return Vec::new();
+    };
+    let value = frame.text.trim();
+    let length = value.chars().count();
+    let mut diagnostics = Vec::new();
+    if let Some(min) = restriction.min_length
+        && length < min
+    {
+        diagnostics.push(XsdDiagnostic {
+            message: format!(
+                "contenu de <{}> trop court (minimum {min} caractères)",
+                frame.name
+            ),
+        });
+    }
+    if let Some(max) = restriction.max_length
+        && length > max
+    {
+        diagnostics.push(XsdDiagnostic {
+            message: format!(
+                "contenu de <{}> trop long (maximum {max} caractères)",
+                frame.name
+            ),
+        });
     }
     diagnostics
 }
@@ -613,6 +699,16 @@ fn attribute(element: &quick_xml::events::BytesStart<'_>, wanted: &str) -> Optio
         .find(|attribute| local_name(attribute.key.as_ref()) == wanted)
         .and_then(|attribute| attribute.unescape_value().ok())
         .map(|value| value.into_owned())
+}
+
+fn parse_optional_usize(value: Option<String>) -> Result<Option<usize>, String> {
+    value
+        .map(|value| {
+            value
+                .parse()
+                .map_err(|_| "valeur numérique XSD invalide".to_owned())
+        })
+        .transpose()
 }
 
 fn parse_max_occurs(value: Option<String>) -> Result<Option<usize>, String> {
@@ -772,6 +868,50 @@ mod tests {
         )
         .unwrap();
         assert_eq!(schema.enumerations["__anonymous:item"], vec!["one"]);
+    }
+
+    #[test]
+    fn validates_simple_type_length_restrictions() {
+        let schema = parse_xsd(
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+                <xs:simpleType name="Code"><xs:restriction base="xs:string">
+                    <xs:minLength value="3"/><xs:maxLength value="5"/>
+                </xs:restriction></xs:simpleType>
+                <xs:element name="code" type="Code"/>
+            </xs:schema>"#,
+        )
+        .unwrap();
+
+        assert_eq!(schema.restrictions["Code"].min_length, Some(3));
+        assert!(
+            validate_document("<code>ok</code>", &schema)[0]
+                .message
+                .contains("trop court")
+        );
+        assert!(
+            validate_document("<code>abcdef</code>", &schema)[0]
+                .message
+                .contains("trop long")
+        );
+        assert!(validate_document("<code>valid</code>", &schema).is_empty());
+    }
+
+    #[test]
+    fn validates_anonymous_simple_type_length_restrictions() {
+        let schema = parse_xsd(
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+                <xs:element name="code"><xs:simpleType><xs:restriction base="xs:string">
+                    <xs:minLength value="2"/>
+                </xs:restriction></xs:simpleType></xs:element>
+            </xs:schema>"#,
+        )
+        .unwrap();
+
+        assert!(
+            validate_document("<code>x</code>", &schema)
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("trop court"))
+        );
     }
 
     #[test]
