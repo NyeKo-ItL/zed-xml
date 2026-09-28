@@ -687,12 +687,12 @@ fn validate_text_content(frame: &XmlFrame, schema: &XsdSchema) -> Vec<XsdDiagnos
         .as_deref()
         .map(str::to_owned)
         .unwrap_or_else(|| format!("__anonymous:{}", frame.name));
-    let Some(restriction) = schema.restrictions.get(&type_name) else {
-        return Vec::new();
-    };
     let value = frame.text.trim();
+    let mut diagnostics = validate_builtin_type(&frame.name, &type_name, value);
+    let Some(restriction) = schema.restrictions.get(&type_name) else {
+        return diagnostics;
+    };
     let length = value.chars().count();
-    let mut diagnostics = Vec::new();
     if let Some(min) = restriction.min_length
         && length < min
     {
@@ -721,6 +721,22 @@ fn validate_text_content(frame: &XmlFrame, schema: &XsdSchema) -> Vec<XsdDiagnos
         });
     }
     diagnostics
+}
+
+fn validate_builtin_type(element_name: &str, type_name: &str, value: &str) -> Vec<XsdDiagnostic> {
+    let valid = match type_name.rsplit(':').next().unwrap_or(type_name) {
+        "boolean" => matches!(value, "true" | "false" | "0" | "1"),
+        "integer" => value.parse::<i128>().is_ok(),
+        "decimal" => Regex::new(r"^-?[0-9]+(\.[0-9]+)?$").is_ok_and(|regex| regex.is_match(value)),
+        _ => true,
+    };
+    if valid {
+        Vec::new()
+    } else {
+        vec![XsdDiagnostic {
+            message: format!("contenu de <{element_name}> invalide pour le type {type_name}"),
+        }]
+    }
 }
 
 fn validate_attributes(
@@ -1008,6 +1024,30 @@ mod tests {
                 .contains("trop long")
         );
         assert!(validate_document("<code>valid</code>", &schema).is_empty());
+    }
+
+    #[test]
+    fn validates_builtin_simple_types() {
+        let schema = parse_xsd(
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+                <xs:element name="enabled" type="xs:boolean"/>
+                <xs:element name="count" type="xs:integer"/>
+                <xs:element name="price" type="xs:decimal"/>
+            </xs:schema>"#,
+        )
+        .unwrap();
+
+        assert!(
+            validate_document("<enabled>maybe</enabled>", &schema)[0]
+                .message
+                .contains("boolean")
+        );
+        assert!(
+            validate_document("<count>12.5</count>", &schema)[0]
+                .message
+                .contains("integer")
+        );
+        assert!(validate_document("<price>12.50</price>", &schema).is_empty());
     }
 
     #[test]
