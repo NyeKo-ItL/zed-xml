@@ -342,12 +342,7 @@ pub fn format_xml(source: &str) -> Result<String, String> {
                 output_started = true;
             }
             Event::Text(text) => {
-                if !text
-                    .decode()
-                    .map_err(|error| error.to_string())?
-                    .trim()
-                    .is_empty()
-                {
+                if !String::from_utf8_lossy(text.as_ref()).trim().is_empty() {
                     if let Some(has_text) = stack.last_mut() {
                         *has_text = true;
                     }
@@ -512,6 +507,16 @@ mod tests {
                     insert_text: "name".to_owned(),
                 }
             ]
+        );
+    }
+
+    #[test]
+    fn formats_documents_with_legacy_declared_encodings() {
+        let source = "<?xml version=\"1.0\" encoding=\"iso-8859-1\" ?><root><label>Montant cautionné</label></root>";
+        let formatted = format_xml(source).expect("legacy encoding declaration should be accepted");
+        assert_eq!(
+            formatted,
+            "<?xml version=\"1.0\" encoding=\"iso-8859-1\" ?>\n<root>\n  <label>Montant cautionné</label>\n</root>\n"
         );
     }
 

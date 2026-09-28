@@ -8,7 +8,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
+use lsp_server::{Connection, Message, Notification, Response};
 use quick_xml::{Reader, events::Event};
 use serde_json::{Value, json};
 use xml_core::{XmlDiagnostic, auto_close_tag, complete_xml, format_xml, parse_xml};
@@ -17,6 +17,7 @@ use xsd_core::{
     parse_xsd, resolve_schema_dependencies, resolve_schema_locations, validate_document_located,
 };
 
+#[cfg(test)]
 const INITIALIZE_METHOD: &str = "initialize";
 const EXIT_METHOD: &str = "exit";
 const DID_OPEN_METHOD: &str = "textDocument/didOpen";
@@ -872,6 +873,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lsp_server::{Request, RequestId};
     use std::thread;
 
     #[test]
