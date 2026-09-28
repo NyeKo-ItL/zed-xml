@@ -55,6 +55,7 @@ pub struct XsdSchema {
     pub elements: Vec<XsdElement>,
     pub children: HashMap<String, Vec<String>>,
     pub choices: HashMap<String, Vec<String>>,
+    pub alls: HashMap<String, Vec<String>>,
     pub attributes: HashMap<String, Vec<String>>,
     pub required_attributes: HashMap<String, Vec<String>>,
     pub enumerations: HashMap<String, Vec<String>>,
@@ -75,6 +76,7 @@ pub fn merge_schemas(schemas: impl IntoIterator<Item = XsdSchema>) -> XsdSchema 
         merged.elements.extend(schema.elements);
         merge_string_lists(&mut merged.children, schema.children);
         merge_string_lists(&mut merged.choices, schema.choices);
+        merge_string_lists(&mut merged.alls, schema.alls);
         merge_string_lists(&mut merged.attributes, schema.attributes);
         merge_string_lists(&mut merged.required_attributes, schema.required_attributes);
         merge_string_lists(&mut merged.enumerations, schema.enumerations);
@@ -129,6 +131,7 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
     let mut model_stack: Vec<String> = Vec::new();
     let mut sequence_depth = 0usize;
     let mut choice_depth = 0usize;
+    let mut all_depth = 0usize;
     let mut simple_type_stack: Vec<Option<String>> = Vec::new();
 
     loop {
@@ -252,6 +255,9 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                 if current_name == "choice" {
                     choice_depth += 1;
                 }
+                if current_name == "all" {
+                    all_depth += 1;
+                }
                 let declared_name = if current_name == "element" {
                     attribute(&element, "name")
                 } else {
@@ -285,6 +291,13 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                     if choice_depth > 0 {
                         schema
                             .choices
+                            .entry(parent.clone())
+                            .or_default()
+                            .push(child.clone());
+                    }
+                    if all_depth > 0 {
+                        schema
+                            .alls
                             .entry(parent.clone())
                             .or_default()
                             .push(child.clone());
@@ -447,6 +460,13 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                                 .or_default()
                                 .push(name.clone());
                         }
+                        if all_depth > 0 {
+                            schema
+                                .alls
+                                .entry(parent.clone())
+                                .or_default()
+                                .push(name.clone());
+                        }
                     }
                     schema.elements.push(XsdElement {
                         name,
@@ -471,6 +491,9 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                 }
                 if current_name == "choice" {
                     choice_depth = choice_depth.saturating_sub(1);
+                }
+                if current_name == "all" {
+                    all_depth = all_depth.saturating_sub(1);
                 }
                 if element_stack.pop().flatten().is_some() {
                     model_stack.pop();
@@ -713,6 +736,7 @@ pub fn complete_elements(source: &str, offset: usize, schema: &XsdSchema) -> Vec
         .map(|parent| {
             let mut names = schema.children.get(parent).cloned().unwrap_or_default();
             names.extend(schema.choices.get(parent).cloned().unwrap_or_default());
+            names.extend(schema.alls.get(parent).cloned().unwrap_or_default());
             names.sort();
             names.dedup();
             names
@@ -837,14 +861,18 @@ pub fn validate_document(source: &str, schema: &XsdSchema) -> Vec<XsdDiagnostic>
 }
 
 fn validate_sequence_frame(frame: &XmlFrame, schema: &XsdSchema) -> Vec<XsdDiagnostic> {
-    let Some(expected) = schema.children.get(&frame.name) else {
+    let Some(expected) = schema
+        .children
+        .get(&frame.name)
+        .or_else(|| schema.alls.get(&frame.name))
+    else {
         return Vec::new();
     };
     let mut diagnostics = Vec::new();
     let mut previous_index = 0;
     for child in &frame.children {
         if let Some(index) = expected.iter().position(|name| name == child) {
-            if index < previous_index {
+            if !schema.alls.contains_key(&frame.name) && index < previous_index {
                 diagnostics.push(XsdDiagnostic {
                     message: format!("ordre inattendu de <{child}> dans <{}>", frame.name),
                 });
@@ -1139,11 +1167,13 @@ fn validate_attributes(
 fn is_allowed_child(schema: &XsdSchema, parent: &str, child: &str) -> bool {
     let sequence = schema.children.get(parent);
     let choice = schema.choices.get(parent);
-    if sequence.is_none() && choice.is_none() {
+    let all = schema.alls.get(parent);
+    if sequence.is_none() && choice.is_none() && all.is_none() {
         return true;
     }
     sequence.is_some_and(|children| children.iter().any(|name| name == child))
         || choice.is_some_and(|children| children.iter().any(|name| name == child))
+        || all.is_some_and(|children| children.iter().any(|name| name == child))
 }
 
 /// Vérifie que le nom de la racine XML est déclaré par le schéma.
@@ -1338,6 +1368,27 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.message.contains("trop d’éléments <second>"))
         );
+    }
+
+    #[test]
+    fn supports_all_children_without_order_constraints() {
+        let schema = parse_xsd(
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+                <xs:element name="root"><xs:complexType><xs:all>
+                    <xs:element name="first"/><xs:element name="second" minOccurs="0"/>
+                </xs:all></xs:complexType></xs:element>
+            </xs:schema>"#,
+        )
+        .unwrap();
+
+        assert_eq!(schema.alls["root"], vec!["first", "second"]);
+        assert!(validate_document("<root><second/><first/></root>", &schema).is_empty());
+        assert!(
+            validate_document("<root></root>", &schema)[0]
+                .message
+                .contains("<first> requis")
+        );
+        assert_eq!(complete_elements("<root><", 8, &schema).len(), 2);
     }
 
     #[test]
