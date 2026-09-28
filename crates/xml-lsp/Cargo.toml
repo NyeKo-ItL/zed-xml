@@ -1,0 +1,12 @@
+[package]
+name = "xml-lsp"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "xml-lsp"
+path = "src/main.rs"
+
+[dependencies]
+xml-core = { path = "../xml-core" }
+xsd-core = { path = "../xsd-core" }

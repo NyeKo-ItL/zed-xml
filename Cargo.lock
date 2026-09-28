@@ -729,6 +729,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
+name = "xml-core"
+version = "0.1.0"
+
+[[package]]
+name = "xml-lsp"
+version = "0.1.0"
+dependencies = [
+ "xml-core",
+ "xsd-core",
+]
+
+[[package]]
+name = "xsd-core"
+version = "0.1.0"
+
+[[package]]
 name = "yoke"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
