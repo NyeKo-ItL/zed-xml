@@ -102,6 +102,36 @@ impl XmlLanguageServer {
             .into(),
         )?;
 
+        if is_xsd_uri(&uri) {
+            let dependent_uris = self
+                .documents
+                .keys()
+                .filter(|document_uri| *document_uri != &uri)
+                .filter(|document_uri| self.references_schema(document_uri, &uri))
+                .cloned()
+                .collect::<Vec<_>>();
+            for dependent_uri in dependent_uris {
+                let Some(dependent_source) = self.documents.get(&dependent_uri).cloned() else {
+                    continue;
+                };
+                let dependent_xml_diagnostics = parse_xml(&dependent_source).diagnostics;
+                let dependent_xsd_diagnostics =
+                    self.schema_diagnostics(&dependent_uri, &dependent_source);
+                connection.sender.send(
+                    Notification {
+                        method: PUBLISH_DIAGNOSTICS_METHOD.to_owned(),
+                        params: diagnostics_params(
+                            &dependent_uri,
+                            &dependent_source,
+                            &dependent_xml_diagnostics,
+                            &dependent_xsd_diagnostics,
+                        ),
+                    }
+                    .into(),
+                )?;
+            }
+        }
+
         Ok(false)
     }
 
@@ -186,6 +216,21 @@ impl XmlLanguageServer {
                 })
             })
             .collect()
+    }
+
+    fn references_schema(&self, document_uri: &str, schema_uri: &str) -> bool {
+        let Some(source) = self.documents.get(document_uri) else {
+            return false;
+        };
+        let document_path = uri_to_path(document_uri);
+        let schema_path = uri_to_path(schema_uri);
+        resolve_schema_locations(schema_resolution_source(source), document_path)
+            .map(|references| {
+                references
+                    .into_iter()
+                    .any(|reference| reference.path == schema_path)
+            })
+            .unwrap_or(false)
     }
 
     fn schema_diagnostics(&mut self, uri: &str, source: &str) -> Vec<Value> {
@@ -378,6 +423,12 @@ impl XmlLanguageServer {
         };
         Some((uri, text))
     }
+}
+
+fn is_xsd_uri(uri: &str) -> bool {
+    uri_to_path(uri)
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("xsd"))
 }
 
 fn schema_resolution_source(source: &str) -> &str {
@@ -804,6 +855,30 @@ fn main() {
 mod tests {
     use super::*;
     use std::thread;
+
+    #[test]
+    fn tracks_open_workspace_documents_referencing_an_xsd() {
+        let schema_path =
+            std::env::temp_dir().join(format!("xml-lsp-workspace-{}.xsd", std::process::id()));
+        std::fs::write(
+            &schema_path,
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"><xs:element name="root"/></xs:schema>"#,
+        )
+        .expect("schema should be written");
+        let xml_path = schema_path.with_file_name("workspace.xml");
+        let xml_uri = path_to_uri(&xml_path);
+        let xsd_uri = path_to_uri(&schema_path);
+        let xml_source = format!(
+            "<root xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:noNamespaceSchemaLocation=\"{}\" />",
+            schema_path.file_name().unwrap().to_string_lossy()
+        );
+        let mut server = XmlLanguageServer::new();
+        server.documents.insert(xml_uri.clone(), xml_source);
+        server.documents.insert(xsd_uri.clone(), String::new());
+        assert!(server.references_schema(&xml_uri, &xsd_uri));
+        assert!(is_xsd_uri(&xsd_uri));
+        std::fs::remove_file(schema_path).expect("schema should be removed");
+    }
 
     #[test]
     fn serves_initialize_diagnostics_shutdown_and_exit() {
