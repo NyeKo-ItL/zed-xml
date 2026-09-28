@@ -28,4 +28,5 @@ target
 docs/
 
 # Generated Tree-sitter grammar sources
-/grammars/*/
+/grammars/
+*.wasm
