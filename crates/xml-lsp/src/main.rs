@@ -75,7 +75,17 @@ impl XmlLanguageServer {
 
         let Some((uri, text)) = (match notification.method.as_str() {
             DID_OPEN_METHOD => Self::opened_document(&notification.params),
-            DID_CHANGE_METHOD => Self::changed_document(&notification.params),
+            DID_CHANGE_METHOD => {
+                let Some(uri) = notification
+                    .params
+                    .get("textDocument")
+                    .and_then(|document| document.get("uri"))
+                    .and_then(Value::as_str)
+                else {
+                    return Ok(false);
+                };
+                Self::changed_document(&notification.params, self.documents.get(uri))
+            }
             _ => None,
         }) else {
             return Ok(false);
@@ -293,16 +303,34 @@ impl XmlLanguageServer {
         }]))
     }
 
-    fn changed_document(params: &Value) -> Option<(String, String)> {
+    fn changed_document(params: &Value, current: Option<&String>) -> Option<(String, String)> {
         let document = params.get("textDocument")?;
         let uri = document.get("uri")?.as_str()?.to_owned();
-        let text = params
-            .get("contentChanges")?
-            .as_array()?
-            .first()?
-            .get("text")?
-            .as_str()?
-            .to_owned();
+        let change = params.get("contentChanges")?.as_array()?.first()?;
+        let replacement = change.get("text")?.as_str()?;
+        let text = if let Some(range) = change.get("range") {
+            let current = current?;
+            let start = range.get("start")?;
+            let end = range.get("end")?;
+            let start_offset = offset_at(
+                current,
+                start.get("line")?.as_u64()? as usize,
+                start.get("character")?.as_u64()? as usize,
+            );
+            let end_offset = offset_at(
+                current,
+                end.get("line")?.as_u64()? as usize,
+                end.get("character")?.as_u64()? as usize,
+            );
+            let mut updated = current.clone();
+            updated.replace_range(
+                start_offset.min(updated.len())..end_offset.min(updated.len()),
+                replacement,
+            );
+            updated
+        } else {
+            replacement.to_owned()
+        };
         Some((uri, text))
     }
 }
@@ -976,6 +1004,26 @@ mod tests {
             .expect("exit should be sent");
 
         server_thread.join().expect("server thread should stop");
+    }
+
+    #[test]
+    fn applies_incremental_lsp_changes() {
+        let updated = XmlLanguageServer::changed_document(
+            &json!({
+                "textDocument": {"uri": "file:///document.xml"},
+                "contentChanges": [{
+                    "range": {
+                        "start": {"line": 0, "character": 6},
+                        "end": {"line": 0, "character": 11}
+                    },
+                    "text": "item"
+                }]
+            }),
+            Some(&"<root>child</root>".to_owned()),
+        )
+        .unwrap();
+
+        assert_eq!(updated.1, "<root>item</root>");
     }
 
     #[test]
