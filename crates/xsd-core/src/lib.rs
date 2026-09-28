@@ -602,6 +602,7 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
 
     apply_attribute_group_references(source, &mut schema)?;
     apply_model_group_references(source, &mut schema)?;
+    apply_content_extensions(&mut schema);
     if schema.elements.is_empty() {
         return Err("le schéma XSD ne contient aucun xs:element".to_owned());
     }
@@ -694,6 +695,27 @@ pub fn resolve_schema_dependencies(
         }
     }
     Ok(references)
+}
+
+fn apply_content_extensions(schema: &mut XsdSchema) {
+    let complex_extensions = schema.complex_extensions.clone();
+    for (element_name, base) in complex_extensions {
+        if let Some(base_attributes) = schema.attributes.get(&base).cloned() {
+            let attributes = schema.attributes.entry(element_name).or_default();
+            for attribute in base_attributes {
+                if !attributes.contains(&attribute) {
+                    attributes.push(attribute);
+                }
+            }
+        }
+    }
+    for element in &mut schema.elements {
+        if element.type_name.is_none()
+            && let Some(base) = schema.simple_extensions.get(&element.name)
+        {
+            element.type_name = Some(base.clone());
+        }
+    }
 }
 
 fn apply_model_group_references(source: &str, schema: &mut XsdSchema) -> Result<(), String> {
@@ -1697,6 +1719,7 @@ mod tests {
 
         assert_eq!(schema.complex_extensions["complex"], "Base");
         assert_eq!(schema.simple_extensions["simple"], "xs:string");
+        assert_eq!(schema.elements[1].type_name.as_deref(), Some("xs:string"));
     }
 
     #[test]
