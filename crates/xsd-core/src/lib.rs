@@ -152,6 +152,13 @@ pub struct XsdDiagnostic {
     pub message: String,
 }
 
+/// Diagnostic XSD associé à un offset dans le document XML.
+#[derive(Debug, PartialEq, Eq)]
+pub struct LocatedXsdDiagnostic {
+    pub message: String,
+    pub offset: usize,
+}
+
 /// Parse un `xs:schema`, ses éléments et une première `xs:sequence`.
 pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
     let mut reader = Reader::from_str(source);
@@ -1184,6 +1191,28 @@ struct XmlFrame {
     text: String,
 }
 
+/// Vérifie le document XML et associe chaque diagnostic à un offset approximatif.
+pub fn validate_document_located(source: &str, schema: &XsdSchema) -> Vec<LocatedXsdDiagnostic> {
+    validate_document(source, schema)
+        .into_iter()
+        .map(|diagnostic| LocatedXsdDiagnostic {
+            offset: diagnostic_offset(source, &diagnostic.message),
+            message: diagnostic.message,
+        })
+        .collect()
+}
+
+fn diagnostic_offset(source: &str, message: &str) -> usize {
+    let Some(start) = message.find('<') else {
+        return 0;
+    };
+    let Some(end) = message[start + 1..].find('>') else {
+        return 0;
+    };
+    let name = &message[start + 1..start + 1 + end];
+    source.find(&format!("<{name}")).unwrap_or_default()
+}
+
 /// Vérifie le document XML contre les éléments déclarés par le schéma.
 pub fn validate_document(source: &str, schema: &XsdSchema) -> Vec<XsdDiagnostic> {
     let mut diagnostics = match root_element_name(source) {
@@ -1750,6 +1779,19 @@ mod tests {
 
         assert!(validate_root("root", &schema).is_empty());
         assert_eq!(validate_root("unknown", &schema).len(), 1);
+    }
+
+    #[test]
+    fn locates_validation_diagnostics_in_the_xml_source() {
+        let schema = parse_xsd(SEQUENCE).unwrap();
+        let source = "<root><magazine /></root>";
+        let diagnostics = validate_document_located(source, &schema);
+
+        assert_eq!(
+            diagnostics[0].message,
+            "élément <magazine> interdit dans <root>"
+        );
+        assert_eq!(diagnostics[0].offset, source.find("<magazine").unwrap());
     }
 
     #[test]

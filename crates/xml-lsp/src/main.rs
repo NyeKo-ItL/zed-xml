@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use xml_core::{XmlDiagnostic, auto_close_tag, complete_xml, format_xml, parse_xml};
 use xsd_core::{
     XsdSchema, complete_attribute_values, complete_attributes, complete_elements, merge_schemas,
-    parse_xsd, resolve_schema_dependencies, resolve_schema_locations, validate_document,
+    parse_xsd, resolve_schema_dependencies, resolve_schema_locations, validate_document_located,
 };
 
 const INITIALIZE_METHOD: &str = "initialize";
@@ -187,11 +187,11 @@ impl XmlLanguageServer {
             .collect::<Vec<_>>();
         if !schemas.is_empty() {
             let schema = merge_schemas(schemas);
-            diagnostics.extend(
-                validate_document(source, &schema)
-                    .into_iter()
-                    .map(|diagnostic| xsd_error_diagnostic(diagnostic.message)),
-            );
+            diagnostics.extend(validate_document_located(source, &schema).into_iter().map(
+                |diagnostic| {
+                    xsd_error_diagnostic_at(&diagnostic.message, source, diagnostic.offset)
+                },
+            ));
         }
 
         diagnostics
@@ -287,6 +287,17 @@ fn load_schema_graph(
     }
 
     (schemas, errors)
+}
+
+fn xsd_error_diagnostic_at(message: &str, source: &str, offset: usize) -> Value {
+    let position = position_at(source, offset);
+    json!({
+        "range": {"start": position, "end": position_at(source, offset)},
+        "severity": 1,
+        "source": "xml-lsp",
+        "code": "xsd-validation",
+        "message": message,
+    })
 }
 
 fn xsd_error_diagnostic(diagnostic: impl Into<String>) -> Value {
