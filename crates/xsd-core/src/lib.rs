@@ -39,6 +39,7 @@ pub struct XsdSchema {
     pub elements: Vec<XsdElement>,
     pub children: HashMap<String, Vec<String>>,
     pub choices: HashMap<String, Vec<String>>,
+    pub attributes: HashMap<String, Vec<String>>,
     pub enumerations: HashMap<String, Vec<String>>,
 }
 
@@ -110,6 +111,16 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                 } else {
                     None
                 };
+                if current_name == "attribute"
+                    && let Some(parent) = model_stack.last()
+                    && let Some(name) = attribute(&element, "name")
+                {
+                    schema
+                        .attributes
+                        .entry(parent.clone())
+                        .or_default()
+                        .push(name);
+                }
                 if let (Some(parent), Some(child)) = (model_stack.last(), declared_name.as_ref()) {
                     if sequence_depth > 0 {
                         schema
@@ -163,6 +174,16 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                         .entry(simple_type.clone())
                         .or_default()
                         .push(value);
+                }
+                if current_name == "attribute"
+                    && let Some(parent) = model_stack.last()
+                    && let Some(name) = attribute(&element, "name")
+                {
+                    schema
+                        .attributes
+                        .entry(parent.clone())
+                        .or_default()
+                        .push(name);
                 }
                 if current_name == "element"
                     && let Some(name) = attribute(&element, "name")
@@ -442,6 +463,7 @@ pub fn validate_document(source: &str, schema: &XsdSchema) -> Vec<XsdDiagnostic>
         match reader.read_event() {
             Ok(Event::Start(element)) => {
                 let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
+                diagnostics.extend(validate_attributes(schema, &name, &element));
                 if let Some(parent) = stack.last_mut() {
                     if !is_allowed_child(schema, &parent.name, &name) {
                         diagnostics.push(XsdDiagnostic {
@@ -457,6 +479,7 @@ pub fn validate_document(source: &str, schema: &XsdSchema) -> Vec<XsdDiagnostic>
             }
             Ok(Event::Empty(element)) => {
                 let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
+                diagnostics.extend(validate_attributes(schema, &name, &element));
                 if let Some(parent) = stack.last_mut() {
                     if !is_allowed_child(schema, &parent.name, &name) {
                         diagnostics.push(XsdDiagnostic {
@@ -517,6 +540,34 @@ fn validate_sequence_frame(frame: &XmlFrame, schema: &XsdSchema) -> Vec<XsdDiagn
         }
     }
     diagnostics
+}
+
+fn validate_attributes(
+    schema: &XsdSchema,
+    element_name: &str,
+    element: &quick_xml::events::BytesStart<'_>,
+) -> Vec<XsdDiagnostic> {
+    let Some(allowed) = schema.attributes.get(element_name) else {
+        return Vec::new();
+    };
+    element
+        .attributes()
+        .flatten()
+        .filter_map(|attribute| {
+            let raw_name = String::from_utf8_lossy(attribute.key.as_ref());
+            let name = local_name(attribute.key.as_ref());
+            if raw_name == "xmlns"
+                || raw_name.starts_with("xmlns:")
+                || allowed.iter().any(|item| item == name)
+            {
+                None
+            } else {
+                Some(XsdDiagnostic {
+                    message: format!("attribut @{name} interdit sur <{element_name}>"),
+                })
+            }
+        })
+        .collect()
 }
 
 fn is_allowed_child(schema: &XsdSchema, parent: &str, child: &str) -> bool {
@@ -642,6 +693,26 @@ mod tests {
         assert_eq!(
             validate_document("<root><other /></root>", &schema)[0].message,
             "élément <other> interdit dans <root>"
+        );
+    }
+
+    #[test]
+    fn validates_declared_attributes() {
+        let schema = parse_xsd(
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+                <xs:element name="item"><xs:complexType>
+                    <xs:attribute name="id"/>
+                </xs:complexType></xs:element>
+            </xs:schema>"#,
+        )
+        .unwrap();
+
+        assert_eq!(schema.attributes["item"], vec!["id"]);
+        assert!(validate_document("<item id=\"1\"/>", &schema).is_empty());
+        assert!(
+            validate_document("<item other=\"1\"/>", &schema)[0]
+                .message
+                .contains("@other interdit")
         );
     }
 
