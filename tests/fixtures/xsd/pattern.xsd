@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <xs:simpleType name="UpperCode">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[A-Z]{3}" />
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:element name="code" type="UpperCode" />
+</xs:schema>

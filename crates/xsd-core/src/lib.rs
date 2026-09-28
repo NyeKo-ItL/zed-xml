@@ -7,6 +7,7 @@ use std::{
 };
 
 use quick_xml::{Reader, events::Event};
+use regex::Regex;
 
 /// Cardinalité d'un élément XSD.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -37,6 +38,7 @@ pub struct XsdElement {
 pub struct XsdRestriction {
     pub min_length: Option<usize>,
     pub max_length: Option<usize>,
+    pub pattern: Option<String>,
 }
 
 /// Schéma XSD minimal.
@@ -107,6 +109,19 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                         .entry(simple_type.clone())
                         .or_default()
                         .push(value);
+                }
+                if current_name == "pattern"
+                    && let Some(simple_type) = simple_type_stack
+                        .iter()
+                        .rev()
+                        .find_map(|name| name.as_ref())
+                    && let Some(pattern) = attribute(&element, "value")
+                {
+                    schema
+                        .restrictions
+                        .entry(simple_type.clone())
+                        .or_default()
+                        .pattern = Some(pattern);
                 }
                 if matches!(current_name, "minLength" | "maxLength")
                     && let Some(simple_type) = simple_type_stack
@@ -200,6 +215,19 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                         .entry(simple_type.clone())
                         .or_default()
                         .push(value);
+                }
+                if current_name == "pattern"
+                    && let Some(simple_type) = simple_type_stack
+                        .iter()
+                        .rev()
+                        .find_map(|name| name.as_ref())
+                    && let Some(pattern) = attribute(&element, "value")
+                {
+                    schema
+                        .restrictions
+                        .entry(simple_type.clone())
+                        .or_default()
+                        .pattern = Some(pattern);
                 }
                 if matches!(current_name, "minLength" | "maxLength")
                     && let Some(simple_type) = simple_type_stack
@@ -631,6 +659,13 @@ fn validate_text_content(frame: &XmlFrame, schema: &XsdSchema) -> Vec<XsdDiagnos
             ),
         });
     }
+    if let Some(pattern) = &restriction.pattern
+        && Regex::new(pattern).is_ok_and(|regex| !regex.is_match(value))
+    {
+        diagnostics.push(XsdDiagnostic {
+            message: format!("contenu de <{}> ne respecte pas le motif XSD", frame.name),
+        });
+    }
     diagnostics
 }
 
@@ -894,6 +929,30 @@ mod tests {
                 .contains("trop long")
         );
         assert!(validate_document("<code>valid</code>", &schema).is_empty());
+    }
+
+    #[test]
+    fn validates_simple_type_patterns() {
+        let schema = parse_xsd(
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+                <xs:simpleType name="Code"><xs:restriction base="xs:string">
+                    <xs:pattern value="[A-Z]{3}"/>
+                </xs:restriction></xs:simpleType>
+                <xs:element name="code" type="Code"/>
+            </xs:schema>"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            schema.restrictions["Code"].pattern.as_deref(),
+            Some("[A-Z]{3}")
+        );
+        assert!(
+            validate_document("<code>abc</code>", &schema)[0]
+                .message
+                .contains("motif")
+        );
+        assert!(validate_document("<code>ABC</code>", &schema).is_empty());
     }
 
     #[test]

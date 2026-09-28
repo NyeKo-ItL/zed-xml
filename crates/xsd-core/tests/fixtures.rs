@@ -13,6 +13,8 @@ const CHOICE: &str = include_str!("../../../tests/fixtures/xsd/choice.xsd");
 const ENUM: &str = include_str!("../../../tests/fixtures/xsd/enum.xsd");
 const RESTRICTIONS: &str = include_str!("../../../tests/fixtures/xsd/restrictions.xsd");
 const RESTRICTED: &str = include_str!("../../../tests/fixtures/xml/restricted.xml");
+const PATTERN: &str = include_str!("../../../tests/fixtures/xsd/pattern.xsd");
+const PATTERN_INVALID: &str = include_str!("../../../tests/fixtures/xml/pattern-invalid.xml");
 
 #[test]
 fn parses_the_shared_simple_schema() {
@@ -54,6 +56,18 @@ fn validates_restrictions_from_shared_fixtures() {
             .any(|diagnostic| diagnostic.message.contains("trop court"))
     );
     assert!(validate_document("<code>valid</code>", &schema).is_empty());
+}
+
+#[test]
+fn validates_pattern_from_shared_fixtures() {
+    let schema = parse_xsd(PATTERN).unwrap();
+
+    assert!(
+        validate_document(PATTERN_INVALID, &schema)
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("motif"))
+    );
+    assert!(validate_document("<code>ABC</code>", &schema).is_empty());
 }
 
 #[test]
