@@ -26,3 +26,6 @@ target
 /target
 
 docs/
+
+# Generated Tree-sitter grammar sources
+/grammars/*/
