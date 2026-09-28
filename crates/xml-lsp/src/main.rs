@@ -236,22 +236,56 @@ impl XmlLanguageServer {
         Some(Value::Array(locations))
     }
 
-    fn definition(&self, params: &Value) -> Option<Value> {
+    fn definition(&mut self, params: &Value) -> Option<Value> {
         let uri = params.get("textDocument")?.get("uri")?.as_str()?;
-        let source = self.documents.get(uri)?;
+        let source = self.documents.get(uri)?.clone();
         let position = params.get("position")?;
         let line = position.get("line")?.as_u64()? as usize;
         let character = position.get("character")?.as_u64()? as usize;
-        let offset = offset_at(source, line, character);
-        let name = element_name_at(source, offset)?;
+        let offset = offset_at(&source, line, character);
+        let name = element_name_at(&source, offset)?;
+        if let Some((path, schema_source, offset)) = self.xsd_definition(uri, &source, &name) {
+            return Some(json!([{
+                "uri": path_to_uri(&path),
+                "range": {
+                    "start": position_at(&schema_source, offset),
+                    "end": position_at(&schema_source, offset + name.len()),
+                },
+            }]));
+        }
         let declaration = source.find(&format!("<{name}"))?;
         Some(json!([{
             "uri": uri,
             "range": {
-                "start": position_at(source, declaration),
-                "end": position_at(source, declaration + name.len() + 1),
+                "start": position_at(&source, declaration),
+                "end": position_at(&source, declaration + name.len() + 1),
             },
         }]))
+    }
+
+    fn xsd_definition(
+        &mut self,
+        uri: &str,
+        source: &str,
+        name: &str,
+    ) -> Option<(PathBuf, String, usize)> {
+        let references =
+            resolve_schema_locations(schema_resolution_source(source), uri_to_path(uri)).ok()?;
+        let mut queue = references;
+        let mut visited = HashSet::new();
+        while let Some(reference) = queue.pop() {
+            if !visited.insert(reference.path.clone()) {
+                continue;
+            }
+            let schema_source = fs::read_to_string(&reference.path).ok()?;
+            if let Some(offset) = xsd_element_name_offset(&schema_source, name) {
+                return Some((reference.path, schema_source, offset));
+            }
+            if let Ok(dependencies) = resolve_schema_dependencies(&schema_source, &reference.path) {
+                queue.extend(dependencies);
+            }
+        }
+        None
     }
 
     fn hover(&mut self, params: &Value) -> Option<Value> {
@@ -343,6 +377,56 @@ fn uri_to_path(uri: &str) -> PathBuf {
     let raw = uri.strip_prefix("file://").unwrap_or(uri);
     let raw = raw.strip_prefix('/').unwrap_or(raw);
     PathBuf::from(raw.replace("%20", " "))
+}
+
+fn path_to_uri(path: &std::path::Path) -> String {
+    let path = path
+        .to_string_lossy()
+        .replace('\\', "/")
+        .replace(' ', "%20");
+    if path.as_bytes().get(1) == Some(&b':') {
+        format!("file:///{path}")
+    } else if path.starts_with('/') {
+        format!("file://{path}")
+    } else {
+        format!("file:///{path}")
+    }
+}
+
+fn xsd_element_name_offset(source: &str, expected_name: &str) -> Option<usize> {
+    let mut reader = Reader::from_str(source);
+    let mut search_from = 0usize;
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element)) | Ok(Event::Empty(element)) => {
+                let qname = element.name();
+                let local = String::from_utf8_lossy(qname.as_ref());
+                let event_end = reader.buffer_position() as usize;
+                let event_start = source[search_from..event_end]
+                    .find('<')
+                    .map(|offset| search_from + offset)
+                    .unwrap_or(search_from);
+                search_from = event_end;
+                if !local.ends_with(":element") && local != "element" {
+                    continue;
+                }
+                for attribute in element.attributes().flatten() {
+                    if attribute.key.as_ref() == b"name" {
+                        let value = attribute.unescape_value().ok()?.into_owned();
+                        if value != expected_name {
+                            continue;
+                        }
+                        let attribute_start = source[event_start..event_end]
+                            .find("name=\"")
+                            .map(|offset| event_start + offset + 6)?;
+                        return Some(attribute_start);
+                    }
+                }
+            }
+            Ok(Event::Eof) | Err(_) => return None,
+            Ok(_) => {}
+        }
+    }
 }
 
 fn load_schema_graph(
@@ -1062,6 +1146,42 @@ mod tests {
             definition[0]["range"]["start"],
             json!({"line": 0, "character": 6})
         );
+    }
+
+    #[test]
+    fn resolves_xsd_element_definitions() {
+        let schema_path =
+            std::env::temp_dir().join(format!("xml-lsp-definition-{}.xsd", std::process::id()));
+        let schema_source = r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"><xs:element name="root"/><xs:attribute name="root"/></xs:schema>"#;
+        std::fs::write(&schema_path, schema_source).expect("schema should be written");
+
+        let document_path = schema_path.with_file_name("definition.xml");
+        let uri = path_to_uri(&document_path);
+        let schema_name = schema_path.file_name().unwrap().to_string_lossy();
+        let source = format!(
+            "<root xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:noNamespaceSchemaLocation=\"{schema_name}\" />"
+        );
+        let mut server = XmlLanguageServer::new();
+        server.documents.insert(uri.clone(), source);
+        let definition = server
+            .definition(&json!({
+                "textDocument": {"uri": uri},
+                "position": {"line": 0, "character": 5},
+            }))
+            .expect("XSD definition should be found");
+
+        assert_eq!(definition[0]["uri"], path_to_uri(&schema_path));
+        let expected_offset = schema_source.find("name=\"root\"").unwrap() + 6;
+        assert_eq!(
+            definition[0]["range"]["start"],
+            position_at(schema_source, expected_offset)
+        );
+        assert_eq!(
+            definition[0]["range"]["end"],
+            position_at(schema_source, expected_offset + "root".len())
+        );
+
+        std::fs::remove_file(schema_path).expect("schema should be removed");
     }
 
     #[test]
