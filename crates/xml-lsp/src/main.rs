@@ -751,7 +751,7 @@ fn server_capabilities() -> Value {
     json!({
         "completionProvider": {"triggerCharacters": ["<", " ", "/"]},
         "documentFormattingProvider": true,
-        "documentRangeFormattingProvider": true,
+        "documentRangeFormattingProvider": false,
         "documentSymbolProvider": true,
         "hoverProvider": true,
         "definitionProvider": true,
@@ -999,7 +999,7 @@ mod tests {
                         "capabilities": {
                             "completionProvider": {"triggerCharacters": ["<", " ", "/"]},
                             "documentFormattingProvider": true,
-                            "documentRangeFormattingProvider": true,
+                            "documentRangeFormattingProvider": false,
                             "documentSymbolProvider": true,
                             "hoverProvider": true,
                             "definitionProvider": true,
