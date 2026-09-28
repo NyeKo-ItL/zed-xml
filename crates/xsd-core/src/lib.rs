@@ -39,6 +39,10 @@ pub struct XsdRestriction {
     pub length: Option<usize>,
     pub min_length: Option<usize>,
     pub max_length: Option<usize>,
+    pub min_inclusive: Option<String>,
+    pub max_inclusive: Option<String>,
+    pub min_exclusive: Option<String>,
+    pub max_exclusive: Option<String>,
     pub pattern: Option<String>,
 }
 
@@ -138,6 +142,19 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                         "minLength" => restriction.min_length = Some(value),
                         _ => restriction.max_length = Some(value),
                     }
+                }
+                if let Some(facet) = numeric_facet(current_name)
+                    && let Some(simple_type) = simple_type_stack
+                        .iter()
+                        .rev()
+                        .find_map(|name| name.as_ref())
+                    && let Some(value) = attribute(&element, "value")
+                {
+                    set_numeric_facet(
+                        schema.restrictions.entry(simple_type.clone()).or_default(),
+                        facet,
+                        value,
+                    );
                 }
                 simple_type_stack.push(simple_name);
                 if current_name == "schema" {
@@ -251,6 +268,19 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                         "minLength" => restriction.min_length = Some(value),
                         _ => restriction.max_length = Some(value),
                     }
+                }
+                if let Some(facet) = numeric_facet(current_name)
+                    && let Some(simple_type) = simple_type_stack
+                        .iter()
+                        .rev()
+                        .find_map(|name| name.as_ref())
+                    && let Some(value) = attribute(&element, "value")
+                {
+                    set_numeric_facet(
+                        schema.restrictions.entry(simple_type.clone()).or_default(),
+                        facet,
+                        value,
+                    );
                 }
                 if current_name == "attribute"
                     && let Some(parent) = model_stack.last()
@@ -693,6 +723,12 @@ fn validate_text_content(frame: &XmlFrame, schema: &XsdSchema) -> Vec<XsdDiagnos
     let Some(restriction) = schema.restrictions.get(&type_name) else {
         return diagnostics;
     };
+    diagnostics.extend(validate_numeric_facets(
+        &frame.name,
+        &type_name,
+        value,
+        restriction,
+    ));
     let length = value.chars().count();
     if let Some(expected) = restriction.length
         && length != expected
@@ -732,6 +768,73 @@ fn validate_text_content(frame: &XmlFrame, schema: &XsdSchema) -> Vec<XsdDiagnos
         });
     }
     diagnostics
+}
+
+fn validate_numeric_facets(
+    element_name: &str,
+    type_name: &str,
+    value: &str,
+    restriction: &XsdRestriction,
+) -> Vec<XsdDiagnostic> {
+    let Some(number) = value.parse::<f64>().ok() else {
+        return Vec::new();
+    };
+    let checks = [
+        (
+            restriction.min_inclusive.as_deref(),
+            0u8,
+            "minimum inclusif",
+        ),
+        (
+            restriction.max_inclusive.as_deref(),
+            1u8,
+            "maximum inclusif",
+        ),
+        (
+            restriction.min_exclusive.as_deref(),
+            2u8,
+            "minimum exclusif",
+        ),
+        (
+            restriction.max_exclusive.as_deref(),
+            3u8,
+            "maximum exclusif",
+        ),
+    ];
+    checks
+        .into_iter()
+        .find_map(|(limit, operation, label)| {
+            let limit = limit?.parse::<f64>().ok()?;
+            let valid = match operation {
+                0 => number >= limit,
+                1 => number <= limit,
+                2 => number > limit,
+                _ => number < limit,
+            };
+            (!valid).then(|| XsdDiagnostic {
+                message: format!("contenu de <{element_name}> hors {label} du type {type_name}"),
+            })
+        })
+        .into_iter()
+        .collect()
+}
+
+fn numeric_facet(name: &str) -> Option<&str> {
+    matches!(
+        name,
+        "minInclusive" | "maxInclusive" | "minExclusive" | "maxExclusive"
+    )
+    .then_some(name)
+}
+
+fn set_numeric_facet(restriction: &mut XsdRestriction, facet: &str, value: String) {
+    match facet {
+        "minInclusive" => restriction.min_inclusive = Some(value),
+        "maxInclusive" => restriction.max_inclusive = Some(value),
+        "minExclusive" => restriction.min_exclusive = Some(value),
+        "maxExclusive" => restriction.max_exclusive = Some(value),
+        _ => {}
+    }
 }
 
 fn validate_builtin_type(element_name: &str, type_name: &str, value: &str) -> Vec<XsdDiagnostic> {
@@ -1059,6 +1162,35 @@ mod tests {
                 .contains("integer")
         );
         assert!(validate_document("<price>12.50</price>", &schema).is_empty());
+    }
+
+    #[test]
+    fn validates_numeric_bound_restrictions() {
+        let schema = parse_xsd(
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+                <xs:simpleType name="Score"><xs:restriction base="xs:integer">
+                    <xs:minInclusive value="1"/><xs:maxExclusive value="10"/>
+                </xs:restriction></xs:simpleType>
+                <xs:element name="score" type="Score"/>
+            </xs:schema>"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            schema.restrictions["Score"].min_inclusive.as_deref(),
+            Some("1")
+        );
+        assert!(
+            validate_document("<score>0</score>", &schema)[0]
+                .message
+                .contains("minimum inclusif")
+        );
+        assert!(
+            validate_document("<score>10</score>", &schema)[0]
+                .message
+                .contains("maximum exclusif")
+        );
+        assert!(validate_document("<score>5</score>", &schema).is_empty());
     }
 
     #[test]
