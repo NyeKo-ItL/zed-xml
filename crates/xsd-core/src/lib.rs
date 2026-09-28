@@ -65,6 +65,42 @@ pub struct XsdSchema {
     pub imports: Vec<(Option<String>, String)>,
 }
 
+/// Fusionne plusieurs schémas XSD dans un modèle utilisable par la validation.
+pub fn merge_schemas(schemas: impl IntoIterator<Item = XsdSchema>) -> XsdSchema {
+    let mut merged = XsdSchema::default();
+    for schema in schemas {
+        if merged.target_namespace.is_none() {
+            merged.target_namespace = schema.target_namespace;
+        }
+        merged.elements.extend(schema.elements);
+        merge_string_lists(&mut merged.children, schema.children);
+        merge_string_lists(&mut merged.choices, schema.choices);
+        merge_string_lists(&mut merged.attributes, schema.attributes);
+        merge_string_lists(&mut merged.required_attributes, schema.required_attributes);
+        merge_string_lists(&mut merged.enumerations, schema.enumerations);
+        merged.restrictions.extend(schema.restrictions);
+        merged.lists.extend(schema.lists);
+        merged.unions.extend(schema.unions);
+        merged.includes.extend(schema.includes);
+        merged.imports.extend(schema.imports);
+    }
+    merged
+}
+
+fn merge_string_lists(
+    target: &mut HashMap<String, Vec<String>>,
+    source: HashMap<String, Vec<String>>,
+) {
+    for (key, values) in source {
+        let entry = target.entry(key).or_default();
+        for value in values {
+            if !entry.contains(&value) {
+                entry.push(value);
+            }
+        }
+    }
+}
+
 /// Référence XSD extraite d'un document XML.
 #[derive(Debug, PartialEq, Eq)]
 pub struct SchemaReference {
@@ -1553,6 +1589,28 @@ mod tests {
                 label: "child".to_owned(),
                 insert_text: "child".to_owned(),
             }]
+        );
+    }
+
+    #[test]
+    fn merges_components_from_multiple_schemas() {
+        let first = parse_xsd(
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"><xs:element name="root"/></xs:schema>"#,
+        )
+        .unwrap();
+        let second = parse_xsd(
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"><xs:element name="child"/></xs:schema>"#,
+        )
+        .unwrap();
+
+        let merged = merge_schemas([first, second]);
+        assert_eq!(
+            merged
+                .elements
+                .iter()
+                .map(|element| element.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["root", "child"]
         );
     }
 

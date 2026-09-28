@@ -11,8 +11,8 @@ use lsp_server::{Connection, Message, Notification, Request, RequestId, Response
 use serde_json::{Value, json};
 use xml_core::{XmlDiagnostic, auto_close_tag, complete_xml, format_xml, parse_xml};
 use xsd_core::{
-    XsdSchema, complete_attribute_values, complete_attributes, complete_elements, parse_xsd,
-    resolve_schema_dependencies, resolve_schema_locations, validate_document,
+    XsdSchema, complete_attribute_values, complete_attributes, complete_elements, merge_schemas,
+    parse_xsd, resolve_schema_dependencies, resolve_schema_locations, validate_document,
 };
 
 const INITIALIZE_METHOD: &str = "initialize";
@@ -120,15 +120,16 @@ impl XmlLanguageServer {
         Some(json!({"isIncomplete": false, "items": items}))
     }
 
-    fn load_schemas(&self, uri: &str, source: &str) -> Vec<XsdSchema> {
+    fn load_schema(&self, uri: &str, source: &str) -> Option<XsdSchema> {
         let document_path = uri_to_path(uri);
         let references = resolve_schema_locations(schema_resolution_source(source), document_path)
             .unwrap_or_default();
-        load_schema_graph(references).0
+        let (schemas, _) = load_schema_graph(references);
+        (!schemas.is_empty()).then(|| merge_schemas(schemas))
     }
 
     fn schema_completions(&self, uri: &str, source: &str, offset: usize) -> Vec<Value> {
-        self.load_schemas(uri, source)
+        self.load_schema(uri, source)
             .into_iter()
             .flat_map(|schema| complete_elements(source, offset, &schema))
             .map(|completion| {
@@ -141,7 +142,7 @@ impl XmlLanguageServer {
     }
 
     fn schema_attributes(&self, uri: &str, source: &str, offset: usize) -> Vec<Value> {
-        self.load_schemas(uri, source)
+        self.load_schema(uri, source)
             .into_iter()
             .flat_map(|schema| complete_attributes(source, offset, &schema))
             .map(|completion| {
@@ -154,7 +155,7 @@ impl XmlLanguageServer {
     }
 
     fn schema_attribute_values(&self, uri: &str, source: &str, offset: usize) -> Vec<Value> {
-        self.load_schemas(uri, source)
+        self.load_schema(uri, source)
             .into_iter()
             .flat_map(|schema| complete_attribute_values(source, offset, &schema))
             .map(|completion| {
@@ -178,7 +179,8 @@ impl XmlLanguageServer {
             .into_iter()
             .map(xsd_error_diagnostic)
             .collect::<Vec<_>>();
-        for schema in schemas {
+        if !schemas.is_empty() {
+            let schema = merge_schemas(schemas);
             diagnostics.extend(
                 validate_document(source, &schema)
                     .into_iter()
