@@ -296,6 +296,7 @@ fn xsd_error_diagnostic_at(message: &str, source: &str, offset: usize) -> Value 
         "severity": 1,
         "source": "xml-lsp",
         "code": "xsd-validation",
+        "data": {"category": "xsd", "kind": "validation"},
         "message": message,
     })
 }
@@ -309,6 +310,7 @@ fn xsd_error_diagnostic(diagnostic: impl Into<String>) -> Value {
         "severity": 1,
         "source": "xml-lsp",
         "code": "xsd-validation",
+        "data": {"category": "xsd", "kind": "loading"},
         "message": diagnostic.into(),
     })
 }
