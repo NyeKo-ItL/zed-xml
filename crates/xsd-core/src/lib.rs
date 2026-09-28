@@ -43,6 +43,8 @@ pub struct XsdRestriction {
     pub max_inclusive: Option<String>,
     pub min_exclusive: Option<String>,
     pub max_exclusive: Option<String>,
+    pub total_digits: Option<usize>,
+    pub fraction_digits: Option<usize>,
     pub pattern: Option<String>,
 }
 
@@ -142,6 +144,19 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                         "minLength" => restriction.min_length = Some(value),
                         _ => restriction.max_length = Some(value),
                     }
+                }
+                if let Some(facet) = digit_facet(current_name)
+                    && let Some(simple_type) = simple_type_stack
+                        .iter()
+                        .rev()
+                        .find_map(|name| name.as_ref())
+                    && let Some(value) = parse_optional_usize(attribute(&element, "value"))?
+                {
+                    set_digit_facet(
+                        schema.restrictions.entry(simple_type.clone()).or_default(),
+                        facet,
+                        value,
+                    );
                 }
                 if let Some(facet) = numeric_facet(current_name)
                     && let Some(simple_type) = simple_type_stack
@@ -268,6 +283,19 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                         "minLength" => restriction.min_length = Some(value),
                         _ => restriction.max_length = Some(value),
                     }
+                }
+                if let Some(facet) = digit_facet(current_name)
+                    && let Some(simple_type) = simple_type_stack
+                        .iter()
+                        .rev()
+                        .find_map(|name| name.as_ref())
+                    && let Some(value) = parse_optional_usize(attribute(&element, "value"))?
+                {
+                    set_digit_facet(
+                        schema.restrictions.entry(simple_type.clone()).or_default(),
+                        facet,
+                        value,
+                    );
                 }
                 if let Some(facet) = numeric_facet(current_name)
                     && let Some(simple_type) = simple_type_stack
@@ -729,6 +757,7 @@ fn validate_text_content(frame: &XmlFrame, schema: &XsdSchema) -> Vec<XsdDiagnos
         value,
         restriction,
     ));
+    diagnostics.extend(validate_digit_facets(&frame.name, value, restriction));
     let length = value.chars().count();
     if let Some(expected) = restriction.length
         && length != expected
@@ -817,6 +846,57 @@ fn validate_numeric_facets(
         })
         .into_iter()
         .collect()
+}
+
+fn validate_digit_facets(
+    element_name: &str,
+    value: &str,
+    restriction: &XsdRestriction,
+) -> Vec<XsdDiagnostic> {
+    let digits = value
+        .chars()
+        .filter(|character| character.is_ascii_digit())
+        .count();
+    let fraction = value
+        .split_once('.')
+        .map(|(_, fraction)| {
+            fraction
+                .chars()
+                .filter(|character| character.is_ascii_digit())
+                .count()
+        })
+        .unwrap_or(0);
+    let mut diagnostics = Vec::new();
+    if let Some(expected) = restriction.total_digits
+        && digits != expected
+    {
+        diagnostics.push(XsdDiagnostic {
+            message: format!("contenu de <{element_name}> invalide (totalDigits={expected})"),
+        });
+    }
+    if let Some(expected) = restriction.fraction_digits
+        && fraction > expected
+    {
+        diagnostics.push(XsdDiagnostic {
+            message: format!("contenu de <{element_name}> invalide (fractionDigits={expected})"),
+        });
+    }
+    diagnostics
+}
+
+fn digit_facet(name: &str) -> Option<&str> {
+    match name {
+        "totalDigits" | "fractionDigits" => Some(name),
+        _ => None,
+    }
+}
+
+fn set_digit_facet(restriction: &mut XsdRestriction, facet: &str, value: usize) {
+    match facet {
+        "totalDigits" => restriction.total_digits = Some(value),
+        "fractionDigits" => restriction.fraction_digits = Some(value),
+        _ => {}
+    }
 }
 
 fn numeric_facet(name: &str) -> Option<&str> {
@@ -1162,6 +1242,27 @@ mod tests {
                 .contains("integer")
         );
         assert!(validate_document("<price>12.50</price>", &schema).is_empty());
+    }
+
+    #[test]
+    fn validates_digit_restrictions() {
+        let schema = parse_xsd(
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+                <xs:simpleType name="Amount"><xs:restriction base="xs:decimal">
+                    <xs:totalDigits value="4"/><xs:fractionDigits value="2"/>
+                </xs:restriction></xs:simpleType>
+                <xs:element name="amount" type="Amount"/>
+            </xs:schema>"#,
+        )
+        .unwrap();
+
+        assert_eq!(schema.restrictions["Amount"].total_digits, Some(4));
+        assert!(
+            validate_document("<amount>12.345</amount>", &schema)
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("fractionDigits"))
+        );
+        assert!(validate_document("<amount>123.4</amount>", &schema).is_empty());
     }
 
     #[test]
