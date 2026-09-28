@@ -4,7 +4,7 @@ use std::{collections::HashMap, error::Error};
 
 use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
 use serde_json::{Value, json};
-use xml_core::{XmlDiagnostic, format_xml, parse_xml};
+use xml_core::{XmlDiagnostic, complete_xml, format_xml, parse_xml};
 
 const INITIALIZE_METHOD: &str = "initialize";
 const EXIT_METHOD: &str = "exit";
@@ -12,6 +12,7 @@ const DID_OPEN_METHOD: &str = "textDocument/didOpen";
 const DID_CHANGE_METHOD: &str = "textDocument/didChange";
 const PUBLISH_DIAGNOSTICS_METHOD: &str = "textDocument/publishDiagnostics";
 const FORMATTING_METHOD: &str = "textDocument/formatting";
+const COMPLETION_METHOD: &str = "textDocument/completion";
 
 struct XmlLanguageServer {
     documents: HashMap<String, String>,
@@ -62,6 +63,25 @@ impl XmlLanguageServer {
         ))
     }
 
+    fn completion(&self, params: &Value) -> Option<Value> {
+        let uri = params.get("textDocument")?.get("uri")?.as_str()?;
+        let source = self.documents.get(uri)?;
+        let position = params.get("position")?;
+        let line = position.get("line")?.as_u64()? as usize;
+        let character = position.get("character")?.as_u64()? as usize;
+        let offset = offset_at(source, line, character);
+        let items = complete_xml(source, offset)
+            .into_iter()
+            .map(|completion| {
+                json!({
+                    "label": completion.label,
+                    "insertText": completion.insert_text,
+                })
+            })
+            .collect::<Vec<_>>();
+        Some(json!({"isIncomplete": false, "items": items}))
+    }
+
     fn formatting(&self, params: &Value) -> Option<Value> {
         let uri = params.get("textDocument")?.get("uri")?.as_str()?;
         let source = self.documents.get(uri)?;
@@ -90,7 +110,30 @@ impl XmlLanguageServer {
 }
 
 fn server_capabilities() -> Value {
-    json!({"documentFormattingProvider": true})
+    json!({
+        "completionProvider": {"triggerCharacters": ["<", " ", "/"]},
+        "documentFormattingProvider": true,
+    })
+}
+
+fn offset_at(source: &str, line: usize, character: usize) -> usize {
+    let mut current_line = 0;
+    let mut current_character = 0;
+
+    for (index, value) in source.char_indices() {
+        if current_line == line {
+            if current_character >= character {
+                return index;
+            }
+            current_character += value.len_utf16();
+        }
+        if value == '\n' {
+            current_line += 1;
+            current_character = 0;
+        }
+    }
+
+    source.len()
 }
 
 fn position_at(source: &str, offset: usize) -> Value {
@@ -140,6 +183,16 @@ fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
     for message in &connection.receiver {
         match message {
             Message::Request(request) => {
+                if request.method == COMPLETION_METHOD {
+                    let result = server
+                        .completion(&request.params)
+                        .unwrap_or_else(|| json!({"isIncomplete": false, "items": []}));
+                    connection
+                        .sender
+                        .send(Response::new_ok(request.id, result).into())?;
+                    continue;
+                }
+
                 if request.method == FORMATTING_METHOD {
                     let edits = server
                         .formatting(&request.params)
@@ -216,7 +269,12 @@ mod tests {
                 assert_eq!(response.id, RequestId::from(1));
                 assert_eq!(
                     response.result,
-                    Some(json!({"capabilities": {"documentFormattingProvider": true}}))
+                    Some(json!({
+                        "capabilities": {
+                            "completionProvider": {"triggerCharacters": ["<", " ", "/"]},
+                            "documentFormattingProvider": true,
+                        }
+                    }))
                 );
             }
             message => panic!("expected initialize response, got {message:?}"),
@@ -290,6 +348,75 @@ mod tests {
             }
             message => panic!("expected clean diagnostics notification, got {message:?}"),
         }
+
+        client
+            .sender
+            .send(
+                Notification {
+                    method: DID_CHANGE_METHOD.to_owned(),
+                    params: json!({
+                        "textDocument": {"uri": "file:///document.xml", "version": 3},
+                        "contentChanges": [{"text": "<root><item /></root><it"}],
+                    }),
+                }
+                .into(),
+            )
+            .expect("completion source should be sent");
+        client
+            .receiver
+            .recv()
+            .expect("diagnostics for completion source should be published");
+
+        client
+            .sender
+            .send(
+                Request {
+                    id: RequestId::from(4),
+                    method: COMPLETION_METHOD.to_owned(),
+                    params: json!({
+                        "textDocument": {"uri": "file:///document.xml"},
+                        "position": {"line": 0, "character": 24},
+                    }),
+                }
+                .into(),
+            )
+            .expect("completion should be sent");
+
+        let completion_response = client
+            .receiver
+            .recv()
+            .expect("completion response should be received");
+        match completion_response {
+            Message::Response(response) => {
+                assert_eq!(response.id, RequestId::from(4));
+                assert_eq!(
+                    response.result,
+                    Some(json!({
+                        "isIncomplete": false,
+                        "items": [{"label": "item", "insertText": "item"}],
+                    }))
+                );
+            }
+            message => panic!("expected completion response, got {message:?}"),
+        }
+
+        client
+            .sender
+            .send(
+                Notification {
+                    method: DID_CHANGE_METHOD.to_owned(),
+                    params: json!({
+                        "textDocument": {"uri": "file:///document.xml", "version": 4},
+                        "contentChanges": [{"text": "<root />"}],
+                    }),
+                }
+                .into(),
+            )
+            .expect("formatting source should be sent");
+        client
+            .receiver
+            .recv()
+            .expect("diagnostics for formatting source should be published");
 
         client
             .sender

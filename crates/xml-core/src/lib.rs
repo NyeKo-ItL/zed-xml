@@ -1,5 +1,7 @@
 //! Modèle, analyse et formatage XML partagés par le serveur LSP.
 
+use std::collections::BTreeSet;
+
 use quick_xml::{Reader, Writer, events::Event};
 
 /// Document XML partiellement analysé.
@@ -100,6 +102,107 @@ pub fn parse_xml(source: &str) -> XmlParseResult {
         document,
         diagnostics,
     }
+}
+
+/// Élément proposé par l'autocomplétion XML.
+#[derive(Debug, PartialEq, Eq)]
+pub struct XmlCompletion {
+    pub label: String,
+    pub insert_text: String,
+}
+
+/// Retourne des propositions locales à partir du document et du contexte courant.
+pub fn complete_xml(source: &str, offset: usize) -> Vec<XmlCompletion> {
+    let offset = offset.min(source.len());
+    let prefix = &source[..offset];
+    let Some(opening) = prefix.rfind('<') else {
+        return Vec::new();
+    };
+    if prefix[opening..].contains('>') {
+        return Vec::new();
+    }
+
+    let (elements, attributes) = collect_names(source);
+    let fragment = &prefix[opening + 1..];
+    let mut candidates = BTreeSet::new();
+    let mut insert_prefix = String::new();
+
+    if let Some(fragment) = fragment.strip_prefix('/') {
+        let typed = fragment.trim();
+        let stack = open_elements(prefix);
+        insert_prefix.push_str("</");
+        if let Some(name) = stack.last()
+            && name.starts_with(typed)
+        {
+            candidates.insert(name.clone());
+        }
+    } else if fragment.chars().any(char::is_whitespace) {
+        let typed = fragment
+            .split(|character: char| character.is_whitespace())
+            .last()
+            .unwrap_or_default();
+        for name in attributes {
+            if name.starts_with(typed) {
+                candidates.insert(name);
+            }
+        }
+    } else {
+        let typed = fragment.trim();
+        for name in elements {
+            if name.starts_with(typed) {
+                candidates.insert(name);
+            }
+        }
+    }
+
+    candidates
+        .into_iter()
+        .map(|name| XmlCompletion {
+            label: name.clone(),
+            insert_text: format!("{insert_prefix}{name}"),
+        })
+        .collect()
+}
+
+fn collect_names(source: &str) -> (BTreeSet<String>, BTreeSet<String>) {
+    let mut reader = Reader::from_str(source);
+    let mut elements = BTreeSet::new();
+    let mut attributes = BTreeSet::new();
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element)) | Ok(Event::Empty(element)) => {
+                elements.insert(String::from_utf8_lossy(element.name().as_ref()).into_owned());
+                for attribute in element.attributes().flatten() {
+                    attributes.insert(String::from_utf8_lossy(attribute.key.as_ref()).into_owned());
+                }
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            Ok(_) => {}
+        }
+    }
+
+    (elements, attributes)
+}
+
+fn open_elements(source: &str) -> Vec<String> {
+    let mut reader = Reader::from_str(source);
+    let mut stack = Vec::new();
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element)) => {
+                stack.push(String::from_utf8_lossy(element.name().as_ref()).into_owned())
+            }
+            Ok(Event::End(_)) => {
+                stack.pop();
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            Ok(_) => {}
+        }
+    }
+
+    stack
 }
 
 /// Formate un document XML valide avec deux espaces par niveau.
@@ -285,6 +388,45 @@ mod tests {
     fn preserves_mixed_content_and_comments() {
         let formatted = format_xml("<root>Hello <b>world</b><!-- note --></root>").unwrap();
         assert_eq!(formatted, "<root>Hello <b>world</b><!-- note --></root>\n");
+    }
+
+    #[test]
+    fn completes_element_names_and_closing_tags() {
+        let elements = complete_xml("<root><item /></root><it", 24);
+        assert_eq!(
+            elements,
+            vec![XmlCompletion {
+                label: "item".to_owned(),
+                insert_text: "item".to_owned(),
+            }]
+        );
+
+        let closing = complete_xml("<root><item></", 14);
+        assert_eq!(
+            closing,
+            vec![XmlCompletion {
+                label: "item".to_owned(),
+                insert_text: "</item".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn completes_known_attributes() {
+        let completions = complete_xml("<root id=\"1\"><child name=\"x\" /></root><root ", 44);
+        assert_eq!(
+            completions,
+            vec![
+                XmlCompletion {
+                    label: "id".to_owned(),
+                    insert_text: "id".to_owned(),
+                },
+                XmlCompletion {
+                    label: "name".to_owned(),
+                    insert_text: "name".to_owned(),
+                }
+            ]
+        );
     }
 
     #[test]
