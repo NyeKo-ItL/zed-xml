@@ -14,11 +14,14 @@ XML language support for Zed, including XML, XSD, XSLT, SVG, WSDL, plist, XJB an
 
 The extension uses the `xml-lsp` server from `crates/xml-lsp`. The server is deliberately kept as a native executable; the Zed extension itself remains a `wasm32-wasip2` module.
 
-For local development, the extension searches for the server in this order:
+The extension searches for the server in this order:
 
 1. `XML_LSP_PATH`, containing the path to a local `xml-lsp` executable;
 2. an `xml-lsp` executable available on `PATH`;
-3. `cargo run --quiet -p xml-lsp -- --stdio` when Cargo is available.
+3. `cargo run --quiet -p xml-lsp -- --stdio`, but only when the opened worktree itself contains the Cargo workspace;
+4. the matching native binary downloaded from the latest GitHub release.
+
+The last mode is independent of the directory containing the XML file. It is the mode used for normal installations.
 
 From this repository on Windows, build the server with:
 
@@ -27,7 +30,7 @@ cargo build -p xml-lsp
 $env:XML_LSP_PATH = "$PWD\target\debug\xml-lsp.exe"
 ```
 
-Then install the repository as a development extension in Zed. The **Rebuild** button recompiles the WASI extension. Restart the XML language server after changing the native Rust server or rebuild it with Cargo.
+Then install the repository as a development extension in Zed. The **Rebuild** button recompiles the WASI extension. Restart the XML language server after changing the native Rust server or rebuild it with Cargo. When opening XML files outside this repository, keep `XML_LSP_PATH` configured or use a released native binary.
 
 The native server is still an evolving subset of XML/XSD support. Full XSD conformance, XML catalogs and release-time native binary distribution remain separate tasks.
 
