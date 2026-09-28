@@ -1127,6 +1127,32 @@ pub fn complete_elements(source: &str, offset: usize, schema: &XsdSchema) -> Vec
         .last()
         .map(|parent| {
             let mut names = schema.children.get(parent).cloned().unwrap_or_default();
+            let existing = direct_children(&prefix[..opening]);
+            if !names.is_empty() {
+                names.retain(|name| {
+                    let count = existing.iter().filter(|child| *child == name).count();
+                    let max = schema
+                        .elements
+                        .iter()
+                        .find(|element| element.name == *name)
+                        .and_then(|element| element.occurs.max);
+                    max.is_none_or(|maximum| count < maximum)
+                });
+                if let Some(last) = existing.last()
+                    && let Some(index) = schema
+                        .children
+                        .get(parent)
+                        .and_then(|children| children.iter().position(|child| child == last))
+                {
+                    names.retain(|name| {
+                        schema
+                            .children
+                            .get(parent)
+                            .and_then(|children| children.iter().position(|child| child == name))
+                            .is_some_and(|candidate| candidate >= index)
+                    });
+                }
+            }
             names.extend(schema.choices.get(parent).cloned().unwrap_or_default());
             names.extend(schema.alls.get(parent).cloned().unwrap_or_default());
             names.sort();
@@ -1150,6 +1176,34 @@ pub fn complete_elements(source: &str, offset: usize, schema: &XsdSchema) -> Vec
             insert_text: name,
         })
         .collect()
+}
+
+fn direct_children(source: &str) -> Vec<String> {
+    let mut reader = Reader::from_str(source);
+    let mut stack = Vec::new();
+    let mut children = Vec::new();
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element)) => {
+                let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
+                if !stack.is_empty() && stack.len() == 1 {
+                    children.push(name.clone());
+                }
+                stack.push(name);
+            }
+            Ok(Event::Empty(element)) => {
+                if !stack.is_empty() && stack.len() == 1 {
+                    children.push(String::from_utf8_lossy(element.name().as_ref()).into_owned());
+                }
+            }
+            Ok(Event::End(_)) => {
+                stack.pop();
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            Ok(_) => {}
+        }
+    }
+    children
 }
 
 fn open_xml_elements(source: &str) -> Vec<String> {
@@ -2351,6 +2405,27 @@ mod tests {
             vec![XsdCompletion {
                 label: "child".to_owned(),
                 insert_text: "child".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn completion_respects_sequence_order_and_max_occurs() {
+        let schema = parse_xsd(
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+                <xs:element name="root"><xs:complexType><xs:sequence>
+                    <xs:element name="first"/>
+                    <xs:element name="second"/>
+                </xs:sequence></xs:complexType></xs:element>
+            </xs:schema>"#,
+        )
+        .unwrap();
+        let source = "<root><first /><";
+        assert_eq!(
+            complete_elements(source, source.len(), &schema),
+            vec![XsdCompletion {
+                label: "second".to_owned(),
+                insert_text: "second".to_owned(),
             }]
         );
     }
