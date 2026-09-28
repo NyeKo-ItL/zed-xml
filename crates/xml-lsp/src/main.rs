@@ -5,7 +5,7 @@ use std::{collections::HashMap, error::Error, fs, path::PathBuf};
 use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
 use serde_json::{Value, json};
 use xml_core::{XmlDiagnostic, auto_close_tag, complete_xml, format_xml, parse_xml};
-use xsd_core::{parse_xsd, resolve_schema_locations, validate_document};
+use xsd_core::{complete_elements, parse_xsd, resolve_schema_locations, validate_document};
 
 const INITIALIZE_METHOD: &str = "initialize";
 const EXIT_METHOD: &str = "exit";
@@ -87,15 +87,35 @@ impl XmlLanguageServer {
                 "insertText": completion.insert_text,
             }));
         }
+        items.extend(self.schema_completions(uri, source, offset));
         Some(json!({"isIncomplete": false, "items": items}))
+    }
+
+    fn schema_completions(&self, uri: &str, source: &str, offset: usize) -> Vec<Value> {
+        let document_path = uri_to_path(uri);
+        let references = resolve_schema_locations(schema_resolution_source(source), document_path)
+            .unwrap_or_default();
+        references
+            .into_iter()
+            .filter_map(|reference| fs::read_to_string(reference.path).ok())
+            .filter_map(|schema_source| parse_xsd(&schema_source).ok())
+            .flat_map(|schema| complete_elements(source, offset, &schema))
+            .map(|completion| {
+                json!({
+                    "label": completion.label,
+                    "insertText": completion.insert_text,
+                })
+            })
+            .collect()
     }
 
     fn schema_diagnostics(&self, uri: &str, source: &str) -> Vec<Value> {
         let document_path = uri_to_path(uri);
-        let references = match resolve_schema_locations(source, &document_path) {
-            Ok(references) => references,
-            Err(error) => return vec![xsd_error_diagnostic(error)],
-        };
+        let references =
+            match resolve_schema_locations(schema_resolution_source(source), &document_path) {
+                Ok(references) => references,
+                Err(error) => return vec![xsd_error_diagnostic(error)],
+            };
         let mut diagnostics = Vec::new();
 
         for reference in references {
@@ -154,6 +174,10 @@ impl XmlLanguageServer {
             .to_owned();
         Some((uri, text))
     }
+}
+
+fn schema_resolution_source(source: &str) -> &str {
+    source.strip_suffix('<').unwrap_or(source)
 }
 
 fn uri_to_path(uri: &str) -> PathBuf {
@@ -635,7 +659,7 @@ mod tests {
             std::env::temp_dir().join(format!("xml-lsp-schema-{}.xsd", std::process::id()));
         std::fs::write(
             &schema_path,
-            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"><xs:element name="root"/></xs:schema>"#,
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"><xs:element name="root"><xs:complexType><xs:sequence><xs:element name="child"/></xs:sequence></xs:complexType></xs:element></xs:schema>"#,
         )
         .expect("schema should be written");
 
@@ -659,6 +683,29 @@ mod tests {
                 .unwrap()
                 .contains("<wrong>")
         );
+
+        let completion_source = format!(
+            "<root xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:noNamespaceSchemaLocation=\"{}\"><",
+            schema_path.file_name().unwrap().to_string_lossy()
+        );
+        let mut server = XmlLanguageServer::new();
+        server
+            .documents
+            .insert(uri.clone(), completion_source.clone());
+        let completion = server
+            .completion(&json!({
+                "textDocument": {"uri": uri},
+                "position": {"line": 0, "character": completion_source.len()},
+            }))
+            .expect("completion should be available");
+        assert!(
+            completion["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["label"] == "child")
+        );
+
         std::fs::remove_file(schema_path).expect("schema should be removed");
     }
 }

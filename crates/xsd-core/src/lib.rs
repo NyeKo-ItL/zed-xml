@@ -46,6 +46,13 @@ pub struct SchemaReference {
     pub path: PathBuf,
 }
 
+/// Élément proposé par l’autocomplétion XSD.
+#[derive(Debug, PartialEq, Eq)]
+pub struct XsdCompletion {
+    pub label: String,
+    pub insert_text: String,
+}
+
 /// Diagnostic de validation XSD minimal.
 #[derive(Debug, PartialEq, Eq)]
 pub struct XsdDiagnostic {
@@ -226,6 +233,62 @@ fn normalize_path(path: &Path) -> PathBuf {
     normalized
 }
 
+/// Retourne les éléments XSD adaptés au contexte XML courant.
+pub fn complete_elements(source: &str, offset: usize, schema: &XsdSchema) -> Vec<XsdCompletion> {
+    let prefix = &source[..offset.min(source.len())];
+    let Some(opening) = prefix.rfind('<') else {
+        return Vec::new();
+    };
+    if prefix[opening..].contains('>') {
+        return Vec::new();
+    }
+    let fragment = &prefix[opening + 1..];
+    if fragment.starts_with('/') {
+        return Vec::new();
+    }
+    let typed = fragment.trim();
+    let stack = open_xml_elements(prefix);
+    let names = stack
+        .last()
+        .and_then(|parent| schema.children.get(parent))
+        .cloned()
+        .unwrap_or_else(|| {
+            schema
+                .elements
+                .iter()
+                .map(|element| element.name.clone())
+                .collect()
+        });
+
+    names
+        .into_iter()
+        .filter(|name| name.starts_with(typed))
+        .map(|name| XsdCompletion {
+            label: name.clone(),
+            insert_text: name,
+        })
+        .collect()
+}
+
+fn open_xml_elements(source: &str) -> Vec<String> {
+    let mut reader = Reader::from_str(source);
+    let mut stack = Vec::new();
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element)) => {
+                stack.push(String::from_utf8_lossy(element.name().as_ref()).into_owned())
+            }
+            Ok(Event::End(_)) => {
+                stack.pop();
+            }
+            Ok(Event::Empty(_)) => {}
+            Ok(Event::Eof) | Err(_) => break,
+            Ok(_) => {}
+        }
+    }
+    stack
+}
+
 /// Retourne le nom du premier élément XML rencontré.
 pub fn root_element_name(source: &str) -> Option<String> {
     let mut reader = Reader::from_str(source);
@@ -377,6 +440,19 @@ mod tests {
         assert_eq!(
             validate_document("<root><other /></root>", &schema)[0].message,
             "élément <other> interdit dans <root>"
+        );
+    }
+
+    #[test]
+    fn completes_children_from_the_current_sequence() {
+        let schema = parse_xsd(SEQUENCE).unwrap();
+
+        assert_eq!(
+            complete_elements("<root><", 7, &schema),
+            vec![XsdCompletion {
+                label: "child".to_owned(),
+                insert_text: "child".to_owned(),
+            }]
         );
     }
 
