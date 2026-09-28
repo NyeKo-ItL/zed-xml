@@ -1,6 +1,6 @@
-//! Modèle et analyse XML partagés par le serveur LSP.
+//! Modèle, analyse et formatage XML partagés par le serveur LSP.
 
-use quick_xml::{Reader, events::Event};
+use quick_xml::{Reader, Writer, events::Event};
 
 /// Document XML partiellement analysé.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -102,6 +102,143 @@ pub fn parse_xml(source: &str) -> XmlParseResult {
     }
 }
 
+/// Formate un document XML valide avec deux espaces par niveau.
+pub fn format_xml(source: &str) -> Result<String, String> {
+    if !parse_xml(source).diagnostics.is_empty() {
+        return Err("le document XML est invalide".to_owned());
+    }
+
+    let mut reader = Reader::from_str(source);
+    let mut writer = Writer::new(Vec::new());
+    let mut depth = 0usize;
+    let mut stack = Vec::new();
+    let mut has_root = false;
+    let mut output_started = false;
+
+    loop {
+        let event = reader
+            .read_event()
+            .map_err(|error| format!("erreur XML : {error}"))?;
+        match event {
+            Event::Eof => break,
+            Event::Decl(_) | Event::DocType(_) | Event::PI(_) => {
+                write_indent(&mut writer, depth, output_started)?;
+                writer
+                    .write_event(event.into_owned())
+                    .map_err(|error| error.to_string())?;
+                output_started = true;
+            }
+            Event::Start(element) => {
+                if !stack.last().copied().unwrap_or(false) {
+                    write_indent(&mut writer, depth, output_started)?;
+                }
+                if depth == 0 {
+                    has_root = true;
+                }
+                stack.push(false);
+                writer
+                    .write_event(Event::Start(element.into_owned()))
+                    .map_err(|error| error.to_string())?;
+                depth += 1;
+                output_started = true;
+            }
+            Event::Empty(element) => {
+                if !stack.last().copied().unwrap_or(false) {
+                    write_indent(&mut writer, depth, output_started)?;
+                }
+                if depth == 0 {
+                    has_root = true;
+                }
+                writer
+                    .write_event(Event::Empty(element.into_owned()))
+                    .map_err(|error| error.to_string())?;
+                output_started = true;
+            }
+            Event::End(element) => {
+                depth = depth.saturating_sub(1);
+                let has_text = stack.pop().unwrap_or(false);
+                if !has_text {
+                    write_indent(&mut writer, depth, output_started)?;
+                }
+                writer
+                    .write_event(Event::End(element.into_owned()))
+                    .map_err(|error| error.to_string())?;
+                output_started = true;
+            }
+            Event::Text(text) => {
+                if !text
+                    .decode()
+                    .map_err(|error| error.to_string())?
+                    .trim()
+                    .is_empty()
+                {
+                    if let Some(has_text) = stack.last_mut() {
+                        *has_text = true;
+                    }
+                    writer
+                        .write_event(Event::Text(text.into_owned()))
+                        .map_err(|error| error.to_string())?;
+                    output_started = true;
+                }
+            }
+            Event::CData(data) => {
+                if let Some(has_text) = stack.last_mut() {
+                    *has_text = true;
+                }
+                writer
+                    .write_event(Event::CData(data.into_owned()))
+                    .map_err(|error| error.to_string())?;
+                output_started = true;
+            }
+            Event::Comment(comment) => {
+                if !stack.last().copied().unwrap_or(false) {
+                    write_indent(&mut writer, depth, output_started)?;
+                }
+                writer
+                    .write_event(Event::Comment(comment.into_owned()))
+                    .map_err(|error| error.to_string())?;
+                output_started = true;
+            }
+            Event::GeneralRef(reference) => {
+                writer
+                    .write_event(Event::GeneralRef(reference.into_owned()))
+                    .map_err(|error| error.to_string())?;
+                output_started = true;
+            }
+        }
+    }
+
+    if !has_root {
+        return Err("le document XML ne contient aucun élément racine".to_owned());
+    }
+
+    let mut result = String::from_utf8(writer.into_inner()).map_err(|error| error.to_string())?;
+    while result.ends_with('\n') {
+        result.pop();
+    }
+    result.push('\n');
+    Ok(result)
+}
+
+fn write_indent(
+    writer: &mut Writer<Vec<u8>>,
+    depth: usize,
+    output_started: bool,
+) -> Result<(), String> {
+    if output_started {
+        writer
+            .write_event(Event::Text(quick_xml::events::BytesText::new("\n")))
+            .map_err(|error| error.to_string())?;
+    }
+    if depth > 0 {
+        let spaces = "  ".repeat(depth);
+        writer
+            .write_event(Event::Text(quick_xml::events::BytesText::new(&spaces)))
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,5 +272,33 @@ mod tests {
         assert_eq!(result.diagnostics.len(), 1);
         assert_eq!(result.diagnostics[0].offset, "<root><child>".len());
         assert!(result.diagnostics[0].message.contains("non fermée <child>"));
+    }
+
+    #[test]
+    fn formats_nested_elements_and_is_idempotent() {
+        let formatted = format_xml("<root>\n  <child id=\"1\" />\n</root>").unwrap();
+        assert_eq!(formatted, "<root>\n  <child id=\"1\" />\n</root>\n");
+        assert_eq!(format_xml(&formatted).unwrap(), formatted);
+    }
+
+    #[test]
+    fn preserves_mixed_content_and_comments() {
+        let formatted = format_xml("<root>Hello <b>world</b><!-- note --></root>").unwrap();
+        assert_eq!(formatted, "<root>Hello <b>world</b><!-- note --></root>\n");
+    }
+
+    #[test]
+    fn preserves_declaration_and_cdata() {
+        let formatted =
+            format_xml("<?xml version=\"1.0\"?><root><![CDATA[a < b]]></root>").unwrap();
+        assert_eq!(
+            formatted,
+            "<?xml version=\"1.0\"?>\n<root><![CDATA[a < b]]></root>\n"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_xml() {
+        assert!(format_xml("<root>").is_err());
     }
 }

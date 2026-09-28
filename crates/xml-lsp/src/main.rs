@@ -4,13 +4,14 @@ use std::{collections::HashMap, error::Error};
 
 use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
 use serde_json::{Value, json};
-use xml_core::{XmlDiagnostic, parse_xml};
+use xml_core::{XmlDiagnostic, format_xml, parse_xml};
 
 const INITIALIZE_METHOD: &str = "initialize";
 const EXIT_METHOD: &str = "exit";
 const DID_OPEN_METHOD: &str = "textDocument/didOpen";
 const DID_CHANGE_METHOD: &str = "textDocument/didChange";
 const PUBLISH_DIAGNOSTICS_METHOD: &str = "textDocument/publishDiagnostics";
+const FORMATTING_METHOD: &str = "textDocument/formatting";
 
 struct XmlLanguageServer {
     documents: HashMap<String, String>,
@@ -61,6 +62,19 @@ impl XmlLanguageServer {
         ))
     }
 
+    fn formatting(&self, params: &Value) -> Option<Value> {
+        let uri = params.get("textDocument")?.get("uri")?.as_str()?;
+        let source = self.documents.get(uri)?;
+        let formatted = format_xml(source).ok()?;
+        Some(json!([{
+            "range": {
+                "start": {"line": 0, "character": 0},
+                "end": position_at(source, source.len()),
+            },
+            "newText": formatted,
+        }]))
+    }
+
     fn changed_document(params: &Value) -> Option<(String, String)> {
         let document = params.get("textDocument")?;
         let uri = document.get("uri")?.as_str()?.to_owned();
@@ -76,7 +90,7 @@ impl XmlLanguageServer {
 }
 
 fn server_capabilities() -> Value {
-    json!({})
+    json!({"documentFormattingProvider": true})
 }
 
 fn position_at(source: &str, offset: usize) -> Value {
@@ -126,6 +140,16 @@ fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
     for message in &connection.receiver {
         match message {
             Message::Request(request) => {
+                if request.method == FORMATTING_METHOD {
+                    let edits = server
+                        .formatting(&request.params)
+                        .unwrap_or_else(|| json!([]));
+                    connection
+                        .sender
+                        .send(Response::new_ok(request.id, edits).into())?;
+                    continue;
+                }
+
                 if connection.handle_shutdown(&request)? {
                     break;
                 }
@@ -190,7 +214,10 @@ mod tests {
         match initialize_response {
             Message::Response(response) => {
                 assert_eq!(response.id, RequestId::from(1));
-                assert_eq!(response.result, Some(json!({"capabilities": {}})));
+                assert_eq!(
+                    response.result,
+                    Some(json!({"capabilities": {"documentFormattingProvider": true}}))
+                );
             }
             message => panic!("expected initialize response, got {message:?}"),
         }
@@ -262,6 +289,42 @@ mod tests {
                 assert_eq!(notification.params["diagnostics"], json!([]));
             }
             message => panic!("expected clean diagnostics notification, got {message:?}"),
+        }
+
+        client
+            .sender
+            .send(
+                Request {
+                    id: RequestId::from(3),
+                    method: FORMATTING_METHOD.to_owned(),
+                    params: json!({
+                        "textDocument": {"uri": "file:///document.xml"},
+                        "options": {"tabSize": 2, "insertSpaces": true},
+                    }),
+                }
+                .into(),
+            )
+            .expect("formatting should be sent");
+
+        let formatting_response = client
+            .receiver
+            .recv()
+            .expect("formatting response should be received");
+        match formatting_response {
+            Message::Response(response) => {
+                assert_eq!(response.id, RequestId::from(3));
+                assert_eq!(
+                    response.result,
+                    Some(json!([{
+                        "range": {
+                            "start": {"line": 0, "character": 0},
+                            "end": {"line": 0, "character": 8},
+                        },
+                        "newText": "<root />\n",
+                    }]))
+                );
+            }
+            message => panic!("expected formatting response, got {message:?}"),
         }
 
         client
