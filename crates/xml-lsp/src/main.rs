@@ -387,14 +387,40 @@ fn schema_resolution_source(source: &str) -> &str {
 fn uri_to_path(uri: &str) -> PathBuf {
     let raw = uri.strip_prefix("file://").unwrap_or(uri);
     let raw = raw.strip_prefix('/').unwrap_or(raw);
-    PathBuf::from(raw.replace("%20", " "))
+    PathBuf::from(percent_decode(raw))
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let (Some(high), Some(low)) =
+                (hex_digit(bytes[index + 1]), hex_digit(bytes[index + 2]))
+        {
+            decoded.push(high * 16 + low);
+            index += 3;
+            continue;
+        }
+        decoded.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
+fn hex_digit(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn path_to_uri(path: &std::path::Path) -> String {
-    let path = path
-        .to_string_lossy()
-        .replace('\\', "/")
-        .replace(' ', "%20");
+    let path = encode_uri_path(&path.to_string_lossy().replace('\\', "/"));
     if path.as_bytes().get(1) == Some(&b':') {
         format!("file:///{path}")
     } else if path.starts_with('/') {
@@ -402,6 +428,18 @@ fn path_to_uri(path: &std::path::Path) -> String {
     } else {
         format!("file:///{path}")
     }
+}
+
+fn encode_uri_path(value: &str) -> String {
+    value
+        .bytes()
+        .flat_map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'/' | b':' | b'~' => {
+                vec![byte as char]
+            }
+            _ => format!("%{byte:02X}").chars().collect(),
+        })
+        .collect()
 }
 
 fn xsd_element_name_offset(source: &str, expected_name: &str) -> Option<usize> {
@@ -1252,6 +1290,14 @@ mod tests {
         assert_eq!(symbols[0]["name"], "child");
         assert_eq!(symbols[1]["name"], "root");
         assert_eq!(symbols[0]["kind"], 13);
+    }
+
+    #[test]
+    fn round_trips_file_uris_with_spaces_and_reserved_characters() {
+        let path = std::path::PathBuf::from(r"C:\workspace\xml files\schema#1.xsd");
+        let uri = path_to_uri(&path);
+        assert_eq!(uri, "file:///C:/workspace/xml%20files/schema%231.xsd");
+        assert_eq!(uri_to_path(&uri), path);
     }
 
     #[test]
