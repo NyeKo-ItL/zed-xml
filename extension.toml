@@ -1,6 +1,6 @@
 id = "xml"
 name = "XML"
-description = "XML language support with syntax highlighting, schema-aware diagnostics, formatting, completion, and navigation via LemMinX."
+description = "XML language support with syntax highlighting, schema-aware diagnostics, formatting, completion, and navigation via the native Rust LSP."
 version = "0.2.0"
 schema_version = 1
 authors = ["NyeKo-ItL"]
@@ -11,6 +11,6 @@ repository = "https://github.com/tree-sitter-grammars/tree-sitter-xml"
 commit = "5000ae8f22d11fbe93939b05c1e37cf21117162d"
 path = "xml"
 
-[language_servers.lemminx]
-name = "LemMinX"
+[language_servers.xml-lsp]
+name = "XML Rust LSP"
 languages = ["XML"]

@@ -1,7 +1,7 @@
 use zed_extension_api as zed;
 
-const DOWNLOADED_JAR: &str = "lemminx.jar";
-const DEFAULT_LEMMINX_URL: &str = "https://repo.eclipse.org/content/repositories/lemminx-releases/org/eclipse/lemminx/org.eclipse.lemminx/0.31.2/org.eclipse.lemminx-0.31.2-uber.jar";
+const LANGUAGE_SERVER_ID: &str = "xml-lsp";
+const XML_LSP_PATH_ENV: &str = "XML_LSP_PATH";
 
 struct XmlExtension;
 
@@ -14,43 +14,41 @@ impl XmlExtension {
             .map(|(_, value)| value.clone())
     }
 
-    fn java_command(&self, worktree: &zed::Worktree, jar: String) -> zed::Result<zed::Command> {
-        let java = worktree.which("java").ok_or_else(|| {
-            "LemMinX requires Java 17+; `java` was not found on PATH.".to_string()
-        })?;
-
-        Ok(zed::Command {
-            command: java,
-            args: vec!["-jar".to_string(), jar],
-            env: Vec::new(),
-        })
-    }
-
-    fn download_jar(
-        &self,
-        language_server_id: &zed::LanguageServerId,
-        worktree: &zed::Worktree,
-    ) -> zed::Result<String> {
-        let url = Self::environment(worktree, "LEMMINX_DOWNLOAD_URL")
-            .unwrap_or_else(|| DEFAULT_LEMMINX_URL.to_string());
-
-        zed::set_language_server_installation_status(
-            language_server_id,
-            &zed::LanguageServerInstallationStatus::Downloading,
-        );
-        let result =
-            zed::download_file(&url, DOWNLOADED_JAR, zed::DownloadedFileType::Uncompressed);
-
-        match result {
-            Ok(()) => Ok(DOWNLOADED_JAR.to_string()),
-            Err(error) => {
-                zed::set_language_server_installation_status(
-                    language_server_id,
-                    &zed::LanguageServerInstallationStatus::Failed(error.clone()),
-                );
-                Err(format!("Could not download LemMinX from {url}: {error}"))
-            }
+    fn native_command(worktree: &zed::Worktree) -> zed::Result<zed::Command> {
+        if let Some(path) = Self::environment(worktree, XML_LSP_PATH_ENV) {
+            return Ok(zed::Command {
+                command: path,
+                args: vec!["--stdio".to_owned()],
+                env: Vec::new(),
+            });
         }
+
+        if let Some(binary) = worktree.which(LANGUAGE_SERVER_ID) {
+            return Ok(zed::Command {
+                command: binary,
+                args: vec!["--stdio".to_owned()],
+                env: Vec::new(),
+            });
+        }
+
+        if let Some(cargo) = worktree.which("cargo") {
+            return Ok(zed::Command {
+                command: cargo,
+                args: vec![
+                    "run".to_owned(),
+                    "--quiet".to_owned(),
+                    "-p".to_owned(),
+                    LANGUAGE_SERVER_ID.to_owned(),
+                    "--".to_owned(),
+                    "--stdio".to_owned(),
+                ],
+                env: Vec::new(),
+            });
+        }
+
+        Err(format!(
+            "{LANGUAGE_SERVER_ID} was not found. Set {XML_LSP_PATH_ENV} or install it on PATH."
+        ))
     }
 }
 
@@ -64,76 +62,13 @@ impl zed::Extension for XmlExtension {
         language_server_id: &zed::LanguageServerId,
         worktree: &zed::Worktree,
     ) -> zed::Result<zed::Command> {
-        if language_server_id.as_ref() != "lemminx" {
+        if language_server_id.as_ref() != LANGUAGE_SERVER_ID {
             return Err(format!(
                 "Unsupported XML language server: {language_server_id}"
             ));
         }
 
-        if let Some(lemminx) = worktree.which("lemminx") {
-            return Ok(zed::Command {
-                command: lemminx,
-                args: Vec::new(),
-                env: Vec::new(),
-            });
-        }
-
-        if let Some(jar) = Self::environment(worktree, "LEMMINX_JAR") {
-            return self.java_command(worktree, jar);
-        }
-
-        let jar = self.download_jar(language_server_id, worktree)?;
-        self.java_command(worktree, jar)
-    }
-
-    fn language_server_initialization_options(
-        &mut self,
-        language_server_id: &zed::LanguageServerId,
-        _worktree: &zed::Worktree,
-    ) -> zed::Result<Option<zed::serde_json::Value>> {
-        if language_server_id.as_ref() != "lemminx" {
-            return Ok(None);
-        }
-
-        Ok(Some(zed::serde_json::json!({
-            "xml": {
-                "format": {
-                    "enabled": true,
-                    "splitAttributes": true,
-                    "joinContentLines": false,
-                    "joinCommentLines": false
-                },
-                "validation": {
-                    "enabled": true
-                },
-                "completion": {
-                    "autoCloseTags": true
-                }
-            }
-        })))
-    }
-
-    fn language_server_workspace_configuration(
-        &mut self,
-        language_server_id: &zed::LanguageServerId,
-        _worktree: &zed::Worktree,
-    ) -> zed::Result<Option<zed::serde_json::Value>> {
-        if language_server_id.as_ref() != "lemminx" {
-            return Ok(None);
-        }
-
-        Ok(Some(zed::serde_json::json!({
-            "xml": {
-                "format": {
-                    "enabled": true,
-                    "splitAttributes": true
-                },
-                "validation": {
-                    "enabled": true
-                },
-                "catalogs": []
-            }
-        })))
+        Self::native_command(worktree)
     }
 }
 
