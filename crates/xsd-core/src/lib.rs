@@ -49,6 +49,7 @@ pub struct XsdSchema {
     pub children: HashMap<String, Vec<String>>,
     pub choices: HashMap<String, Vec<String>>,
     pub attributes: HashMap<String, Vec<String>>,
+    pub required_attributes: HashMap<String, Vec<String>>,
     pub enumerations: HashMap<String, Vec<String>>,
     pub restrictions: HashMap<String, XsdRestriction>,
 }
@@ -160,7 +161,14 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                         .attributes
                         .entry(parent.clone())
                         .or_default()
-                        .push(name);
+                        .push(name.clone());
+                    if attribute(&element, "use").as_deref() == Some("required") {
+                        schema
+                            .required_attributes
+                            .entry(parent.clone())
+                            .or_default()
+                            .push(name);
+                    }
                 }
                 if let (Some(parent), Some(child)) = (model_stack.last(), declared_name.as_ref()) {
                     if sequence_depth > 0 {
@@ -251,7 +259,14 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                         .attributes
                         .entry(parent.clone())
                         .or_default()
-                        .push(name);
+                        .push(name.clone());
+                    if attribute(&element, "use").as_deref() == Some("required") {
+                        schema
+                            .required_attributes
+                            .entry(parent.clone())
+                            .or_default()
+                            .push(name);
+                    }
                 }
                 if current_name == "element"
                     && let Some(name) = attribute(&element, "name")
@@ -677,24 +692,31 @@ fn validate_attributes(
     let Some(allowed) = schema.attributes.get(element_name) else {
         return Vec::new();
     };
-    element
-        .attributes()
-        .flatten()
-        .filter_map(|attribute| {
-            let raw_name = String::from_utf8_lossy(attribute.key.as_ref());
-            let name = local_name(attribute.key.as_ref());
-            if raw_name == "xmlns"
-                || raw_name.starts_with("xmlns:")
-                || allowed.iter().any(|item| item == name)
-            {
-                None
-            } else {
-                Some(XsdDiagnostic {
-                    message: format!("attribut @{name} interdit sur <{element_name}>"),
-                })
+    let mut present = Vec::new();
+    let mut diagnostics = Vec::new();
+    for attribute in element.attributes().flatten() {
+        let raw_name = String::from_utf8_lossy(attribute.key.as_ref());
+        let name = local_name(attribute.key.as_ref()).to_owned();
+        if raw_name == "xmlns" || raw_name.starts_with("xmlns:") {
+            continue;
+        }
+        present.push(name.clone());
+        if !allowed.iter().any(|item| item == &name) {
+            diagnostics.push(XsdDiagnostic {
+                message: format!("attribut @{name} interdit sur <{element_name}>"),
+            });
+        }
+    }
+    if let Some(required) = schema.required_attributes.get(element_name) {
+        for name in required {
+            if !present.iter().any(|item| item == name) {
+                diagnostics.push(XsdDiagnostic {
+                    message: format!("attribut @{name} requis sur <{element_name}>"),
+                });
             }
-        })
-        .collect()
+        }
+    }
+    diagnostics
 }
 
 fn is_allowed_child(schema: &XsdSchema, parent: &str, child: &str) -> bool {
@@ -831,6 +853,24 @@ mod tests {
             validate_document("<root><other /></root>", &schema)[0].message,
             "élément <other> interdit dans <root>"
         );
+    }
+
+    #[test]
+    fn validates_required_attributes() {
+        let schema = parse_xsd(
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+                <xs:element name="item"><xs:complexType><xs:attribute name="id" use="required"/></xs:complexType></xs:element>
+            </xs:schema>"#,
+        )
+        .unwrap();
+
+        assert_eq!(schema.required_attributes["item"], vec!["id"]);
+        assert!(
+            validate_document("<item/>", &schema)[0]
+                .message
+                .contains("@id requis")
+        );
+        assert!(validate_document("<item id=\"1\"/>", &schema).is_empty());
     }
 
     #[test]
