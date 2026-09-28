@@ -34,6 +34,7 @@ pub struct XsdElement {
     pub form: Option<String>,
     pub default: Option<String>,
     pub fixed: Option<String>,
+    pub nillable: bool,
 }
 
 /// Restriction simple portée par un type XSD.
@@ -376,6 +377,7 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                         form: attribute(&element, "form"),
                         default: attribute(&element, "default"),
                         fixed: attribute(&element, "fixed"),
+                        nillable: attribute(&element, "nillable").as_deref() == Some("true"),
                     });
                     model_stack.push(name.clone());
                     element_stack.push(Some(name));
@@ -574,6 +576,7 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                         form: attribute(&element, "form"),
                         default: attribute(&element, "default"),
                         fixed: attribute(&element, "fixed"),
+                        nillable: attribute(&element, "nillable").as_deref() == Some("true"),
                     });
                 }
             }
@@ -1154,6 +1157,7 @@ pub fn validate_document(source: &str, schema: &XsdSchema) -> Vec<XsdDiagnostic>
             Ok(Event::Start(element)) => {
                 let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
                 diagnostics.extend(validate_attributes(schema, &name, &element));
+                diagnostics.extend(validate_nil(schema, &name, &element));
                 if let Some(parent) = stack.last_mut() {
                     if !is_allowed_child(schema, &parent.name, &name) {
                         diagnostics.push(XsdDiagnostic {
@@ -1171,6 +1175,7 @@ pub fn validate_document(source: &str, schema: &XsdSchema) -> Vec<XsdDiagnostic>
             Ok(Event::Empty(element)) => {
                 let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
                 diagnostics.extend(validate_attributes(schema, &name, &element));
+                diagnostics.extend(validate_nil(schema, &name, &element));
                 if let Some(parent) = stack.last_mut() {
                     if !is_allowed_child(schema, &parent.name, &name) {
                         diagnostics.push(XsdDiagnostic {
@@ -1476,6 +1481,34 @@ fn validate_builtin_type(element_name: &str, type_name: &str, value: &str) -> Ve
     }
 }
 
+fn validate_nil(
+    schema: &XsdSchema,
+    element_name: &str,
+    element: &quick_xml::events::BytesStart<'_>,
+) -> Vec<XsdDiagnostic> {
+    let is_nil = element
+        .attributes()
+        .flatten()
+        .find(|attribute| local_name(attribute.key.as_ref()) == "nil")
+        .and_then(|attribute| attribute.unescape_value().ok())
+        .is_some_and(|value| matches!(value.as_ref(), "true" | "1"));
+    if !is_nil {
+        return Vec::new();
+    }
+    if schema
+        .elements
+        .iter()
+        .find(|element| element.name == element_name)
+        .is_some_and(|element| element.nillable)
+    {
+        Vec::new()
+    } else {
+        vec![XsdDiagnostic {
+            message: format!("élément <{element_name}> non nillable avec xsi:nil"),
+        }]
+    }
+}
+
 fn validate_attributes(
     schema: &XsdSchema,
     element_name: &str,
@@ -1715,6 +1748,29 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.message.contains("trop d’éléments <second>"))
         );
+    }
+
+    #[test]
+    fn validates_xsi_nil_for_nillable_elements() {
+        let schema = parse_xsd(
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+                <xs:element name="allowed" nillable="true"/>
+                <xs:element name="forbidden" nillable="false"/>
+            </xs:schema>"#,
+        )
+        .unwrap();
+
+        assert!(validate_document(
+            r#"<allowed xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:nil="true"/>"#,
+            &schema
+        )
+        .is_empty());
+        assert!(validate_document(
+            r#"<forbidden xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:nil="true"/>"#,
+            &schema
+        )[0]
+            .message
+            .contains("non nillable"));
     }
 
     #[test]
