@@ -37,6 +37,7 @@ pub struct XsdSchema {
     pub target_namespace: Option<String>,
     pub elements: Vec<XsdElement>,
     pub children: HashMap<String, Vec<String>>,
+    pub choices: HashMap<String, Vec<String>>,
 }
 
 /// Référence XSD extraite d'un document XML.
@@ -66,6 +67,7 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
     let mut element_stack = Vec::new();
     let mut model_stack: Vec<String> = Vec::new();
     let mut sequence_depth = 0usize;
+    let mut choice_depth = 0usize;
 
     loop {
         match reader.read_event() {
@@ -78,19 +80,29 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                 if current_name == "sequence" {
                     sequence_depth += 1;
                 }
+                if current_name == "choice" {
+                    choice_depth += 1;
+                }
                 let declared_name = if current_name == "element" {
                     attribute(&element, "name")
                 } else {
                     None
                 };
-                if let (Some(parent), Some(child)) = (model_stack.last(), declared_name.as_ref())
-                    && sequence_depth > 0
-                {
-                    schema
-                        .children
-                        .entry(parent.clone())
-                        .or_default()
-                        .push(child.clone());
+                if let (Some(parent), Some(child)) = (model_stack.last(), declared_name.as_ref()) {
+                    if sequence_depth > 0 {
+                        schema
+                            .children
+                            .entry(parent.clone())
+                            .or_default()
+                            .push(child.clone());
+                    }
+                    if choice_depth > 0 {
+                        schema
+                            .choices
+                            .entry(parent.clone())
+                            .or_default()
+                            .push(child.clone());
+                    }
                 }
                 if let Some(name) = declared_name {
                     schema.elements.push(XsdElement {
@@ -119,14 +131,21 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                 if current_name == "element"
                     && let Some(name) = attribute(&element, "name")
                 {
-                    if let Some(parent) = model_stack.last()
-                        && sequence_depth > 0
-                    {
-                        schema
-                            .children
-                            .entry(parent.clone())
-                            .or_default()
-                            .push(name.clone());
+                    if let Some(parent) = model_stack.last() {
+                        if sequence_depth > 0 {
+                            schema
+                                .children
+                                .entry(parent.clone())
+                                .or_default()
+                                .push(name.clone());
+                        }
+                        if choice_depth > 0 {
+                            schema
+                                .choices
+                                .entry(parent.clone())
+                                .or_default()
+                                .push(name.clone());
+                        }
                     }
                     schema.elements.push(XsdElement {
                         name,
@@ -146,6 +165,9 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                 let current_name = local_name(element_name.as_ref());
                 if current_name == "sequence" {
                     sequence_depth = sequence_depth.saturating_sub(1);
+                }
+                if current_name == "choice" {
+                    choice_depth = choice_depth.saturating_sub(1);
                 }
                 if element_stack.pop().flatten().is_some() {
                     model_stack.pop();
@@ -250,8 +272,14 @@ pub fn complete_elements(source: &str, offset: usize, schema: &XsdSchema) -> Vec
     let stack = open_xml_elements(prefix);
     let names = stack
         .last()
-        .and_then(|parent| schema.children.get(parent))
-        .cloned()
+        .map(|parent| {
+            let mut names = schema.children.get(parent).cloned().unwrap_or_default();
+            names.extend(schema.choices.get(parent).cloned().unwrap_or_default());
+            names.sort();
+            names.dedup();
+            names
+        })
+        .filter(|names| !names.is_empty())
         .unwrap_or_else(|| {
             schema
                 .elements
@@ -312,15 +340,14 @@ pub fn validate_document(source: &str, schema: &XsdSchema) -> Vec<XsdDiagnostic>
         }],
     };
     let mut reader = Reader::from_str(source);
-    let mut stack = Vec::new();
+    let mut stack: Vec<String> = Vec::new();
 
     loop {
         match reader.read_event() {
             Ok(Event::Start(element)) => {
                 let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
                 if let Some(parent) = stack.last()
-                    && let Some(allowed) = schema.children.get(parent)
-                    && !allowed.iter().any(|child| child == &name)
+                    && !is_allowed_child(schema, parent, &name)
                 {
                     diagnostics.push(XsdDiagnostic {
                         message: format!("élément <{name}> interdit dans <{parent}>"),
@@ -331,8 +358,7 @@ pub fn validate_document(source: &str, schema: &XsdSchema) -> Vec<XsdDiagnostic>
             Ok(Event::Empty(element)) => {
                 let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
                 if let Some(parent) = stack.last()
-                    && let Some(allowed) = schema.children.get(parent)
-                    && !allowed.iter().any(|child| child == &name)
+                    && !is_allowed_child(schema, parent, &name)
                 {
                     diagnostics.push(XsdDiagnostic {
                         message: format!("élément <{name}> interdit dans <{parent}>"),
@@ -348,6 +374,16 @@ pub fn validate_document(source: &str, schema: &XsdSchema) -> Vec<XsdDiagnostic>
     }
 
     diagnostics
+}
+
+fn is_allowed_child(schema: &XsdSchema, parent: &str, child: &str) -> bool {
+    let sequence = schema.children.get(parent);
+    let choice = schema.choices.get(parent);
+    if sequence.is_none() && choice.is_none() {
+        return true;
+    }
+    sequence.is_some_and(|children| children.iter().any(|name| name == child))
+        || choice.is_some_and(|children| children.iter().any(|name| name == child))
 }
 
 /// Vérifie que le nom de la racine XML est déclaré par le schéma.
@@ -411,6 +447,18 @@ mod tests {
             </xs:element>
         </xs:schema>
     "#;
+    const CHOICE: &str = r#"
+        <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+            <xs:element name="root">
+                <xs:complexType>
+                    <xs:choice>
+                        <xs:element name="text"/>
+                        <xs:element name="number"/>
+                    </xs:choice>
+                </xs:complexType>
+            </xs:element>
+        </xs:schema>
+    "#;
 
     #[test]
     fn parses_schema_namespace_elements_and_cardinalities() {
@@ -441,6 +489,15 @@ mod tests {
             validate_document("<root><other /></root>", &schema)[0].message,
             "élément <other> interdit dans <root>"
         );
+    }
+
+    #[test]
+    fn supports_choice_children_for_validation_and_completion() {
+        let schema = parse_xsd(CHOICE).unwrap();
+
+        assert_eq!(schema.choices["root"], vec!["text", "number"]);
+        assert!(validate_document("<root><number /></root>", &schema).is_empty());
+        assert_eq!(complete_elements("<root><n", 9, &schema)[0].label, "number");
     }
 
     #[test]

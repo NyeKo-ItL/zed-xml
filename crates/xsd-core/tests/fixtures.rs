@@ -6,6 +6,7 @@ const SIMPLE: &str = include_str!("../../../tests/fixtures/xsd/simple.xsd");
 const SCHEMA_LOCATION_XML: &str = include_str!("../../../tests/fixtures/xml/schema-location.xml");
 const SEQUENCE: &str = include_str!("../../../tests/fixtures/xsd/sequence.xsd");
 const INVALID_CHILD: &str = include_str!("../../../tests/fixtures/xml/invalid-child.xml");
+const CHOICE: &str = include_str!("../../../tests/fixtures/xsd/choice.xsd");
 
 #[test]
 fn parses_the_shared_simple_schema() {
@@ -34,6 +35,17 @@ fn resolves_the_shared_schema_location_fixture() {
     assert_eq!(
         references[0].path,
         PathBuf::from("tests/fixtures/xsd/simple.xsd")
+    );
+}
+
+#[test]
+fn validates_choice_children_against_the_shared_schema() {
+    let schema = parse_xsd(CHOICE).unwrap();
+
+    assert!(validate_document("<message><number /></message>", &schema).is_empty());
+    assert_eq!(
+        schema.choices["message"],
+        vec!["text".to_owned(), "number".to_owned()]
     );
 }
 
