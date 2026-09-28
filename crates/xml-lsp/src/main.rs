@@ -456,7 +456,11 @@ fn schema_resolution_source(source: &str) -> &str {
 
 fn uri_to_path(uri: &str) -> PathBuf {
     let raw = uri.strip_prefix("file://").unwrap_or(uri);
-    let raw = raw.strip_prefix('/').unwrap_or(raw);
+    let raw = if cfg!(windows) && raw.starts_with('/') {
+        raw.strip_prefix('/').unwrap_or(raw)
+    } else {
+        raw
+    };
     PathBuf::from(percent_decode(raw))
 }
 
@@ -1400,9 +1404,15 @@ mod tests {
 
     #[test]
     fn round_trips_file_uris_with_spaces_and_reserved_characters() {
+        #[cfg(windows)]
         let path = std::path::PathBuf::from(r"C:\workspace\xml files\schema#1.xsd");
+        #[cfg(not(windows))]
+        let path = std::path::PathBuf::from("/workspace/xml files/schema#1.xsd");
         let uri = path_to_uri(&path);
+        #[cfg(windows)]
         assert_eq!(uri, "file:///C:/workspace/xml%20files/schema%231.xsd");
+        #[cfg(not(windows))]
+        assert_eq!(uri, "file:///workspace/xml%20files/schema%231.xsd");
         assert_eq!(uri_to_path(&uri), path);
     }
 
