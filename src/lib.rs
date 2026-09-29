@@ -95,25 +95,11 @@ impl XmlExtension {
                 // The extension host does not create parent directories for downloads.
                 (url, executable.to_owned())
             } else {
-                let release = zed::latest_github_release(
-                    RELEASE_REPOSITORY,
-                    zed::GithubReleaseOptions {
-                        require_assets: true,
-                        pre_release: false,
-                    },
-                )?;
-                let asset = release
-                    .assets
-                    .into_iter()
-                    .find(|asset| asset.name == asset_name)
-                    .ok_or_else(|| {
-                        format!(
-                            "Could not find asset {asset_name} in the latest {RELEASE_REPOSITORY} release"
-                        )
-                    })?;
                 (
-                    asset.download_url,
-                    format!("{LANGUAGE_SERVER_ID}-{}-{executable}", release.version),
+                    format!(
+                        "https://github.com/{RELEASE_REPOSITORY}/releases/latest/download/{asset_name}"
+                    ),
+                    executable.to_owned(),
                 )
             };
 
