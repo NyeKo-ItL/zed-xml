@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<!-- XInclude 1.0 (https://www.w3.org/TR/xinclude/) inclusions with parse,
+     xpointer and a fallback. -->
+<book xmlns:xi="http://www.w3.org/2001/XInclude">
+  <title>Manual</title>
+  <xi:include href="chapter1.xml"/>
+  <xi:include href="chapter2.xml" xpointer="xpointer(/chapter/section[1])"/>
+  <xi:include href="license.txt" parse="text" encoding="UTF-8">
+    <xi:fallback><para>License not available.</para></xi:fallback>
+  </xi:include>
+</book>

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-model href="http://docbook.org/xml/5.1/rng/docbook.rng" schematypens="http://relaxng.org/ns/structure/1.0"?>
+<!-- DocBook 5 article: xml-model processing instruction, mixed content,
+     xlink attributes, a program listing whose whitespace is significant. -->
+<article xmlns="http://docbook.org/ns/docbook" xmlns:xlink="http://www.w3.org/1999/xlink" version="5.1" xml:lang="en">
+  <info>
+    <title>Getting started</title>
+    <author><personname><firstname>Ada</firstname><surname>Lovelace</surname></personname></author>
+  </info>
+  <section xml:id="install">
+    <title>Installation</title>
+    <para>Install the <emphasis role="bold">extension</emphasis> from the
+    <link xlink:href="https://zed.dev/extensions">extension registry</link>, then open a
+    file ending in <filename>.xml</filename>.</para>
+    <programlisting language="json">{
+  "languages": {
+    "XML": { "formatter": "language_server" }
+  }
+}</programlisting>
+    <note><para>Restart the language server after changing settings.</para></note>
+  </section>
+</article>

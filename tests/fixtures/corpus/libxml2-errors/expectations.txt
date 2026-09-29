@@ -1,0 +1,48 @@
+# Expected verdict of each libxml2 test/errors file: wf or not-wf.
+# Derived from result/errors/<file>.err: a parser, namespace or I/O error means not-wf;
+# warnings or no output mean the document is well-formed.
+754946.xml                 not-wf  # parser error : Content error in the internal subset
+754947.xml                 not-wf  # I/O error : Invalid bytes in character encoding
+758588.xml                 not-wf  # namespace error : Namespace prefix a-340282366920938463472597946867209384634725979468672093846347259
+759020.xml                 not-wf  # parser error : Couldn't find end of Start Tag s00 line 2
+759398.xml                 not-wf  # parser error : StartTag: invalid element name
+759573-2.xml               not-wf  # parser error : Space required after '<!ENTITY'
+759573.xml                 not-wf  # parser error : Space required after 'DOCTYPE'
+759579.xml                 not-wf  # parser error : Detected an entity reference loop
+attr1.xml                  not-wf  # parser error : AttValue: ' expected
+attr2.xml                  not-wf  # parser error : AttValue: ' expected
+attr3.xml                  wf      # 
+attr4.xml                  not-wf  # parser error : invalid character in attribute value
+attr5.xml                  not-wf  # parser error : Attribute b redefined
+attr6.xml                  not-wf  # parser error : Attribute c:db redefined
+cdata.xml                  not-wf  # I/O error : Invalid bytes in character encoding
+charref1.xml               not-wf  # parser error : xmlParseCharRef: character reference out of bounds
+comment1.xml               not-wf  # parser error : xmlParseComment: invalid xmlChar value 14
+content1.xml               not-wf  # parser error : ContentDecl : ',' '|' or ')' expected
+doctype1.xml               not-wf  # parser error : Start tag expected, '<' not found
+doctype2.xml               not-wf  # parser error : Space required after 'DOCTYPE'
+dup-xml-attr.xml           not-wf  # parser error : Attribute xml:lang redefined
+dup-xml-attr2.xml          not-wf  # namespace error : Namespaced Attribute a in 'urn:a' redefined
+empty.xml                  not-wf  # parser error : Document is empty
+ent_redecl.xml             wf      # parser warning : Invalid redeclaration of predefined entity 'lt'
+extparsedent.xml           wf      # 
+extra-content.xml          not-wf  # parser error : Extra content at the end of the document
+invalid-start-tag-1.xml    not-wf  # parser error : Start tag expected, '<' not found
+invalid-start-tag-2.xml    not-wf  # parser error : StartTag: invalid element name
+issue151.xml               not-wf  # parser error : StartTag: invalid element name
+issue868.xml               not-wf  # parser error : Content error in the internal subset
+name.xml                   not-wf  # parser error : Couldn't find end of Start Tag fooooooooooooooooooooooooooooooooooooooooooooooooooooo
+name2.xml                  not-wf  # parser error : Specification mandates value for attribute fooooooooooooooooooooooooooooooooooooooooo
+name3.xml                  not-wf  # parser error : StartTag: invalid element name
+ns-ent.xml                 not-wf  # namespace error : Namespace prefix ns on elem is not defined
+ns-undeclared.xml          not-wf  # namespace error : Namespace prefix xLink for href on linearGradient is not defined
+quadratic-defattr.xml      wf      # parser error : Maximum entity amplification factor exceeded, see xmlCtxtSetMaxAmplification. (a libxml2 resource limit; well-formed per XML 1.0)
+rec_att_default.xml        not-wf  # parser error : Detected an entity reference loop
+rec_ext_ent.xml            wf      # 
+trailing-null-1.xml        not-wf  # parser error : Extra content at the end of the document
+trailing-null-2.xml        not-wf  # parser error : Invalid character: Char 0x0 out of allowed range
+truncated-utf16.xml        not-wf  # I/O error : Invalid bytes in character encoding
+unclosed-element.xml       not-wf  # parser error : Premature end of data in tag d line 1
+unsupported-encoding.xml   not-wf  # parser error : Unsupported encoding: unsupported-encoding
+utf8-1.xml                 not-wf  # parser error : StartTag: invalid element name
+utf8-2.xml                 not-wf  # parser error : StartTag: invalid element name

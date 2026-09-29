@@ -5,6 +5,7 @@ members = [
     "crates/xsd-core",
     "crates/dtd-core",
     "crates/xml-lsp",
+    "crates/xml-conformance",
 ]
 resolver = "2"
 

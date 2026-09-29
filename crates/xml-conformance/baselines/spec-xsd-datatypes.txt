@@ -1,0 +1,31 @@
+# Known failures of the `spec-xsd-datatypes` suite, one case per line.
+# Regenerate with `BLESS=1 cargo test -p xml-conformance`.
+xsd2 §3.2.14 gMonth thirteen
+xsd2 §3.2.15 hexBinary odd length
+xsd2 §3.2.16 base64Binary bad padding
+xsd2 §3.2.3 decimal explicit plus
+xsd2 §3.2.3 decimal leading dot
+xsd2 §3.2.3 decimal trailing dot
+xsd2 §3.2.4 float lower-case inf
+xsd2 §3.2.5 double garbage
+xsd2 §3.2.6 duration T without time fields
+xsd2 §3.2.6 duration fractional year
+xsd2 §3.2.6 duration without fields
+xsd2 §3.2.7 dateTime with a space
+xsd2 §3.2.8 time hour 25
+xsd2 §3.2.9 date February 30
+xsd2 §3.2.9 date without zero padding
+xsd2 §3.3.14 nonPositiveInteger
+xsd2 §3.3.17 int overflow
+xsd2 §3.3.19 byte overflow
+xsd2 §3.3.24 unsignedByte negative
+xsd2 §3.3.25 positiveInteger zero
+xsd2 §3.3.3 language with underscore
+xsd2 §3.3.4 NMTOKEN with a space
+xsd2 §3.3.6 Name starting with a digit
+xsd2 §3.3.7 NCName with colon
+xsd2 §4.3.10 minInclusive on dates
+xsd2 §4.3.4 pattern is anchored
+xsd2 §4.3.5 enumeration
+xsd2 §F.1 pattern \i rejects a digit
+xsd2 §F.1 pattern character class subtraction rejects

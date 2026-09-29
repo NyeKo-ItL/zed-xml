@@ -4,6 +4,8 @@ mod catalog;
 mod code_actions;
 mod colors;
 mod dtd;
+#[cfg(test)]
+mod fixture_smoke;
 mod folding;
 mod formatting;
 mod highlight;

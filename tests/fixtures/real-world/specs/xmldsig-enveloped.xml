@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Enveloped XML Signature following the structure of RFC 3275 section 2
+     (XML-Signature Syntax and Processing). Digest and signature values are
+     placeholders: the fixture exercises namespaces and long base64 text. -->
+<Invoice xmlns="urn:example:invoice" Id="invoice-42">
+  <Amount currency="EUR">1250.00</Amount>
+  <Customer>ACME SARL</Customer>
+  <Signature xmlns="http://www.w3.org/2000/09/xmldsig#">
+    <SignedInfo>
+      <CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>
+      <SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"/>
+      <Reference URI="">
+        <Transforms>
+          <Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature"/>
+          <Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>
+        </Transforms>
+        <DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>
+        <DigestValue>dGhpcyBpcyBub3QgYSByZWFsIGRpZ2VzdCB2YWx1ZQ==</DigestValue>
+      </Reference>
+    </SignedInfo>
+    <SignatureValue>
+      TUlJQ2RqQ0NBZDhDQWc0Z01BMEdDU3FHU0liM0RRRUJCQVVBTUlHYk1ROHdEUVlEVlFRS0V3WkRZV05w
+      Ym1Wa01Sb3dHQVlEVlFRTEV4RkRZV05wYm1Wa0lGTmxZM1Z5YVhSNU1Sd3dHZ1lEVlFRREV4TkRZV05w
+    </SignatureValue>
+    <KeyInfo>
+      <X509Data>
+        <X509SubjectName>CN=Example Signer,O=Example,C=FR</X509SubjectName>
+      </X509Data>
+    </KeyInfo>
+  </Signature>
+</Invoice>

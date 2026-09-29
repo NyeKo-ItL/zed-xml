@@ -1,0 +1,27 @@
+# Known failures of the `spec-xml` suite, one case per line.
+# Regenerate with `BLESS=1 cargo test -p xml-conformance`.
+xml §2.1 [1] empty document
+xml §2.1 [1] prolog without root element
+xml §2.1 [1] text after the root element
+xml §2.2 [2] character reference to NUL
+xml §2.2 [2] character reference to U+FFFE
+xml §2.2 [2] character reference to a surrogate
+xml §2.2 [2] literal control character
+xml §2.3 [5] name starting with a digit
+xml §2.3 [5] name starting with a hyphen
+xml §2.4 [14] ]]> in content
+xml §2.5 [15] comment ending with --->
+xml §2.5 [15] double hyphen inside a comment
+xml §2.6 [16] PI without target
+xml §2.6 [17] PI target xml in another case
+xml §2.8 [23] XML declaration after a comment
+xml §2.8 [23] XML declaration after whitespace
+xml §2.8 [23] XML declaration without version
+xml §2.8 [23] encoding before version
+xml §2.8 [28] DOCTYPE after the root element
+xml §2.8 [28] two DOCTYPE declarations
+xml §2.9 [32] invalid standalone value
+xml §3.1 [40] attributes without whitespace between them
+xml §3.1 [41] attribute without value
+xml §4.1 WFC no recursion
+xml §4.1 [68] undeclared entity without DTD
