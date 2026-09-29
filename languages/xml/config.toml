@@ -1,7 +1,8 @@
 name = "XML"
 grammar = "xml"
-
 path_suffixes = ["xml", "xsd", "xsl", "xslt", "svg", "wsdl", "plist", "xjb", "axml"]
 first_line_pattern = '^<.*xml'
 block_comment = ["<!-- ", " -->"]
+
 brackets = [{ start = "<", end = ">", close = true, newline = true }]
+completion_query_characters = ["<", "/", ">", " ", "=", "\"", "?"]
