@@ -12,14 +12,16 @@
 //! - `textDocument/rename` : [`XmlTagTree::tag_pair_at`],
 //!   [`qualified_name_parts`] pour distinguer préfixe et nom local, et
 //!   [`scan_attributes`] pour les déclarations `xmlns:prefix` ;
-//! - `textDocument/foldingRange` : [`XmlTagTree::elements`] et
-//!   [`XmlElement::end_tag`] ;
+//! - `textDocument/foldingRange` : [`XmlTagTree::elements`],
+//!   [`XmlElement::end_tag`] et [`scan_markup`] (commentaires, CDATA,
+//!   instructions de traitement, `<!DOCTYPE ...>`) ;
 //! - `textDocument/selectionRange` : [`XmlTagTree::innermost_element_at`] et
 //!   [`XmlTagTree::ancestors`].
 //!
 //! Tous les offsets sont des offsets d'octets UTF-8 dans la source et tombent
 //! toujours sur une frontière de caractère. Les commentaires, sections CDATA,
-//! instructions de traitement et déclarations `<!DOCTYPE ...>` sont ignorés.
+//! instructions de traitement et déclarations `<!DOCTYPE ...>` sont ignorés
+//! par [`scan_tags`] et listés à part par [`scan_markup`].
 
 use std::ops::Range;
 
@@ -375,10 +377,81 @@ fn unterminated_value_end(bytes: &[u8]) -> usize {
     }
 }
 
+/// Nature d'une construction qui n'est pas une balise d'élément.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XmlMarkupKind {
+    /// Commentaire `<!-- ... -->`.
+    Comment,
+    /// Section `<![CDATA[ ... ]]>`.
+    CData,
+    /// Instruction de traitement `<? ... ?>`, y compris le prologue
+    /// `<?xml ...?>`.
+    ProcessingInstruction,
+    /// Déclaration `<! ... >` (typiquement `<!DOCTYPE ...>` avec son
+    /// sous-ensemble interne `[...]`).
+    Declaration,
+}
+
+/// Commentaire, section CDATA, instruction de traitement ou déclaration
+/// repéré lexicalement hors des balises d'éléments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct XmlMarkup {
+    pub kind: XmlMarkupKind,
+    /// Étendue complète, délimiteurs inclus. Une construction non terminée
+    /// s'étend jusqu'à la fin de la source.
+    pub range: Range<usize>,
+    /// Étendue du contenu, délimiteurs exclus (`<!--`/`-->`, `<![CDATA[`/
+    /// `]]>`, `<?`/`?>`, `<!`/`>`).
+    pub content: Range<usize>,
+    /// Indique si le délimiteur fermant est présent.
+    pub closed: bool,
+}
+
+impl XmlMarkup {
+    /// Contenu brut, délimiteurs exclus.
+    pub fn content<'a>(&self, source: &'a str) -> &'a str {
+        &source[self.content.clone()]
+    }
+}
+
 /// Liste les balises d'éléments de la source dans l'ordre du document.
 pub fn scan_tags(source: &str) -> Vec<XmlTag> {
+    scan(source).0
+}
+
+/// Liste les commentaires, sections CDATA, instructions de traitement et
+/// déclarations de premier niveau dans l'ordre du document. Les commentaires
+/// du sous-ensemble interne d'une DTD font partie de la déclaration.
+pub fn scan_markup(source: &str) -> Vec<XmlMarkup> {
+    scan(source).1
+}
+
+/// Construit un [`XmlMarkup`] démarrant à `start`, dont le délimiteur ouvrant
+/// mesure `open` octets et dont le parcours (par [`skip_past`] avec le
+/// terminateur `close`) s'est arrêté à `end`.
+fn markup(
+    source: &[u8],
+    kind: XmlMarkupKind,
+    start: usize,
+    end: usize,
+    open: usize,
+    close: &[u8],
+) -> XmlMarkup {
+    let content_start = (start + open).min(end);
+    let closed = end >= content_start + close.len() && source[..end].ends_with(close);
+    let content_end = if closed { end - close.len() } else { end };
+    XmlMarkup {
+        kind,
+        range: start..end,
+        content: content_start..content_end.max(content_start),
+        closed,
+    }
+}
+
+fn scan(source: &str) -> (Vec<XmlTag>, Vec<XmlMarkup>) {
     let bytes = source.as_bytes();
     let mut tags = Vec::new();
+    let mut markups = Vec::new();
     let mut index = 0;
 
     while let Some(relative) = find_byte(bytes, index, b'<') {
@@ -386,12 +459,36 @@ pub fn scan_tags(source: &str) -> Vec<XmlTag> {
         let rest = &bytes[start..];
         if rest.starts_with(b"<!--") {
             index = skip_past(bytes, start + 4, b"-->");
+            markups.push(markup(
+                bytes,
+                XmlMarkupKind::Comment,
+                start,
+                index,
+                4,
+                b"-->",
+            ));
         } else if rest.starts_with(b"<![CDATA[") {
             index = skip_past(bytes, start + 9, b"]]>");
+            markups.push(markup(bytes, XmlMarkupKind::CData, start, index, 9, b"]]>"));
         } else if rest.starts_with(b"<?") {
             index = skip_past(bytes, start + 2, b"?>");
+            markups.push(markup(
+                bytes,
+                XmlMarkupKind::ProcessingInstruction,
+                start,
+                index,
+                2,
+                b"?>",
+            ));
         } else if rest.starts_with(b"<!") {
-            index = skip_declaration(bytes, start + 2);
+            let (end, closed) = skip_declaration(bytes, start + 2);
+            index = end;
+            markups.push(XmlMarkup {
+                kind: XmlMarkupKind::Declaration,
+                range: start..end,
+                content: start + 2..if closed { end - 1 } else { end },
+                closed,
+            });
         } else if rest.starts_with(b"</") {
             let name = scan_name(bytes, start + 2);
             if name.is_empty() {
@@ -427,7 +524,7 @@ pub fn scan_tags(source: &str) -> Vec<XmlTag> {
         }
     }
 
-    tags
+    (tags, markups)
 }
 
 fn find_byte(bytes: &[u8], from: usize, needle: u8) -> Option<usize> {
@@ -449,7 +546,9 @@ fn skip_past(bytes: &[u8], from: usize, terminator: &[u8]) -> usize {
 }
 
 /// Ignore une déclaration `<!DOCTYPE ...>` y compris son sous-ensemble interne.
-fn skip_declaration(bytes: &[u8], mut index: usize) -> usize {
+///
+/// Retourne `(fin, fermée)`.
+fn skip_declaration(bytes: &[u8], mut index: usize) -> (usize, bool) {
     let mut depth = 0usize;
     while index < bytes.len() {
         match bytes[index] {
@@ -464,12 +563,12 @@ fn skip_declaration(bytes: &[u8], mut index: usize) -> usize {
             }
             b'[' => depth += 1,
             b']' => depth = depth.saturating_sub(1),
-            b'>' if depth == 0 => return index + 1,
+            b'>' if depth == 0 => return (index + 1, true),
             _ => {}
         }
         index += 1;
     }
-    bytes.len()
+    (bytes.len(), false)
 }
 
 fn is_name_byte(byte: u8) -> bool {
@@ -721,6 +820,62 @@ mod tests {
             ]
         );
         assert_eq!(names("<a b=>"), vec![("b".into(), None)]);
+    }
+
+    #[test]
+    fn scans_comments_cdata_processing_instructions_and_declarations() {
+        let source = "<?xml version=\"1.0\"?>\n<!DOCTYPE r [\n<!-- ]> -->\n<!ELEMENT r ANY>\n]>\n<r><!-- #region --><![CDATA[<x>]]><?pi a?></r>";
+        let summary: Vec<_> = scan_markup(source)
+            .iter()
+            .map(|markup| (markup.kind, markup.content(source), markup.closed))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                (
+                    XmlMarkupKind::ProcessingInstruction,
+                    "xml version=\"1.0\"",
+                    true
+                ),
+                (
+                    XmlMarkupKind::Declaration,
+                    "DOCTYPE r [\n<!-- ]> -->\n<!ELEMENT r ANY>\n]",
+                    true
+                ),
+                (XmlMarkupKind::Comment, " #region ", true),
+                (XmlMarkupKind::CData, "<x>", true),
+                (XmlMarkupKind::ProcessingInstruction, "pi a", true),
+            ]
+        );
+        let markups = scan_markup(source);
+        assert_eq!(&source[markups[2].range.clone()], "<!-- #region -->");
+    }
+
+    #[test]
+    fn scans_unterminated_markup_to_the_end_of_the_source() {
+        for (source, kind, content) in [
+            ("<!-- a", XmlMarkupKind::Comment, " a"),
+            ("<!-->", XmlMarkupKind::Comment, ">"),
+            ("<!--", XmlMarkupKind::Comment, ""),
+            ("<![CDATA[x]]", XmlMarkupKind::CData, "x]]"),
+            ("<?pi", XmlMarkupKind::ProcessingInstruction, "pi"),
+            ("<?>", XmlMarkupKind::ProcessingInstruction, ">"),
+            (
+                "<!DOCTYPE r [<!ELEMENT r ANY>",
+                XmlMarkupKind::Declaration,
+                "DOCTYPE r [<!ELEMENT r ANY>",
+            ),
+        ] {
+            let markups = scan_markup(source);
+            assert_eq!(markups.len(), 1, "{source}");
+            assert_eq!(markups[0].kind, kind, "{source}");
+            assert!(!markups[0].closed, "{source}");
+            assert_eq!(markups[0].content(source), content, "{source}");
+            assert_eq!(markups[0].range, 0..source.len(), "{source}");
+        }
+        let empty = scan_markup("<!---->");
+        assert!(empty[0].closed);
+        assert_eq!(empty[0].content("<!---->"), "");
     }
 
     #[test]

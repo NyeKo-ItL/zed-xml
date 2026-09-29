@@ -1,5 +1,6 @@
 //! Serveur LSP XML natif.
 
+mod folding;
 mod highlight;
 mod linked_editing;
 mod rename;
@@ -39,6 +40,7 @@ const DOCUMENT_HIGHLIGHT_METHOD: &str = "textDocument/documentHighlight";
 const LINKED_EDITING_RANGE_METHOD: &str = "textDocument/linkedEditingRange";
 const PREPARE_RENAME_METHOD: &str = "textDocument/prepareRename";
 const RENAME_METHOD: &str = "textDocument/rename";
+const FOLDING_RANGE_METHOD: &str = "textDocument/foldingRange";
 
 type SchemaCache = HashMap<PathBuf, (SystemTime, XsdSchema)>;
 
@@ -53,6 +55,7 @@ struct XmlLanguageServer {
     documents: HashMap<String, String>,
     schema_cache: SchemaCache,
     schema_index: HashMap<String, Vec<PathBuf>>,
+    folding_settings: folding::FoldingSettings,
 }
 
 impl XmlLanguageServer {
@@ -61,6 +64,7 @@ impl XmlLanguageServer {
             documents: HashMap::new(),
             schema_cache: HashMap::new(),
             schema_index: HashMap::new(),
+            folding_settings: folding::FoldingSettings::default(),
         }
     }
 
@@ -471,6 +475,15 @@ impl XmlLanguageServer {
         Ok(Some(json!({"changes": changes})))
     }
 
+    fn folding_range(&self, params: &Value) -> Option<Value> {
+        let uri = params.get("textDocument")?.get("uri")?.as_str()?;
+        let source = self.documents.get(uri)?;
+        Some(Value::Array(folding::folding_ranges(
+            source,
+            &self.folding_settings,
+        )))
+    }
+
     fn symbols(&self, params: &Value) -> Option<Value> {
         let uri = params.get("textDocument")?.get("uri")?.as_str()?;
         let source = self.documents.get(uri)?;
@@ -853,6 +866,7 @@ fn server_capabilities() -> Value {
         "documentHighlightProvider": true,
         "linkedEditingRangeProvider": true,
         "renameProvider": {"prepareProvider": true},
+        "foldingRangeProvider": true,
     })
 }
 
@@ -925,7 +939,7 @@ fn diagnostics_params(
 }
 
 fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let (initialize_id, _) = connection.initialize_start()?;
+    let (initialize_id, initialize_params) = connection.initialize_start()?;
     connection.initialize_finish(
         initialize_id,
         json!({
@@ -937,6 +951,7 @@ fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
         }),
     )?;
     let mut server = XmlLanguageServer::new();
+    server.folding_settings = folding::FoldingSettings::from_initialize_params(&initialize_params);
 
     for message in &connection.receiver {
         match message {
@@ -1015,6 +1030,16 @@ fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
                         Err(error) => Response::new_err(request.id, error.code, error.message),
                     };
                     connection.sender.send(response.into())?;
+                    continue;
+                }
+
+                if request.method == FOLDING_RANGE_METHOD {
+                    let ranges = server
+                        .folding_range(&request.params)
+                        .unwrap_or_else(|| json!([]));
+                    connection
+                        .sender
+                        .send(Response::new_ok(request.id, ranges).into())?;
                     continue;
                 }
 
@@ -1500,6 +1525,100 @@ mod tests {
     }
 
     #[test]
+    fn serves_folding_range_requests_within_the_client_range_limit() {
+        let (server, client) = Connection::memory();
+        let server_thread = thread::spawn(|| run(server).expect("server loop should succeed"));
+        let request = |id: i32, method: &str, params: Value| {
+            client
+                .sender
+                .send(
+                    Request {
+                        id: RequestId::from(id),
+                        method: method.to_owned(),
+                        params,
+                    }
+                    .into(),
+                )
+                .expect("request should be sent");
+            loop {
+                match client.receiver.recv().expect("a message should arrive") {
+                    Message::Response(response) => {
+                        assert_eq!(response.id, RequestId::from(id));
+                        return response.result;
+                    }
+                    Message::Notification(_) => {}
+                    message => panic!("unexpected message {message:?}"),
+                }
+            }
+        };
+        let notify = |method: &str, params: Value| {
+            client
+                .sender
+                .send(
+                    Notification {
+                        method: method.to_owned(),
+                        params,
+                    }
+                    .into(),
+                )
+                .expect("notification should be sent");
+        };
+
+        let initialize = request(
+            1,
+            INITIALIZE_METHOD,
+            json!({"capabilities": {"textDocument": {"foldingRange": {
+                "lineFoldingOnly": true,
+                "rangeLimit": 3,
+            }}}}),
+        );
+        assert_eq!(
+            initialize.unwrap()["capabilities"]["foldingRangeProvider"],
+            true
+        );
+        notify("initialized", json!({}));
+        notify(
+            DID_OPEN_METHOD,
+            json!({
+                "textDocument": {
+                    "uri": "file:///document.xml",
+                    "text": "<root>\r\n  <!-- #region items -->\r\n  <item\r\n    a=\"1\"\r\n    b=\"2\"/>\r\n  <!-- #endregion -->\r\n  <!--\r\n    note\r\n  -->\r\n</root>\r\n",
+                }
+            }),
+        );
+        let params = json!({"textDocument": {"uri": "file:///document.xml"}});
+
+        assert_eq!(
+            request(2, FOLDING_RANGE_METHOD, params.clone()),
+            Some(json!([
+                {"startLine": 0, "endLine": 8},
+                {"startLine": 1, "endLine": 4, "kind": "region"},
+                {"startLine": 6, "endLine": 7, "kind": "comment"},
+            ]))
+        );
+        notify(
+            DID_CHANGE_METHOD,
+            json!({
+                "textDocument": {"uri": "file:///document.xml", "version": 2},
+                "contentChanges": [{"text": "<root><item/></root>"}],
+            }),
+        );
+        assert_eq!(request(3, FOLDING_RANGE_METHOD, params), Some(json!([])));
+        assert_eq!(
+            request(
+                4,
+                FOLDING_RANGE_METHOD,
+                json!({"textDocument": {"uri": "file:///missing.xml"}})
+            ),
+            Some(json!([]))
+        );
+
+        assert_eq!(request(5, "shutdown", json!(null)), Some(Value::Null));
+        notify(EXIT_METHOD, json!(null));
+        server_thread.join().expect("server thread should stop");
+    }
+
+    #[test]
     fn serves_prepare_rename_and_rename_requests() {
         let (server, client) = Connection::memory();
         let server_thread = thread::spawn(|| run(server).expect("server loop should succeed"));
@@ -1726,6 +1845,7 @@ mod tests {
                             "documentHighlightProvider": true,
                             "linkedEditingRangeProvider": true,
                             "renameProvider": {"prepareProvider": true},
+                            "foldingRangeProvider": true,
                         },
                         "serverInfo": {
                             "name": "xml-lsp",
