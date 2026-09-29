@@ -2,7 +2,10 @@
 
 use std::collections::BTreeSet;
 
-use quick_xml::{Reader, Writer, events::Event};
+use quick_xml::{
+    Reader, Writer,
+    events::{BytesStart, Event},
+};
 
 const MAX_XML_SOURCE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_XML_DEPTH: usize = 512;
@@ -311,6 +314,7 @@ pub fn format_xml(source: &str) -> Result<String, String> {
     let mut stack = Vec::new();
     let mut has_root = false;
     let mut output_started = false;
+    let mut pending_start: Option<BytesStart<'static>> = None;
 
     loop {
         let event = reader
@@ -319,6 +323,13 @@ pub fn format_xml(source: &str) -> Result<String, String> {
         match event {
             Event::Eof => break,
             Event::Decl(_) | Event::DocType(_) | Event::PI(_) => {
+                flush_pending_start(
+                    &mut writer,
+                    &mut pending_start,
+                    &mut stack,
+                    &mut depth,
+                    &mut output_started,
+                )?;
                 write_indent(&mut writer, depth, output_started)?;
                 writer
                     .write_event(event.into_owned())
@@ -326,20 +337,26 @@ pub fn format_xml(source: &str) -> Result<String, String> {
                 output_started = true;
             }
             Event::Start(element) => {
-                if !stack.last().copied().unwrap_or(false) {
-                    write_indent(&mut writer, depth, output_started)?;
-                }
+                flush_pending_start(
+                    &mut writer,
+                    &mut pending_start,
+                    &mut stack,
+                    &mut depth,
+                    &mut output_started,
+                )?;
+                pending_start = Some(element.into_owned());
                 if depth == 0 {
                     has_root = true;
                 }
-                stack.push(false);
-                writer
-                    .write_event(Event::Start(element.into_owned()))
-                    .map_err(|error| error.to_string())?;
-                depth += 1;
-                output_started = true;
             }
             Event::Empty(element) => {
+                flush_pending_start(
+                    &mut writer,
+                    &mut pending_start,
+                    &mut stack,
+                    &mut depth,
+                    &mut output_started,
+                )?;
                 if !stack.last().copied().unwrap_or(false) {
                     write_indent(&mut writer, depth, output_started)?;
                 }
@@ -352,6 +369,16 @@ pub fn format_xml(source: &str) -> Result<String, String> {
                 output_started = true;
             }
             Event::End(element) => {
+                if let Some(start) = pending_start.take() {
+                    if !stack.last().copied().unwrap_or(false) {
+                        write_indent(&mut writer, depth, output_started)?;
+                    }
+                    writer
+                        .write_event(Event::Empty(start))
+                        .map_err(|error| error.to_string())?;
+                    output_started = true;
+                    continue;
+                }
                 depth = depth.saturating_sub(1);
                 let has_text = stack.pop().unwrap_or(false);
                 if !has_text {
@@ -364,6 +391,13 @@ pub fn format_xml(source: &str) -> Result<String, String> {
             }
             Event::Text(text) => {
                 if !String::from_utf8_lossy(text.as_ref()).trim().is_empty() {
+                    flush_pending_start(
+                        &mut writer,
+                        &mut pending_start,
+                        &mut stack,
+                        &mut depth,
+                        &mut output_started,
+                    )?;
                     if let Some(has_text) = stack.last_mut() {
                         *has_text = true;
                     }
@@ -374,6 +408,13 @@ pub fn format_xml(source: &str) -> Result<String, String> {
                 }
             }
             Event::CData(data) => {
+                flush_pending_start(
+                    &mut writer,
+                    &mut pending_start,
+                    &mut stack,
+                    &mut depth,
+                    &mut output_started,
+                )?;
                 if let Some(has_text) = stack.last_mut() {
                     *has_text = true;
                 }
@@ -383,6 +424,13 @@ pub fn format_xml(source: &str) -> Result<String, String> {
                 output_started = true;
             }
             Event::Comment(comment) => {
+                flush_pending_start(
+                    &mut writer,
+                    &mut pending_start,
+                    &mut stack,
+                    &mut depth,
+                    &mut output_started,
+                )?;
                 if !stack.last().copied().unwrap_or(false) {
                     write_indent(&mut writer, depth, output_started)?;
                 }
@@ -392,6 +440,13 @@ pub fn format_xml(source: &str) -> Result<String, String> {
                 output_started = true;
             }
             Event::GeneralRef(reference) => {
+                flush_pending_start(
+                    &mut writer,
+                    &mut pending_start,
+                    &mut stack,
+                    &mut depth,
+                    &mut output_started,
+                )?;
                 writer
                     .write_event(Event::GeneralRef(reference.into_owned()))
                     .map_err(|error| error.to_string())?;
@@ -410,6 +465,28 @@ pub fn format_xml(source: &str) -> Result<String, String> {
     }
     result.push('\n');
     Ok(result)
+}
+
+fn flush_pending_start(
+    writer: &mut Writer<Vec<u8>>,
+    pending_start: &mut Option<BytesStart<'static>>,
+    stack: &mut Vec<bool>,
+    depth: &mut usize,
+    output_started: &mut bool,
+) -> Result<(), String> {
+    let Some(start) = pending_start.take() else {
+        return Ok(());
+    };
+    if !stack.last().copied().unwrap_or(false) {
+        write_indent(writer, *depth, *output_started)?;
+    }
+    stack.push(false);
+    writer
+        .write_event(Event::Start(start))
+        .map_err(|error| error.to_string())?;
+    *depth += 1;
+    *output_started = true;
+    Ok(())
 }
 
 fn write_indent(
@@ -492,6 +569,18 @@ mod tests {
     fn formats_nested_elements_and_is_idempotent() {
         let formatted = format_xml("<root>\n  <child id=\"1\" />\n</root>").unwrap();
         assert_eq!(formatted, "<root>\n  <child id=\"1\" />\n</root>\n");
+        assert_eq!(format_xml(&formatted).unwrap(), formatted);
+    }
+
+    #[test]
+    fn formats_empty_element_pairs_as_self_closing_tags() {
+        let source = "<root>\n  <connexionId>\n  </connexionId>\n  <nested>\n    <value>\n    </value>\n  </nested>\n</root>";
+        let formatted = format_xml(source).unwrap();
+
+        assert_eq!(
+            formatted,
+            "<root>\n  <connexionId/>\n  <nested>\n    <value/>\n  </nested>\n</root>\n"
+        );
         assert_eq!(format_xml(&formatted).unwrap(), formatted);
     }
 
