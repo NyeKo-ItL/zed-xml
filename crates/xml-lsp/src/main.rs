@@ -413,7 +413,7 @@ impl XmlLanguageServer {
         let mut text = current.cloned();
         for change in changes {
             let replacement = change.get("text")?.as_str()?;
-            if let Some(range) = change.get("range") {
+            if let Some(range) = change.get("range").and_then(Value::as_object) {
                 let current_text = text.as_ref()?;
                 let start = range.get("start")?;
                 let end = range.get("end")?;
@@ -427,13 +427,18 @@ impl XmlLanguageServer {
                     end.get("line")?.as_u64()? as usize,
                     end.get("character")?.as_u64()? as usize,
                 );
+                if start_offset > end_offset
+                    || end_offset > current_text.len()
+                    || !current_text.is_char_boundary(start_offset)
+                    || !current_text.is_char_boundary(end_offset)
+                {
+                    return None;
+                }
                 let mut updated = current_text.clone();
-                updated.replace_range(
-                    start_offset.min(updated.len())..end_offset.min(updated.len()),
-                    replacement,
-                );
+                updated.replace_range(start_offset..end_offset, replacement);
                 text = Some(updated);
             } else {
+                // A missing or null range is a valid full-document change.
                 text = Some(replacement.to_owned());
             }
         }
@@ -753,7 +758,8 @@ fn symbol_value(name: &str, start: usize, end: usize, source: &str) -> Value {
 
 fn server_capabilities() -> Value {
     json!({
-        "completionProvider": {"triggerCharacters": ["<", " ", "/"]},
+        "textDocumentSync": {"openClose": true, "change": 2},
+        "completionProvider": {"triggerCharacters": ["<", " ", "/", ">", "=", "\"", "?"]},
         "documentFormattingProvider": true,
         "documentRangeFormattingProvider": false,
         "documentSymbolProvider": true,
@@ -954,6 +960,184 @@ mod tests {
     use std::thread;
 
     #[test]
+    fn preserves_a_user_change_from_self_closing_to_explicit_empty_element() {
+        let uri = "file:///document.xml";
+        let previous = "<root><item /></root>".to_owned();
+        let params = json!({
+            "textDocument": {"uri": uri, "version": 2},
+            "contentChanges": [{
+                "range": {
+                    "start": {"line": 0, "character": 6},
+                    "end": {"line": 0, "character": 14}
+                },
+                "text": "<item></item>"
+            }]
+        });
+
+        let (_, current) = XmlLanguageServer::changed_document(&params, Some(&previous))
+            .expect("the incremental change should be applied");
+        assert_eq!(current, "<root><item></item></root>");
+
+        let mut server = XmlLanguageServer::new();
+        server.documents.insert(uri.to_owned(), current);
+        let edits = server
+            .formatting(&json!({"textDocument": {"uri": uri}}))
+            .expect("the document should be formatted");
+        assert_eq!(
+            edits[0]["newText"],
+            "<root>\n  <item>\n  </item>\n</root>\n"
+        );
+    }
+
+    #[test]
+    fn accepts_a_full_document_change_with_a_null_range() {
+        let params = json!({
+            "textDocument": {"uri": "file:///document.xml", "version": 2},
+            "contentChanges": [{"range": null, "text": "<root />"}]
+        });
+
+        let (_, current) =
+            XmlLanguageServer::changed_document(&params, Some(&"<old />".to_owned()))
+                .expect("a null range should mean full-document replacement");
+        assert_eq!(current, "<root />");
+    }
+
+    #[test]
+    fn formats_many_realistic_user_edit_sequences_without_stale_content() {
+        let scenarios = [
+            [
+                "<root />",
+                "<root><item /></root>",
+                "<root><item>one</item></root>",
+                "<root><item id=\"1\">two</item><empty /></root>",
+                "<root><item id=\"2\">trois &amp; quatre</item><empty></empty></root>",
+            ],
+            [
+                "<catalog />",
+                "<catalog><book /></catalog>",
+                "<catalog><book><title>XML</title></book></catalog>",
+                "<catalog><book id=\"é\"><title>Édition</title><author /></book></catalog>",
+                "<catalog><!-- note --><book><![CDATA[a < b]]></book></catalog>",
+            ],
+            [
+                "<Message />",
+                "<Message><Header /></Message>",
+                "<Message><Header><Id>1</Id></Header></Message>",
+                "<Message><Header><Id>2</Id><Date>2026-09-29</Date></Header><Body /></Message>",
+                "<Message><Header><Id>3</Id></Header><Body><Value>42.5</Value></Body></Message>",
+            ],
+        ];
+
+        for scenario in scenarios.iter().cycle().take(30) {
+            let mut current = scenario[0].to_owned();
+            for desired in scenario.iter().skip(1) {
+                let params = incremental_replacement_params(&current, desired);
+                let (_, updated) = XmlLanguageServer::changed_document(&params, Some(&current))
+                    .expect("the simulated editor change should be applied");
+                assert_eq!(&updated, desired);
+                current = updated;
+
+                let formatted = format_xml(&current).expect("valid edited XML should format");
+                assert_eq!(
+                    format_xml(&formatted).unwrap(),
+                    formatted,
+                    "formatting must be idempotent for {current:?}"
+                );
+                assert_eq!(
+                    formatted.matches("<root").count(),
+                    current.matches("<root").count()
+                );
+                assert_eq!(
+                    formatted.matches("<catalog").count(),
+                    current.matches("<catalog").count()
+                );
+                assert_eq!(
+                    formatted.matches("<Message").count(),
+                    current.matches("<Message").count()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn completion_after_typing_a_greater_than_sign_suggests_the_closing_tag() {
+        let mut server = XmlLanguageServer::new();
+        server.documents.insert(
+            "file:///document.xml".to_owned(),
+            "<root><child>".to_owned(),
+        );
+
+        let result = server
+            .completion(&json!({
+                "textDocument": {"uri": "file:///document.xml"},
+                "position": {"line": 0, "character": 13}
+            }))
+            .expect("completion should be available after >");
+
+        assert_eq!(
+            result["items"],
+            json!([{"label": "</child>", "insertText": "</child>"}])
+        );
+    }
+
+    #[test]
+    fn completion_after_xml_processing_instruction_prefix_offers_xsd_template() {
+        let mut server = XmlLanguageServer::new();
+        server
+            .documents
+            .insert("file:///document.xml".to_owned(), "<?".to_owned());
+
+        let result = server
+            .completion(&json!({
+                "textDocument": {"uri": "file:///document.xml"},
+                "position": {"line": 0, "character": 2}
+            }))
+            .expect("processing instruction completion should be available");
+
+        assert_eq!(
+            result["items"][1],
+            json!({
+                "label": "xml-model",
+                "insertText": "xml-model href=\"schema.xsd\" type=\"application/xml\" schematypens=\"http://www.w3.org/2001/XMLSchema\"?>"
+            })
+        );
+    }
+
+    #[test]
+    fn completion_triggers_cover_xml_typing_contexts() {
+        let capabilities = server_capabilities();
+        assert_eq!(
+            capabilities["completionProvider"]["triggerCharacters"],
+            json!(["<", " ", "/", ">", "=", "\"", "?"])
+        );
+    }
+
+    fn incremental_replacement_params(current: &str, desired: &str) -> Value {
+        let prefix = current
+            .bytes()
+            .zip(desired.bytes())
+            .take_while(|(left, right)| left == right)
+            .count();
+        let suffix = current[prefix..]
+            .bytes()
+            .rev()
+            .zip(desired[prefix..].bytes().rev())
+            .take_while(|(left, right)| left == right)
+            .count();
+        let end = current.len() - suffix;
+        json!({
+            "textDocument": {"uri": "file:///document.xml", "version": 2},
+            "contentChanges": [{
+                "range": {
+                    "start": position_at(current, prefix),
+                    "end": position_at(current, end)
+                },
+                "text": &desired[prefix..desired.len() - suffix]
+            }]
+        })
+    }
+
+    #[test]
     fn removes_duplicate_completion_items() {
         let mut items = vec![
             json!({"label": "child", "insertText": "child"}),
@@ -1016,7 +1200,8 @@ mod tests {
                     response.result,
                     Some(json!({
                         "capabilities": {
-                            "completionProvider": {"triggerCharacters": ["<", " ", "/"]},
+                            "textDocumentSync": {"openClose": true, "change": 2},
+                            "completionProvider": {"triggerCharacters": ["<", " ", "/", ">", "=", "\"", "?"]},
                             "documentFormattingProvider": true,
                             "documentRangeFormattingProvider": false,
                             "documentSymbolProvider": true,
