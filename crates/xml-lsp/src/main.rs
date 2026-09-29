@@ -921,6 +921,11 @@ fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
 }
 
 fn main() {
+    if std::env::args().any(|argument| argument == "--version") {
+        println!("xml-lsp {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+
     let (connection, io_threads) = Connection::stdio();
 
     if let Err(error) = run(connection) {
