@@ -117,11 +117,17 @@ impl XmlExtension {
                 )
             };
 
-            zed::download_file(
+            if let Err(error) = zed::download_file(
                 &download_url,
                 &executable_path,
                 zed::DownloadedFileType::Uncompressed,
-            )?;
+            ) {
+                // A second Zed window may try to refresh the same binary while the
+                // first LSP process has it open. Windows reports that as os error 32.
+                if !error.contains("os error 32") {
+                    return Err(error);
+                }
+            }
             if !matches!(os, zed::Os::Windows) {
                 zed::make_file_executable(&executable_path)?;
             }
@@ -200,6 +206,14 @@ mod tests {
     #[test]
     fn rejects_unsupported_platforms() {
         assert!(XmlExtension::release_asset(zed::Os::Windows, zed::Architecture::Aarch64).is_err());
+    }
+
+    #[test]
+    fn recognizes_windows_file_in_use_errors() {
+        assert!(
+            "Le processus ne peut pas accéder au fichier (os error 32)".contains("os error 32")
+        );
+        assert!(!"download failed with status 404".contains("os error 32"));
     }
 }
 
