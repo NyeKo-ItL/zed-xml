@@ -25,9 +25,14 @@ pub struct Settings {
     pub symbols_max_items: Option<usize>,
     /// `xml.colors.enabled`.
     pub colors_enabled: bool,
-    /// `xml.catalogs` : chemins de catalogues XML (utilisés par la
-    /// résolution par catalogue).
+    /// `xml.catalogs` : chemins de catalogues XML OASIS, bruts (résolus par
+    /// [`crate::catalog::catalog_paths`] par rapport aux dossiers de
+    /// l'espace de travail).
     pub catalogs: Vec<String>,
+    /// `xml.autoDetectCatalogs` (extension, `false` par défaut) : utilise
+    /// aussi `catalog.xml` à la racine de chaque dossier de l'espace de
+    /// travail, s'il s'agit d'un catalogue OASIS.
+    pub auto_detect_catalogs: bool,
     /// `xml.fileAssociations`.
     pub file_associations: Vec<FileAssociation>,
 }
@@ -42,6 +47,7 @@ impl Default for Settings {
             symbols_max_items: None,
             colors_enabled: true,
             catalogs: Vec::new(),
+            auto_detect_catalogs: false,
             file_associations: Vec::new(),
         }
     }
@@ -300,6 +306,9 @@ impl Settings {
                 .map(str::to_owned)
                 .collect();
         }
+        if let Some(value) = flag("autoDetectCatalogs") {
+            settings.auto_detect_catalogs = value;
+        }
         if let Some(associations) = get("fileAssociations").and_then(Value::as_array) {
             settings.file_associations = associations
                 .iter()
@@ -321,6 +330,7 @@ impl Settings {
         self.validation == other.validation
             && self.file_associations == other.file_associations
             && self.catalogs == other.catalogs
+            && self.auto_detect_catalogs == other.auto_detect_catalogs
     }
 }
 
@@ -394,11 +404,13 @@ pub fn limit_symbols(symbols: &mut Vec<Value>, limit: usize) {
 /// absolu. `**` couvre plusieurs segments, `*` et `?` un segment, `{a,b}`
 /// des alternatives. Le `systemId` est un chemin absolu, une URI `file://`
 /// ou un chemin relatif au dossier de l'espace de travail (au dossier du
-/// document hors espace de travail) ; les URL distantes sont ignorées.
+/// document hors espace de travail) ; une URL distante n'est retenue que si
+/// un catalogue XML (`catalogs`) l'associe à un fichier local.
 pub fn associated_schemas(
     associations: &[FileAssociation],
     roots: &[PathBuf],
     document: &Path,
+    catalogs: &crate::catalog::Catalogs,
 ) -> Vec<PathBuf> {
     let mut schemas = Vec::new();
     let document_text = slashes(document);
@@ -425,7 +437,9 @@ pub fn associated_schemas(
             continue;
         }
         let system_id = association.system_id.as_str();
-        let path = if system_id.starts_with("file:") {
+        let path = if let Some(path) = catalogs.resolve_location(system_id) {
+            path
+        } else if system_id.starts_with("file:") {
             crate::uri_to_path(system_id)
         } else if system_id.contains("://") {
             continue;
@@ -520,6 +534,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::catalog::Catalogs;
 
     #[test]
     fn missing_or_invalid_settings_keep_defaults() {
@@ -536,6 +551,7 @@ mod tests {
                 "completion": [],
                 "symbols": {"maxItemsComputed": "10"},
                 "catalogs": "catalog.xml",
+                "autoDetectCatalogs": "yes",
                 "fileAssociations": [{"pattern": 1, "systemId": "a.xsd"}, {"pattern": "*.xml"}, "x"],
             }})),
             defaults
@@ -563,8 +579,10 @@ mod tests {
             "symbols": {"enabled": false, "maxItemsComputed": 10},
             "colors": {"enabled": false},
             "catalogs": ["catalog.xml", 3],
+            "autoDetectCatalogs": true,
             "fileAssociations": [{"pattern": "**/*.pom", "systemId": "maven.xsd"}],
         }}}));
+        assert!(settings.auto_detect_catalogs);
         assert!(!settings.format.enabled);
         assert_eq!(
             settings.format.split_attributes,
@@ -700,23 +718,51 @@ mod tests {
             },
         ];
         let roots = [root.clone()];
+        let none = Catalogs::default();
         assert_eq!(
-            associated_schemas(&associations, &roots, &root.join("a/b/project.pom")),
+            associated_schemas(&associations, &roots, &root.join("a/b/project.pom"), &none),
             vec![root.join("schemas/maven.xsd")]
         );
         assert_eq!(
-            associated_schemas(&associations, &roots, &root.join("x/beans.xml")),
+            associated_schemas(&associations, &roots, &root.join("x/beans.xml"), &none),
             vec![PathBuf::from("/opt/spring beans.xsd")]
         );
         assert_eq!(
-            associated_schemas(&associations, &roots, &root.join("config/app.xml")),
+            associated_schemas(&associations, &roots, &root.join("config/app.xml"), &none),
             vec![PathBuf::from("/abs/config.xsd")]
         );
-        assert!(associated_schemas(&associations, &roots, &root.join("other/app.xml")).is_empty());
+        assert!(
+            associated_schemas(&associations, &roots, &root.join("other/app.xml"), &none)
+                .is_empty()
+        );
         // Hors espace de travail : relatif au dossier du document.
         assert_eq!(
-            associated_schemas(&associations, &[], Path::new("/tmp/x/a.pom")),
+            associated_schemas(&associations, &[], Path::new("/tmp/x/a.pom"), &none),
             vec![PathBuf::from("/tmp/x/schemas/maven.xsd")]
         );
+
+        // Un catalogue rend l'URL distante utilisable.
+        let directory =
+            std::env::temp_dir().join(format!("xml-lsp-associations {}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let catalog = directory.join("catalog.xml");
+        std::fs::write(
+            &catalog,
+            r#"<catalog xmlns="urn:oasis:names:tc:entity:xmlns:xml:catalog">
+                <system systemId="https://example.com/remote.xsd" uri="local.xsd"/>
+            </catalog>"#,
+        )
+        .unwrap();
+        let catalogs = Catalogs::new(vec![catalog]);
+        assert_eq!(
+            associated_schemas(
+                &associations,
+                &roots,
+                &root.join("other/app.xml"),
+                &catalogs
+            ),
+            vec![directory.join("local.xsd")]
+        );
+        let _ = std::fs::remove_dir_all(&directory);
     }
 }

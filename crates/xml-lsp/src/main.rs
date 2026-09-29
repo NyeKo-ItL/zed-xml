@@ -1,5 +1,6 @@
 //! Serveur LSP XML natif.
 
+mod catalog;
 mod code_actions;
 mod colors;
 mod folding;
@@ -29,8 +30,8 @@ use xml_core::format_xml;
 use xml_core::{XmlDiagnostic, auto_close_tag, complete_xml, parse_xml};
 use xsd_core::{
     LocatedXsdDiagnostic, XsdSchema, complete_attribute_values, complete_attributes,
-    complete_elements, merge_schemas, parse_xsd, resolve_schema_dependencies,
-    resolve_schema_locations, validate_document_located,
+    complete_elements, is_remote_location, merge_schemas, parse_xsd, percent_decode,
+    resolve_schema_dependencies_with, resolve_schema_locations_with, validate_document_located,
 };
 
 #[cfg(test)]
@@ -62,6 +63,7 @@ const COLOR_PRESENTATION_METHOD: &str = "textDocument/colorPresentation";
 const DID_CHANGE_WORKSPACE_FOLDERS_METHOD: &str = "workspace/didChangeWorkspaceFolders";
 const DID_CHANGE_WATCHED_FILES_METHOD: &str = "workspace/didChangeWatchedFiles";
 const REGISTER_CAPABILITY_METHOD: &str = "client/registerCapability";
+const UNREGISTER_CAPABILITY_METHOD: &str = "client/unregisterCapability";
 const DID_CHANGE_CONFIGURATION_METHOD: &str = "workspace/didChangeConfiguration";
 const CONFIGURATION_METHOD: &str = "workspace/configuration";
 
@@ -72,6 +74,9 @@ struct SchemaLoadError {
     path: PathBuf,
     message: String,
     offset: usize,
+    /// Schéma distant (`http(s)`) qu'aucun catalogue ne résout : signalé en
+    /// avertissement.
+    remote: bool,
 }
 
 struct XmlLanguageServer {
@@ -98,6 +103,11 @@ struct XmlLanguageServer {
     /// Requête `workspace/configuration` en attente de réponse.
     pending_configuration: Option<RequestId>,
     configuration_requests: u64,
+    /// Catalogues XML (`xml.catalogs`, `xml.autoDetectCatalogs`).
+    catalogs: catalog::Catalogs,
+    /// Enregistrement `didChangeWatchedFiles` en cours pour les catalogues.
+    catalog_registration: Option<String>,
+    catalog_registrations: u64,
 }
 
 impl XmlLanguageServer {
@@ -117,7 +127,107 @@ impl XmlLanguageServer {
             configuration_support: false,
             pending_configuration: None,
             configuration_requests: 0,
+            catalogs: catalog::Catalogs::default(),
+            catalog_registration: None,
+            catalog_registrations: 0,
         }
+    }
+
+    /// Recalcule la liste des catalogues (réglages et dossiers de l'espace
+    /// de travail) ; retourne `true` si la résolution peut avoir changé.
+    fn update_catalogs(&mut self) -> bool {
+        let paths = catalog::catalog_paths(
+            &self.settings.catalogs,
+            self.workspace.roots(),
+            self.settings.auto_detect_catalogs,
+        );
+        let changed = self.catalogs.set_roots(paths);
+        if changed {
+            self.log_catalog_errors();
+        }
+        changed
+    }
+
+    fn log_catalog_errors(&self) {
+        for (path, error) in self.catalogs.errors() {
+            eprintln!("xml-lsp: catalogue {} ignoré : {error}", path.display());
+        }
+    }
+
+    /// Relit les catalogues modifiés sur disque ; republie alors les
+    /// diagnostics des documents ouverts.
+    fn refresh_catalogs(
+        &mut self,
+        connection: &Connection,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        if self.catalogs.is_empty() || !self.catalogs.refresh() {
+            return Ok(());
+        }
+        self.log_catalog_errors();
+        self.register_catalog_watchers(connection)?;
+        self.publish_all_diagnostics(connection)
+    }
+
+    /// Republie les diagnostics de tous les documents ouverts.
+    fn publish_all_diagnostics(
+        &mut self,
+        connection: &Connection,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let mut uris = self.documents.keys().cloned().collect::<Vec<_>>();
+        uris.sort();
+        for uri in uris {
+            self.publish_diagnostics(connection, &uri)?;
+        }
+        Ok(())
+    }
+
+    /// Demande au client de surveiller les fichiers catalogues (y compris
+    /// hors de l'espace de travail) ; remplace l'enregistrement précédent.
+    fn register_catalog_watchers(
+        &mut self,
+        connection: &Connection,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        if !self.watched_files_registration {
+            return Ok(());
+        }
+        if let Some(id) = self.catalog_registration.take() {
+            connection.sender.send(
+                lsp_server::Request {
+                    id: RequestId::from(format!("{id}/unregister")),
+                    method: UNREGISTER_CAPABILITY_METHOD.to_owned(),
+                    // Orthographe (sic) imposée par la spécification LSP.
+                    params: json!({"unregisterations": [{
+                        "id": id,
+                        "method": DID_CHANGE_WATCHED_FILES_METHOD,
+                    }]}),
+                }
+                .into(),
+            )?;
+        }
+        let files = self.catalogs.files();
+        if files.is_empty() {
+            return Ok(());
+        }
+        self.catalog_registrations += 1;
+        let id = format!("xml-lsp/watched-catalogs-{}", self.catalog_registrations);
+        let watchers = files
+            .iter()
+            .map(|path| json!({"globPattern": path.to_string_lossy().replace('\\', "/")}))
+            .collect::<Vec<_>>();
+        connection.sender.send(
+            lsp_server::Request {
+                id: RequestId::from(id.clone()),
+                method: REGISTER_CAPABILITY_METHOD.to_owned(),
+                params: json!({"registrations": [{
+                    "id": id,
+                    "method": DID_CHANGE_WATCHED_FILES_METHOD,
+                    "registerOptions": {"watchers": watchers},
+                }]}),
+            }
+            .into(),
+        )?;
+        self.catalog_registration = Some(id);
+        Ok(())
     }
 
     /// Lit les réglages de `initializationOptions`.
@@ -217,15 +327,14 @@ impl XmlLanguageServer {
         }
         let settings = settings::Settings::from_value(&merged);
         let previous = std::mem::replace(&mut self.settings, settings);
-        if previous.same_validation(&self.settings) {
+        let catalogs_changed = self.update_catalogs();
+        if catalogs_changed {
+            self.register_catalog_watchers(connection)?;
+        }
+        if previous.same_validation(&self.settings) && !catalogs_changed {
             return Ok(());
         }
-        let mut uris = self.documents.keys().cloned().collect::<Vec<_>>();
-        uris.sort();
-        for uri in uris {
-            self.publish_diagnostics(connection, &uri)?;
-        }
-        Ok(())
+        self.publish_all_diagnostics(connection)
     }
 
     /// Publie les diagnostics du document ouvert `uri`.
@@ -259,6 +368,7 @@ impl XmlLanguageServer {
         if validation.disallow_doc_type_decl {
             extra.extend(doctype_diagnostics(source));
         }
+        extra.extend(catalog_diagnostics(uri, source));
         if validation.schema != settings::SchemaValidation::Never {
             extra.extend(self.schema_diagnostics(uri, source));
         }
@@ -277,9 +387,12 @@ impl XmlLanguageServer {
             return true;
         }
         if !matches!(
-            resolve_schema_locations(schema_resolution_source(source), uri_to_path(uri)),
+            self.resolve_schema_locations(uri, source),
             Ok(references) if references.is_empty()
         ) {
+            return true;
+        }
+        if catalog::is_catalog(source) {
             return true;
         }
         xml_core::tags::scan_markup(source).iter().any(|markup| {
@@ -303,6 +416,21 @@ impl XmlLanguageServer {
             &self.settings.file_associations,
             self.workspace.roots(),
             &uri_to_path(uri),
+            &self.catalogs,
+        )
+    }
+
+    /// `xsi:schemaLocation` / `xsi:noNamespaceSchemaLocation` du document,
+    /// résolus via les catalogues XML.
+    fn resolve_schema_locations(
+        &self,
+        uri: &str,
+        source: &str,
+    ) -> Result<Vec<xsd_core::SchemaReference>, String> {
+        resolve_schema_locations_with(
+            schema_resolution_source(source),
+            uri_to_path(uri),
+            &|request| self.catalogs.resolve_schema(request),
         )
     }
 
@@ -313,8 +441,7 @@ impl XmlLanguageServer {
         uri: &str,
         source: &str,
     ) -> Result<Vec<xsd_core::SchemaReference>, String> {
-        let references =
-            resolve_schema_locations(schema_resolution_source(source), uri_to_path(uri))?;
+        let references = self.resolve_schema_locations(uri, source)?;
         if !references.is_empty() {
             return Ok(references);
         }
@@ -334,6 +461,7 @@ impl XmlLanguageServer {
             documents: &self.documents,
             cache: &mut self.model_cache,
             associated_schemas,
+            catalogs: &self.catalogs,
         }
     }
 
@@ -352,9 +480,15 @@ impl XmlLanguageServer {
             }
             DID_CHANGE_WORKSPACE_FOLDERS_METHOD => {
                 self.workspace.change_folders(&notification.params);
+                if self.update_catalogs() {
+                    self.register_catalog_watchers(connection)?;
+                    self.publish_all_diagnostics(connection)?;
+                }
                 return Ok(false);
             }
             DID_CHANGE_WATCHED_FILES_METHOD => {
+                // Les catalogues modifiés sont relus par `refresh_catalogs`
+                // avant chaque message.
                 self.workspace.files_changed(&notification.params);
                 return Ok(false);
             }
@@ -481,8 +615,12 @@ impl XmlLanguageServer {
 
     fn load_schema(&mut self, uri: &str, source: &str) -> Option<XsdSchema> {
         let references = self.schema_references(uri, source).unwrap_or_default();
-        let (schemas, _) =
-            load_schema_graph(references, &mut self.schema_cache, &mut self.schema_index);
+        let (schemas, _) = load_schema_graph(
+            references,
+            &mut self.schema_cache,
+            &mut self.schema_index,
+            &self.catalogs,
+        );
         (!schemas.is_empty()).then(|| merge_schemas(schemas))
     }
 
@@ -544,8 +682,12 @@ impl XmlLanguageServer {
             Ok(references) => references,
             Err(error) => return vec![xsd_error_diagnostic(error)],
         };
-        let (schemas, errors) =
-            load_schema_graph(references, &mut self.schema_cache, &mut self.schema_index);
+        let (schemas, errors) = load_schema_graph(
+            references,
+            &mut self.schema_cache,
+            &mut self.schema_index,
+            &self.catalogs,
+        );
         let schema_errors = !errors.is_empty();
         let mut diagnostics = errors
             .into_iter()
@@ -616,7 +758,13 @@ impl XmlLanguageServer {
         let line = position.get("line")?.as_u64()? as usize;
         let character = position.get("character")?.as_u64()? as usize;
         let offset = offset_at(&source, line, character);
-        if let Some(links) = links::definition(uri, &source, offset, self.definition_link_support) {
+        if let Some(links) = links::definition(
+            uri,
+            &source,
+            offset,
+            self.definition_link_support,
+            &self.catalogs,
+        ) {
             return Some(links);
         }
         let name = element_name_at(&source, offset)?;
@@ -645,9 +793,7 @@ impl XmlLanguageServer {
         source: &str,
         name: &str,
     ) -> Option<(PathBuf, String, usize)> {
-        let references =
-            resolve_schema_locations(schema_resolution_source(source), uri_to_path(uri)).ok()?;
-        let mut queue = references;
+        let mut queue = self.schema_references(uri, source).ok()?;
         let mut visited = HashSet::new();
         while let Some(reference) = queue.pop() {
             if !visited.insert(reference.path.clone()) {
@@ -657,7 +803,11 @@ impl XmlLanguageServer {
             if let Some(offset) = xsd_element_name_offset(&schema_source, name) {
                 return Some((reference.path, schema_source, offset));
             }
-            if let Ok(dependencies) = resolve_schema_dependencies(&schema_source, &reference.path) {
+            if let Ok(dependencies) =
+                resolve_schema_dependencies_with(&schema_source, &reference.path, &|request| {
+                    self.catalogs.resolve_schema(request)
+                })
+            {
                 queue.extend(dependencies);
             }
         }
@@ -719,7 +869,7 @@ impl XmlLanguageServer {
     fn document_links(&self, params: &Value) -> Option<Value> {
         let uri = params.get("textDocument")?.get("uri")?.as_str()?;
         let source = self.documents.get(uri)?;
-        Some(links::document_links_json(uri, source))
+        Some(links::document_links_json(uri, source, &self.catalogs))
     }
 
     fn hover(&mut self, params: &Value) -> Option<Value> {
@@ -966,35 +1116,6 @@ fn uri_to_path(uri: &str) -> PathBuf {
     PathBuf::from(percent_decode(raw))
 }
 
-fn percent_decode(value: &str) -> String {
-    let bytes = value.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%'
-            && index + 2 < bytes.len()
-            && let (Some(high), Some(low)) =
-                (hex_digit(bytes[index + 1]), hex_digit(bytes[index + 2]))
-        {
-            decoded.push(high * 16 + low);
-            index += 3;
-            continue;
-        }
-        decoded.push(bytes[index]);
-        index += 1;
-    }
-    String::from_utf8_lossy(&decoded).into_owned()
-}
-
-fn hex_digit(value: u8) -> Option<u8> {
-    match value {
-        b'0'..=b'9' => Some(value - b'0'),
-        b'a'..=b'f' => Some(value - b'a' + 10),
-        b'A'..=b'F' => Some(value - b'A' + 10),
-        _ => None,
-    }
-}
-
 fn path_to_uri(path: &std::path::Path) -> String {
     let path = encode_uri_path(&path.to_string_lossy().replace('\\', "/"));
     if path.as_bytes().get(1) == Some(&b':') {
@@ -1058,6 +1179,7 @@ fn load_schema_graph(
     references: Vec<xsd_core::SchemaReference>,
     cache: &mut SchemaCache,
     index: &mut HashMap<String, Vec<PathBuf>>,
+    catalogs: &catalog::Catalogs,
 ) -> (Vec<XsdSchema>, Vec<SchemaLoadError>) {
     let mut queue = references;
     let mut visited = HashSet::new();
@@ -1072,6 +1194,18 @@ fn load_schema_graph(
         let modified = fs::metadata(&path)
             .and_then(|metadata| metadata.modified())
             .unwrap_or(UNIX_EPOCH);
+        if is_remote_location(&path) {
+            errors.push(SchemaLoadError {
+                message: format!(
+                    "schéma distant non résolu : {} (associez-le à un fichier local avec un catalogue XML, réglage xml.catalogs)",
+                    path.display()
+                ),
+                path,
+                offset: 0,
+                remote: true,
+            });
+            continue;
+        }
         let schema_source = match fs::read_to_string(&path) {
             Ok(source) => source,
             Err(error) => {
@@ -1079,6 +1213,7 @@ fn load_schema_graph(
                     path: path.clone(),
                     message: format!("impossible de lire le schéma : {error}"),
                     offset: 0,
+                    remote: false,
                 });
                 continue;
             }
@@ -1095,6 +1230,7 @@ fn load_schema_graph(
                         path: path.clone(),
                         message: format!("schéma XSD invalide : {error}"),
                         offset: xsd_parse_error_offset(&schema_source),
+                        remote: false,
                     });
                     continue;
                 }
@@ -1108,12 +1244,15 @@ fn load_schema_graph(
                 paths.push(path.clone());
             }
         }
-        match resolve_schema_dependencies(&schema_source, &path) {
+        match resolve_schema_dependencies_with(&schema_source, &path, &|request| {
+            catalogs.resolve_schema(request)
+        }) {
             Ok(dependencies) => queue.extend(dependencies),
             Err(error) => errors.push(SchemaLoadError {
                 path: path.clone(),
                 message: format!("dépendances XSD invalides : {error}"),
                 offset: xsd_parse_error_offset(&schema_source),
+                remote: false,
             }),
         }
         schemas.push(schema);
@@ -1142,7 +1281,7 @@ fn xsd_schema_error_diagnostic(error: SchemaLoadError) -> Value {
             "start": {"line": 0, "character": 0},
             "end": {"line": 0, "character": 0},
         },
-        "severity": 1,
+        "severity": if error.remote { 2 } else { 1 },
         "source": "xml-lsp",
         "code": "xsd-validation",
         "data": {
@@ -1153,6 +1292,26 @@ fn xsd_schema_error_diagnostic(error: SchemaLoadError) -> Value {
         },
         "message": error.message,
     })
+}
+
+/// Avertissements d'un catalogue XML ouvert : cibles locales introuvables.
+fn catalog_diagnostics(uri: &str, source: &str) -> Vec<Value> {
+    catalog::catalog_problems(uri, source)
+        .into_iter()
+        .map(|problem| {
+            json!({
+                "range": {
+                    "start": position_at(source, problem.range.start),
+                    "end": position_at(source, problem.range.end),
+                },
+                "severity": 2,
+                "source": "xml-lsp",
+                "code": "catalog-target-missing",
+                "data": {"category": "catalog", "kind": "missingTarget"},
+                "message": problem.message,
+            })
+        })
+        .collect()
 }
 
 /// Erreur `xml.validation.disallowDocTypeDecl` sur chaque `<!DOCTYPE>`.
@@ -1404,11 +1563,16 @@ fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
         .unwrap_or(false);
     server.workspace = symbols::WorkspaceIndex::from_initialize_params(&initialize_params);
     server.initialize_settings(&initialize_params);
+    server.update_catalogs();
     // `initialize_finish` a déjà consommé la notification `initialized`.
     server.register_watched_files(&connection)?;
+    server.register_catalog_watchers(&connection)?;
     server.request_configuration(&connection)?;
 
     for message in &connection.receiver {
+        if !matches!(message, Message::Response(_)) {
+            server.refresh_catalogs(&connection)?;
+        }
         match message {
             Message::Request(request) => {
                 if request.method == COMPLETION_METHOD {
@@ -2348,6 +2512,220 @@ mod tests {
             .iter()
             .map(|diagnostic| diagnostic["code"].as_str().unwrap_or_default().to_owned())
             .collect()
+    }
+
+    /// Prochain message : une requête serveur -> client `method`, acquittée.
+    fn expect_server_request(client: &TestClient, method: &str) -> Value {
+        match client.next() {
+            Message::Request(request) => {
+                assert_eq!(request.method, method, "{request:?}");
+                client.send(Response::new_ok(request.id, Value::Null).into());
+                request.params
+            }
+            message => panic!("unexpected message {message:?}"),
+        }
+    }
+
+    /// `data.kind` des diagnostics publiés.
+    fn diagnostic_kinds(publication: &Value) -> Vec<String> {
+        publication["diagnostics"]
+            .as_array()
+            .expect("diagnostics should be an array")
+            .iter()
+            .map(|diagnostic| {
+                diagnostic["data"]["kind"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn resolves_remote_schemas_through_xml_catalogs() {
+        let directory =
+            std::env::temp_dir().join(format!("xml-lsp-catalogs {}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(directory.join("schemas")).expect("directory should be created");
+        std::fs::create_dir_all(directory.join("my schemas")).expect("directory should be created");
+        let strict = "<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\">\n  <xs:element name=\"project\">\n    <xs:annotation><xs:documentation>Projet résolu par catalogue.</xs:documentation></xs:annotation>\n    <xs:complexType><xs:sequence><xs:element name=\"name\" type=\"xs:string\"/></xs:sequence></xs:complexType>\n  </xs:element>\n</xs:schema>";
+        let lenient = "<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\">\n  <xs:element name=\"project\">\n    <xs:complexType><xs:sequence><xs:element name=\"other\" type=\"xs:string\"/></xs:sequence></xs:complexType>\n  </xs:element>\n</xs:schema>";
+        let strict_path = directory.join("schemas/project.xsd");
+        std::fs::write(&strict_path, strict).expect("schema should be written");
+        std::fs::write(directory.join("schemas/lenient.xsd"), lenient)
+            .expect("schema should be written");
+        std::fs::write(directory.join("my schemas/project.xsd"), strict)
+            .expect("schema should be written");
+        let catalog_path = directory.join("catalog.xml");
+        let catalog = |target: &str| {
+            format!(
+                "<catalog xmlns=\"urn:oasis:names:tc:entity:xmlns:xml:catalog\">\n  <system systemId=\"http://example.com/schemas/project.xsd\" uri=\"{target}\"/>\n</catalog>"
+            )
+        };
+        std::fs::write(&catalog_path, catalog("schemas/project.xsd"))
+            .expect("catalog should be written");
+
+        let remote_uri = path_to_uri(&directory.join("remote.xml"));
+        let remote = "<project xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:noNamespaceSchemaLocation=\"http://example.com/schemas/project.xsd\"><other/></project>";
+        let spaced_uri = path_to_uri(&directory.join("spaced.xml"));
+        let spaced = "<project xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:noNamespaceSchemaLocation=\"my%20schemas/project.xsd\"><other/></project>";
+        let unmapped_uri = path_to_uri(&directory.join("unmapped.xml"));
+        let unmapped = "<project xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:noNamespaceSchemaLocation=\"http://unmapped.example.com/x.xsd\"><other/></project>";
+        let open_catalog_uri = path_to_uri(&directory.join("open-catalog.xml"));
+        let open_catalog = "<catalog xmlns=\"urn:oasis:names:tc:entity:xmlns:xml:catalog\">\n  <uri name=\"a\" uri=\"schemas/project.xsd\"/>\n  <uri name=\"b\" uri=\"schemas/absent.xsd\"/>\n</catalog>";
+
+        let (server, connection) = Connection::memory();
+        let server_thread = thread::spawn(|| run(server).expect("server loop should succeed"));
+        let client = TestClient {
+            connection,
+            diagnostics: Default::default(),
+        };
+        client.request(
+            1,
+            INITIALIZE_METHOD,
+            json!({
+                "rootUri": path_to_uri(&directory),
+                "capabilities": {
+                    "workspace": {"didChangeWatchedFiles": {"dynamicRegistration": true}},
+                    "textDocument": {"definition": {"linkSupport": false}},
+                },
+                "initializationOptions": {"xml": {
+                    "catalogs": ["catalog.xml"],
+                    "validation": {"noGrammar": "hint"},
+                }},
+            }),
+        );
+        client.notify("initialized", json!({}));
+        expect_server_request(&client, REGISTER_CAPABILITY_METHOD);
+        let registration = expect_server_request(&client, REGISTER_CAPABILITY_METHOD);
+        assert_eq!(
+            registration["registrations"][0]["registerOptions"]["watchers"],
+            json!([{"globPattern": catalog_path.to_string_lossy()}])
+        );
+
+        for (uri, text) in [
+            (&remote_uri, remote),
+            (&spaced_uri, spaced),
+            (&unmapped_uri, unmapped),
+            (&open_catalog_uri, open_catalog),
+        ] {
+            client.notify(
+                DID_OPEN_METHOD,
+                json!({"textDocument": {"uri": uri, "text": text}}),
+            );
+        }
+        let published = client.take_diagnostics(2);
+        assert_eq!(published.len(), 4, "{published:?}");
+        // URL distante résolue hors ligne par le catalogue : validation XSD.
+        assert_eq!(published[0]["uri"], remote_uri);
+        assert!(
+            diagnostic_kinds(&published[0]).contains(&"validation".to_owned()),
+            "{published:?}"
+        );
+        assert!(!diagnostic_kinds(&published[0]).contains(&"loading".to_owned()));
+        // Chemin encodé en pourcentage (`my%20schemas`) : même validation.
+        assert!(
+            diagnostic_kinds(&published[1]).contains(&"validation".to_owned()),
+            "{published:?}"
+        );
+        assert!(!diagnostic_kinds(&published[1]).contains(&"loading".to_owned()));
+        // URL non cataloguée : avertissement explicite, pas d'erreur.
+        assert_eq!(diagnostic_kinds(&published[2]), vec!["loading"]);
+        assert_eq!(published[2]["diagnostics"][0]["severity"], 2);
+        assert!(
+            published[2]["diagnostics"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("xml.catalogs")
+        );
+        // Catalogue ouvert : cible absente signalée, pas de « noGrammar ».
+        assert_eq!(codes(&published[3]), vec!["catalog-target-missing"]);
+        assert_eq!(
+            published[3]["diagnostics"][0]["range"],
+            json!({"start": {"line": 2, "character": 21}, "end": {"line": 2, "character": 39}})
+        );
+
+        // Complétion guidée par le schéma catalogué.
+        let character = remote.find("<other").unwrap() + 1;
+        let completion = client.request(
+            3,
+            COMPLETION_METHOD,
+            json!({"textDocument": {"uri": remote_uri}, "position": {"line": 0, "character": character}}),
+        );
+        let labels = completion["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["label"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert!(labels.contains(&"name".to_owned()), "{labels:?}");
+
+        // Survol : documentation du schéma catalogué.
+        let hover = client.request(
+            4,
+            HOVER_METHOD,
+            json!({"textDocument": {"uri": remote_uri}, "position": {"line": 0, "character": 2}}),
+        );
+        assert!(
+            hover["contents"]["value"]
+                .as_str()
+                .unwrap()
+                .contains("Projet résolu par catalogue."),
+            "{hover:?}"
+        );
+
+        // Lien et définition vers le fichier local.
+        let links = client.request(
+            5,
+            DOCUMENT_LINK_METHOD,
+            json!({"textDocument": {"uri": remote_uri}}),
+        );
+        assert_eq!(links[0]["target"], path_to_uri(&strict_path));
+        let location = remote.find("http://example.com").unwrap() + 4;
+        let definition = client.request(
+            6,
+            DEFINITION_METHOD,
+            json!({"textDocument": {"uri": remote_uri}, "position": {"line": 0, "character": location}}),
+        );
+        assert_eq!(definition[0]["uri"], path_to_uri(&strict_path));
+
+        // Catalogue modifié sur disque : relu, diagnostics republiés.
+        std::fs::write(&catalog_path, catalog("schemas/lenient.xsd"))
+            .expect("catalog should be written");
+        client.notify(
+            DID_CHANGE_WATCHED_FILES_METHOD,
+            json!({"changes": [{"uri": path_to_uri(&catalog_path), "type": 2}]}),
+        );
+        expect_server_request(&client, UNREGISTER_CAPABILITY_METHOD);
+        expect_server_request(&client, REGISTER_CAPABILITY_METHOD);
+        let published = client.take_diagnostics(7);
+        assert_eq!(published.len(), 4, "{published:?}");
+        let remote_publication = |published: &[Value]| {
+            published
+                .iter()
+                .find(|publication| publication["uri"] == remote_uri)
+                .cloned()
+                .expect("remote.xml should be republished")
+        };
+        assert_eq!(remote_publication(&published)["diagnostics"], json!([]));
+
+        // Catalogues retirés des réglages : l'URL redevient distante.
+        client.notify(
+            DID_CHANGE_CONFIGURATION_METHOD,
+            json!({"settings": {"xml": {"catalogs": []}}}),
+        );
+        expect_server_request(&client, UNREGISTER_CAPABILITY_METHOD);
+        let published = client.take_diagnostics(8);
+        assert_eq!(published.len(), 4, "{published:?}");
+        assert_eq!(
+            diagnostic_kinds(&remote_publication(&published)),
+            vec!["loading"]
+        );
+
+        assert_eq!(client.request(9, "shutdown", json!(null)), Value::Null);
+        client.notify(EXIT_METHOD, json!(null));
+        server_thread.join().expect("server thread should stop");
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]

@@ -38,9 +38,14 @@ use xsd_core::model::{
     Located, XSD_NAMESPACE, XsdAttributeDecl, XsdDerivation, XsdElementDecl, XsdInstanceStep,
     XsdModel, XsdModelSet, XsdTypeRef, XsdUse, parse_xsd_model,
 };
-use xsd_core::{resolve_path, resolve_schema_dependencies, resolve_schema_locations};
+use xsd_core::{
+    SchemaLocation, SchemaLocationKind, resolve_schema_dependencies_with, resolve_schema_location,
+    resolve_schema_locations_with,
+};
 
-use crate::{path_to_uri, schema_resolution_source, selection::LineIndex, uri_to_path};
+use crate::{
+    catalog::Catalogs, path_to_uri, schema_resolution_source, selection::LineIndex, uri_to_path,
+};
 
 const XSI_NAMESPACE: &str = "http://www.w3.org/2001/XMLSchema-instance";
 /// Nombre maximal de valeurs d'énumération listées.
@@ -67,6 +72,9 @@ pub struct HoverContext<'a> {
     /// Schémas associés au document de la requête par
     /// `xml.fileAssociations`, utilisés lorsqu'il n'en déclare aucun.
     pub associated_schemas: Vec<PathBuf>,
+    /// Catalogues XML (`xml.catalogs`) consultés pour résoudre les
+    /// emplacements de schémas.
+    pub catalogs: &'a Catalogs,
 }
 
 /// Répond à `textDocument/hover` pour le document `uri` au curseur `offset`.
@@ -261,8 +269,8 @@ impl<'a> Document<'a> {
 
     /// Schémas référencés par `xsi:schemaLocation` et
     /// `xsi:noNamespaceSchemaLocation`, lus de façon tolérante (document mal
-    /// formé en cours de saisie).
-    fn schema_locations(&self, document_path: &Path) -> Vec<PathBuf> {
+    /// formé en cours de saisie), résolus via les catalogues.
+    fn schema_locations(&self, document_path: &Path, catalogs: &Catalogs) -> Vec<PathBuf> {
         let base = document_path.parent().unwrap_or_else(|| Path::new(""));
         let mut paths = Vec::new();
         for element in 0..self.tree.elements().len() {
@@ -275,20 +283,32 @@ impl<'a> Document<'a> {
                     continue;
                 }
                 let value = attribute.value(self.source).unwrap_or_default();
-                let locations = match &self.source[local] {
-                    "schemaLocation" => value
-                        .split_whitespace()
-                        .skip(1)
-                        .step_by(2)
+                let tokens = value.split_whitespace().collect::<Vec<_>>();
+                let requests = match &self.source[local] {
+                    "schemaLocation" => tokens
+                        .chunks_exact(2)
+                        .map(|pair| SchemaLocation {
+                            kind: SchemaLocationKind::SchemaLocation,
+                            namespace: Some(pair[0]),
+                            location: Some(pair[1]),
+                            base_directory: base,
+                        })
                         .collect::<Vec<_>>(),
-                    "noNamespaceSchemaLocation" => value.split_whitespace().take(1).collect(),
+                    "noNamespaceSchemaLocation" => tokens
+                        .first()
+                        .map(|location| SchemaLocation {
+                            kind: SchemaLocationKind::NoNamespaceSchemaLocation,
+                            namespace: None,
+                            location: Some(location),
+                            base_directory: base,
+                        })
+                        .into_iter()
+                        .collect(),
                     _ => continue,
                 };
-                paths.extend(
-                    locations
-                        .into_iter()
-                        .map(|location| resolve_path(base, location)),
-                );
+                paths.extend(requests.iter().filter_map(|request| {
+                    resolve_schema_location(request, &|request| catalogs.resolve_schema(request))
+                }));
             }
         }
         paths
@@ -321,8 +341,8 @@ fn open_document<'d>(documents: &'d HashMap<String, String>, path: &Path) -> Opt
         .map(|(_, source)| source)
 }
 
-fn dependency_paths(source: &str, path: &Path) -> Vec<PathBuf> {
-    resolve_schema_dependencies(source, path)
+fn dependency_paths(source: &str, path: &Path, catalogs: &Catalogs) -> Vec<PathBuf> {
+    resolve_schema_dependencies_with(source, path, &|request| catalogs.resolve_schema(request))
         .map(|references| {
             references
                 .into_iter()
@@ -350,9 +370,10 @@ pub(crate) fn load_models(
             continue;
         }
         let loaded = if let Some(source) = open_document(context.documents, &path) {
-            parse_xsd_model(source)
-                .ok()
-                .map(|model| (Arc::new(model), dependency_paths(source, &path)))
+            parse_xsd_model(source).ok().map(|model| {
+                let dependencies = dependency_paths(source, &path, context.catalogs);
+                (Arc::new(model), dependencies)
+            })
         } else {
             let modified = fs::metadata(&path)
                 .and_then(|metadata| metadata.modified())
@@ -363,7 +384,7 @@ pub(crate) fn load_models(
                 }
                 _ => fs::read_to_string(&path).ok().and_then(|source| {
                     let model = Arc::new(parse_xsd_model(&source).ok()?);
-                    let dependencies = dependency_paths(&source, &path);
+                    let dependencies = dependency_paths(&source, &path, context.catalogs);
                     context.cache.insert(
                         path.clone(),
                         (modified, model.clone(), dependencies.clone()),
@@ -395,16 +416,19 @@ pub(crate) fn instance_models(
     uri: &str,
     document: &Document<'_>,
 ) -> LoadedModels {
-    let roots: Vec<PathBuf> =
-        match resolve_schema_locations(schema_resolution_source(document.source), uri_to_path(uri))
-        {
-            Ok(references) => references
-                .into_iter()
-                .map(|reference| reference.path)
-                .collect(),
-            // Document en cours de saisie : lecture tolérante des attributs xsi.
-            Err(_) => document.schema_locations(&uri_to_path(uri)),
-        };
+    let catalogs = context.catalogs;
+    let roots: Vec<PathBuf> = match resolve_schema_locations_with(
+        schema_resolution_source(document.source),
+        uri_to_path(uri),
+        &|request| catalogs.resolve_schema(request),
+    ) {
+        Ok(references) => references
+            .into_iter()
+            .map(|reference| reference.path)
+            .collect(),
+        // Document en cours de saisie : lecture tolérante des attributs xsi.
+        Err(_) => document.schema_locations(&uri_to_path(uri), catalogs),
+    };
     let roots = if roots.is_empty() {
         context.associated_schemas.clone()
     } else {
@@ -607,7 +631,7 @@ fn schema_hover(
 
     let path = uri_to_path(uri);
     let model = Arc::new(parse_xsd_model(source).ok()?);
-    let dependencies = dependency_paths(source, &path);
+    let dependencies = dependency_paths(source, &path, context.catalogs);
     let models = load_models(context, vec![(path, model)], dependencies);
     let set = &models.set;
     let title = |label: &str| format!("**{label}** {}", code(token));
@@ -1149,6 +1173,7 @@ mod tests {
                 documents: &self.documents,
                 cache: &mut self.cache,
                 associated_schemas: Vec::new(),
+                catalogs: &crate::catalog::Catalogs::default(),
             };
             hover(&mut context, uri, &source, offset)
         }
