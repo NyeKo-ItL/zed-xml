@@ -91,11 +91,9 @@ impl XmlExtension {
         );
 
         let result: zed::Result<String> = (|| {
-            let version_dir;
-            let download_url;
-            if let Some(url) = override_url {
-                version_dir = LANGUAGE_SERVER_ID.to_owned();
-                download_url = url;
+            let (download_url, executable_path) = if let Some(url) = override_url {
+                // The extension host does not create parent directories for downloads.
+                (url, executable.to_owned())
             } else {
                 let release = zed::latest_github_release(
                     RELEASE_REPOSITORY,
@@ -113,11 +111,12 @@ impl XmlExtension {
                             "Could not find asset {asset_name} in the latest {RELEASE_REPOSITORY} release"
                         )
                     })?;
-                version_dir = format!("{LANGUAGE_SERVER_ID}-{}", release.version);
-                download_url = asset.download_url;
-            }
+                (
+                    asset.download_url,
+                    format!("{LANGUAGE_SERVER_ID}-{}-{executable}", release.version),
+                )
+            };
 
-            let executable_path = format!("{version_dir}/{executable}");
             zed::download_file(
                 &download_url,
                 &executable_path,
