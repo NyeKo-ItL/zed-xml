@@ -1,5 +1,5 @@
-//! Formatage XML : document complet ([`format_xml_with`]) et plage
-//! ([`format_xml_range`]), paramétrés par [`FormatOptions`].
+//! XML formatting: whole document ([`format_xml_with`]) and range
+//! ([`format_xml_range`]), configured by [`FormatOptions`].
 
 use std::ops::Range;
 
@@ -13,8 +13,8 @@ use crate::{
     tags::{XmlElement, XmlTagTree},
 };
 
-/// Fin de ligne utilisée pour les retours à la ligne insérés par le
-/// formateur (le contenu texte existant n'est jamais converti).
+/// Line ending used for the line breaks inserted by the formatter
+/// (existing text content is never converted).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum LineEnding {
     /// `\n`.
@@ -25,7 +25,7 @@ pub enum LineEnding {
 }
 
 impl LineEnding {
-    /// Fin de ligne de la première ligne de `source` (`\n` par défaut).
+    /// Line ending of the first line of `source` (`\n` by default).
     pub fn detect(source: &str) -> Self {
         match source.find('\n') {
             Some(index) if source[..index].ends_with('\r') => Self::CrLf,
@@ -33,7 +33,7 @@ impl LineEnding {
         }
     }
 
-    /// Représentation textuelle.
+    /// Textual representation.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Lf => "\n",
@@ -42,81 +42,81 @@ impl LineEnding {
     }
 }
 
-/// Disposition des attributs d'une balise ouvrante
-/// (`xml.format.splitAttributes` de LemMinX).
+/// Layout of the attributes of a start tag
+/// (LemMinX `xml.format.splitAttributes`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SplitAttributes {
-    /// Les attributs restent sur la ligne de la balise (ou conservent leurs
-    /// retours à la ligne, voir [`FormatOptions::preserve_attribute_line_breaks`]).
+    /// Attributes stay on the tag line (or keep their line breaks, see
+    /// [`FormatOptions::preserve_attribute_line_breaks`]).
     #[default]
     Preserve,
-    /// Chaque attribut sur sa propre ligne, indenté d'un niveau de plus que
-    /// l'élément (lorsque la balise a au moins deux attributs).
+    /// Each attribute on its own line, indented one level deeper than the
+    /// element (when the tag has at least two attributes).
     SplitNewLine,
-    /// Premier attribut sur la ligne de la balise, les suivants alignés sur
-    /// lui (lorsque la balise a au moins deux attributs).
+    /// First attribute on the tag line, the following ones aligned with it
+    /// (when the tag has at least two attributes).
     AlignWithFirstAttr,
 }
 
-/// Traitement des éléments vides (`xml.format.emptyElements` de LemMinX).
+/// Handling of empty elements (LemMinX `xml.format.emptyElements`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum EmptyElements {
-    /// `<a/>` et `<a></a>` sont laissés tels quels.
+    /// `<a/>` and `<a></a>` are left as they are.
     #[default]
     Ignore,
-    /// `<a/>` devient `<a></a>`.
+    /// `<a/>` becomes `<a></a>`.
     Expand,
-    /// `<a></a>` (ou ne contenant que des blancs) devient `<a/>`.
+    /// `<a></a>` (or containing only whitespace) becomes `<a/>`.
     Collapse,
 }
 
-/// Options de formatage.
+/// Formatting options.
 ///
-/// Les valeurs par défaut reproduisent le formatage historique : deux espaces
-/// par niveau, fins de ligne `\n`, exactement un saut de ligne final, aucune
-/// ligne vide conservée entre les éléments, texte laissé intact et balises
-/// ouvrantes recopiées telles quelles (attributs compris).
+/// The defaults reproduce the historical formatting: two spaces per level,
+/// `\n` line endings, exactly one final newline, no blank line kept between
+/// elements, text left intact and start tags copied as they are (attributes
+/// included).
 ///
-/// Les cinq premiers champs correspondent aux `FormattingOptions` LSP ; les
-/// suivants sont les réglages de type LemMinX (`xml.format.*`).
+/// The first five fields match the LSP `FormattingOptions`; the following
+/// ones are LemMinX-style settings (`xml.format.*`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FormatOptions {
-    /// Largeur d'un niveau d'indentation lorsque `insert_spaces` est vrai.
+    /// Width of an indentation level when `insert_spaces` is true.
     pub tab_size: usize,
-    /// Indente avec des espaces (sinon une tabulation par niveau).
+    /// Indents with spaces (otherwise one tab per level).
     pub insert_spaces: bool,
-    /// Supprime les blancs en fin de ligne dans le texte et les commentaires
-    /// (jamais dans les sections CDATA ni les valeurs d'attributs).
+    /// Removes trailing whitespace in text and comments (never in CDATA
+    /// sections or attribute values).
     pub trim_trailing_whitespace: bool,
-    /// Garantit au moins un saut de ligne en fin de document.
+    /// Guarantees at least one newline at the end of the document.
     pub insert_final_newline: bool,
-    /// Ne conserve qu'un seul saut de ligne en fin de document.
+    /// Keeps only one newline at the end of the document.
     pub trim_final_newlines: bool,
-    /// Fin de ligne des retours à la ligne insérés.
+    /// Line ending of the inserted line breaks.
     pub line_ending: LineEnding,
-    /// Nombre maximal de lignes vides conservées entre deux constructions
-    /// (`xml.format.preservedNewlines` de LemMinX ; 0 les supprime toutes).
+    /// Maximum number of blank lines kept between two constructs
+    /// (LemMinX `xml.format.preservedNewlines`; 0 removes them all).
     pub preserved_newlines: usize,
-    /// Disposition des attributs (`xml.format.splitAttributes`).
+    /// Attribute layout (`xml.format.splitAttributes`).
     pub split_attributes: SplitAttributes,
-    /// Largeur maximale d'une ligne de balise ouvrante (`xml.format.maxLineWidth`) :
-    /// les attributs qui la dépasseraient passent à la ligne suivante. 0
-    /// désactive le retour à la ligne ; seul le placement des attributs est
-    /// concerné, jamais le texte.
+    /// Maximum width of a start tag line (`xml.format.maxLineWidth`):
+    /// attributes that would exceed it move to the next line. 0 disables
+    /// wrapping; only attribute placement is affected, never
+    /// text.
     pub max_line_width: usize,
-    /// Place `>` ou `/>` sur sa propre ligne lorsque les attributs sont
-    /// répartis sur plusieurs lignes par [`SplitAttributes::SplitNewLine`] ou
+    /// Puts `>` or `/>` on its own line when the attributes are split over
+    /// several lines by [`SplitAttributes::SplitNewLine`] or
     /// [`SplitAttributes::AlignWithFirstAttr`] (`xml.format.closingBracketNewLine`).
     pub closing_bracket_new_line: bool,
-    /// Traitement des éléments vides (`xml.format.emptyElements`). Ignoré par
-    /// le formatage de plage, qui ne modifie que des blancs.
+    /// Handling of empty elements (`xml.format.emptyElements`). Ignored by
+    /// range formatting, which only changes whitespace.
     pub empty_elements: EmptyElements,
-    /// Conserve les retours à la ligne existants avant les attributs
-    /// (`xml.format.preserveAttributeLineBreaks`). Avec
-    /// [`SplitAttributes::Preserve`], `true` et sans `max_line_width`, la
-    /// balise ouvrante est recopiée à l'identique (comportement historique) ;
-    /// `false` place tous les attributs sur la ligne de la balise, séparés par
-    /// une espace.
+    /// Keeps existing line breaks before attributes
+    /// (`xml.format.preserveAttributeLineBreaks`). With
+    /// [`SplitAttributes::Preserve`], `true` and no `max_line_width`, the
+    /// start tag is copied verbatim (historical behaviour);
+    /// `false` puts all attributes on the tag line, separated by a
+    /// space.
     pub preserve_attribute_line_breaks: bool,
 }
 
@@ -140,7 +140,7 @@ impl Default for FormatOptions {
 }
 
 impl FormatOptions {
-    /// Indentation d'un niveau.
+    /// One level of indentation.
     pub fn indent_unit(&self) -> String {
         if self.insert_spaces {
             " ".repeat(self.tab_size)
@@ -153,14 +153,14 @@ impl FormatOptions {
         self.indent_unit().repeat(depth)
     }
 
-    /// Les balises ouvrantes sont recopiées sans être reconstruites.
+    /// Start tags are copied without being rebuilt.
     fn keeps_raw_tags(&self) -> bool {
         self.split_attributes == SplitAttributes::Preserve
             && self.preserve_attribute_line_breaks
             && self.max_line_width == 0
     }
 
-    /// Largeur affichée d'une indentation (une tabulation vaut `tab_size`).
+    /// Displayed width of an indentation (a tab counts as `tab_size`).
     fn display_width(&self, text: &str) -> usize {
         text.chars()
             .map(|character| {
@@ -174,21 +174,21 @@ impl FormatOptions {
     }
 }
 
-/// Formate un document XML valide avec deux espaces par niveau.
+/// Formats a valid XML document with two spaces per level.
 pub fn format_xml(source: &str) -> Result<String, String> {
     format_xml_with(source, &FormatOptions::default())
 }
 
-/// Formate un document XML valide selon `options`.
+/// Formats a valid XML document according to `options`.
 pub fn format_xml_with(source: &str, options: &FormatOptions) -> Result<String, String> {
     if !parse_xml(source).diagnostics.is_empty() {
-        return Err("le document XML est invalide".to_owned());
+        return Err("the XML document is invalid".to_owned());
     }
 
     let mut formatter = Formatter::new(options, 0, false, false);
     formatter.run(source)?;
     if !formatter.has_root {
-        return Err("le document XML ne contient aucun élément racine".to_owned());
+        return Err("the XML document has no root element".to_owned());
     }
     let (mut result, _) = formatter.finish()?;
 
@@ -216,7 +216,7 @@ pub fn format_xml_with(source: &str, options: &FormatOptions) -> Result<String, 
     Ok(result)
 }
 
-/// Remplacement calculé par [`format_xml_range`] : `text` remplace
+/// Replacement computed by [`format_xml_range`]: `text` replaces
 /// `source[range]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FormattedRange {
@@ -224,16 +224,16 @@ pub struct FormattedRange {
     pub text: String,
 }
 
-/// Formate la plage `range` (offsets UTF-8) de `source`, comme le
-/// `rangeFormatting` de LemMinX.
+/// Formats the range `range` (UTF-8 offsets) of `source`, like LemMinX
+/// `rangeFormatting`.
 ///
-/// La plage est étendue aux éléments complets qui l'englobent : la suite
-/// d'éléments frères couvrant la plage, ou l'élément qui la contient
-/// lorsqu'elle touche ses balises. Seule cette région (et les blancs qui
-/// l'entourent sur la même ligne) est reformatée, avec l'indentation
-/// correspondant à sa profondeur. Le reste du document peut être invalide :
-/// seule la région doit être bien formée. Retourne `None` lorsque la région
-/// ne peut pas être formatée sans risque.
+/// The range is expanded to the enclosing complete elements: the run of
+/// sibling elements covering the range, or the element containing it when
+/// it touches its tags. Only that region (and the whitespace around it on
+/// the same line) is reformatted, with the indentation matching its
+/// depth. The rest of the document may be invalid: only the region must
+/// be well-formed. Returns `None` when the region cannot be formatted
+/// safely.
 pub fn format_xml_range(
     source: &str,
     range: Range<usize>,
@@ -248,9 +248,9 @@ pub fn format_xml_range(
     let region = Region::find(&tree, start, end)?;
     let elements = tree.elements();
 
-    // Contexte : l'élément parent, son contenu et l'éventuel texte mixte
-    // précédant la région (qui désactive l'indentation, comme pour le
-    // formatage complet).
+    // Context: the parent element, its content and any mixed text
+    // preceding the region (which disables indentation, as for whole
+    // document formatting).
     let parent_content = match region.parent {
         Some(parent) => elements[parent].content_range()?,
         None => 0..source.len(),
@@ -260,8 +260,8 @@ pub fn format_xml_range(
         None => false,
     };
 
-    // Le formatage de plage ne modifie que des blancs (voir le garde-fou
-    // ci-dessous) : les éléments vides sont laissés tels quels.
+    // Range formatting only changes whitespace (see the safeguard
+    // below): empty elements are left as they are.
     let options = &FormatOptions {
         empty_elements: EmptyElements::Ignore,
         ..options.clone()
@@ -297,9 +297,9 @@ pub fn format_xml_range(
         let whitespace = &after[..after.len() - after.trim_start_matches(XML_WHITESPACE).len()];
         let next = &after[whitespace.len()..];
         match whitespace.find(['\r', '\n']) {
-            // Blancs en fin de ligne après la région.
+            // Trailing whitespace after the region.
             Some(line_break) => replaced.end += line_break,
-            // Construction suivante sur la même ligne : passage à la ligne.
+            // Next construct on the same line: line break.
             None if next.starts_with('<') => {
                 replaced.end += whitespace.len();
                 let depth = if next.starts_with("</") {
@@ -314,7 +314,7 @@ pub fn format_xml_range(
         }
     }
 
-    // Garde-fou : le formatage ne doit modifier que des blancs.
+    // Safeguard: formatting must only change whitespace.
     let significant = |value: &str| {
         value
             .chars()
@@ -333,19 +333,19 @@ pub fn format_xml_range(
 
 const XML_WHITESPACE: [char; 4] = [' ', '\t', '\r', '\n'];
 
-/// Région à reformater : suite d'éléments frères complets.
+/// Region to reformat: run of complete sibling elements.
 struct Region {
     range: Range<usize>,
-    /// Parent complet commun (`None` au niveau du document).
+    /// Common complete parent (`None` at document level).
     parent: Option<usize>,
-    /// Profondeur d'indentation des éléments de la région.
+    /// Indentation depth of the elements of the region.
     depth: usize,
 }
 
 impl Region {
     fn find(tree: &XmlTagTree, start: usize, end: usize) -> Option<Self> {
         let elements = tree.elements();
-        // Seuls les éléments complets forment un arbre bien imbriqué.
+        // Only complete elements form a well-nested tree.
         let closed_parent = (0..elements.len())
             .map(|index| {
                 tree.ancestors(index)
@@ -435,9 +435,9 @@ impl Region {
     }
 }
 
-/// Indique si du texte (hors blancs) ou une section CDATA apparaît au premier
-/// niveau de `content`, ce qui désactive l'indentation dans le formatage
-/// complet. `None` si `content` n'est pas analysable.
+/// Whether text (other than whitespace) or a CDATA section appears at the
+/// top level of `content`, which disables indentation in whole document
+/// formatting. `None` if `content` cannot be parsed.
 fn has_text_at_top_level(content: &str) -> Option<bool> {
     let mut reader = Reader::from_str(content);
     let mut depth = 0usize;
@@ -457,7 +457,7 @@ fn has_text_at_top_level(content: &str) -> Option<bool> {
     }
 }
 
-/// Supprime les espaces et tabulations précédant chaque fin de ligne.
+/// Removes the spaces and tabs preceding each line ending.
 fn trim_trailing_whitespace(text: &str) -> String {
     text.split_inclusive('\n')
         .map(|line| {
@@ -476,18 +476,18 @@ fn trim_trailing_whitespace(text: &str) -> String {
 struct Formatter<'a> {
     options: &'a FormatOptions,
     writer: Writer<Vec<u8>>,
-    /// Profondeur d'indentation du premier niveau.
+    /// Indentation depth of the top level.
     base_depth: usize,
-    /// Profondeur relative au premier niveau.
+    /// Depth relative to the top level.
     depth: usize,
-    /// Présence de texte dans chaque niveau ouvert ; le premier élément
-    /// représente le niveau englobant.
+    /// Whether each open level contains text; the first item represents the
+    /// enclosing level.
     stack: Vec<bool>,
-    /// Fragment (formatage de plage) : plusieurs racines et texte permis au
-    /// premier niveau.
+    /// Fragment (range formatting): several roots and text allowed at the
+    /// top level.
     fragment: bool,
     output_started: bool,
-    /// Balise ouvrante en attente et lignes vides qui la précèdent.
+    /// Pending start tag and the blank lines preceding it.
     pending_start: Option<(BytesStart<'static>, usize)>,
     blank_lines: usize,
     has_root: bool,
@@ -519,7 +519,7 @@ impl<'a> Formatter<'a> {
         loop {
             let event = reader
                 .read_event()
-                .map_err(|error| format!("erreur XML : {error}"))?;
+                .map_err(|error| format!("XML error: {error}"))?;
             match event {
                 Event::Eof => break,
                 Event::Decl(_) | Event::DocType(_) | Event::PI(_) => {
@@ -551,7 +551,7 @@ impl<'a> Formatter<'a> {
                     }
                 }
                 Event::End(element) => {
-                    // Élément sans contenu (ou seulement des blancs).
+                    // Element without content (or only whitespace).
                     if self.options.empty_elements != EmptyElements::Ignore
                         && let Some((start, blank_lines)) = self.pending_start.take()
                     {
@@ -569,7 +569,7 @@ impl<'a> Formatter<'a> {
                     }
                     self.flush_pending_start()?;
                     if self.depth == 0 {
-                        return Err("balise fermante inattendue".to_owned());
+                        return Err("unexpected end tag".to_owned());
                     }
                     self.depth -= 1;
                     let has_text = self.stack.pop().unwrap_or(false);
@@ -619,12 +619,12 @@ impl<'a> Formatter<'a> {
             }
         }
         if self.depth > 0 || self.pending_start.is_some() {
-            return Err("balise non fermée".to_owned());
+            return Err("unclosed element".to_owned());
         }
         Ok(())
     }
 
-    /// Texte formaté et présence de texte au premier niveau.
+    /// Formatted text and whether there is text at the top level.
     fn finish(self) -> Result<(String, bool), String> {
         let has_text = self.stack.first().copied().unwrap_or(false);
         let output =
@@ -636,8 +636,8 @@ impl<'a> Formatter<'a> {
         self.stack.last().copied().unwrap_or(false)
     }
 
-    /// Le texte au premier niveau d'un document complet n'influence pas
-    /// l'indentation (comportement historique).
+    /// Text at the top level of a whole document does not affect
+    /// indentation (historical behaviour).
     fn mark_text(&mut self) {
         if (self.depth > 0 || self.fragment)
             && let Some(has_text) = self.stack.last_mut()
@@ -659,8 +659,8 @@ impl<'a> Formatter<'a> {
         let Some((start, blank_lines)) = self.pending_start.take() else {
             return Ok(());
         };
-        // Les lignes vides lues après la balise ouvrante concernent son
-        // premier enfant.
+        // Blank lines read after the start tag belong to its first
+        // child.
         let blank_lines_after = std::mem::replace(&mut self.blank_lines, blank_lines);
         if !self.has_text() {
             self.write_indent()?;
@@ -672,8 +672,8 @@ impl<'a> Formatter<'a> {
         Ok(())
     }
 
-    /// Écrit une balise ouvrante (ou vide), recopiée ou reconstruite selon
-    /// les options de disposition des attributs.
+    /// Writes a start (or empty) tag, copied or rebuilt according to the
+    /// attribute layout options.
     fn write_start_tag(&mut self, start: BytesStart<'_>, self_closing: bool) -> Result<(), String> {
         let rebuilt = if self.options.keeps_raw_tags() {
             None
@@ -695,7 +695,7 @@ impl<'a> Formatter<'a> {
         }
     }
 
-    /// Écrit la balise fermante correspondant à `start` sur la même ligne.
+    /// Writes the end tag matching `start` on the same line.
     fn write_end_tag(&mut self, start: &BytesStart<'_>) -> Result<(), String> {
         let end = start.to_end().into_owned();
         self.emit(Event::End(end))
@@ -720,13 +720,13 @@ impl<'a> Formatter<'a> {
     }
 }
 
-/// Attribut d'une balise ouvrante, normalisé (`nom="valeur"` sans blancs
-/// autour de `=`, guillemets d'origine conservés).
+/// Attribute of a start tag, normalized (`name="value"` without whitespace
+/// around `=`, original quotes kept).
 struct TagAttribute<'a> {
     name: &'a str,
     quote: char,
     value: &'a str,
-    /// L'attribut est précédé d'un retour à la ligne dans la source.
+    /// The attribute is preceded by a line break in the source.
     after_line_break: bool,
 }
 
@@ -744,8 +744,8 @@ impl TagAttribute<'_> {
     }
 }
 
-/// Découpe les attributs de `source` (contenu d'une balise ouvrante, sans
-/// `<` ni `>`/`/>`) après le nom, ou `None` si la balise n'est pas analysable.
+/// Splits the attributes of `source` (content of a start tag, without
+/// `<` or `>`/`/>`) after the name, or `None` if the tag cannot be parsed.
 fn tag_attributes(source: &str, name_length: usize) -> Option<Vec<TagAttribute<'_>>> {
     let mut attributes = Vec::new();
     let mut rest = source.get(name_length..)?;
@@ -756,7 +756,7 @@ fn tag_attributes(source: &str, name_length: usize) -> Option<Vec<TagAttribute<'
             return Some(attributes);
         }
         if trimmed.len() == rest.len() {
-            // Le nom et chaque attribut doivent être suivis de blancs.
+            // The name and each attribute must be followed by whitespace.
             return None;
         }
         let name_end = trimmed
@@ -785,9 +785,9 @@ fn tag_attributes(source: &str, name_length: usize) -> Option<Vec<TagAttribute<'
     }
 }
 
-/// Reconstruit une balise ouvrante selon `splitAttributes`,
-/// `preserveAttributeLineBreaks`, `maxLineWidth` et `closingBracketNewLine`.
-/// `depth` est la profondeur d'indentation de l'élément.
+/// Rebuilds a start tag according to `splitAttributes`,
+/// `preserveAttributeLineBreaks`, `maxLineWidth` and `closingBracketNewLine`.
+/// `depth` is the indentation depth of the element.
 fn layout_start_tag(
     options: &FormatOptions,
     depth: usize,
@@ -927,7 +927,7 @@ mod tests {
             "<root>\n  <p>line\n  next\n</p>\n  <!-- c\n --><![CDATA[keep  \n]]></root>\n"
         );
         assert_eq!(format_xml_with(&formatted, &options).unwrap(), formatted);
-        // Sans l'option, le texte reste intact.
+        // Without the option, the text stays intact.
         assert!(format_xml(source).unwrap().contains("line  \n  next\t\n"));
     }
 
@@ -1013,7 +1013,7 @@ mod tests {
     #[test]
     fn range_formatting_expands_partial_tags_to_sibling_elements() {
         let source = "<root><a><x/></a><b><y/></b><c/></root>";
-        // De l'intérieur de <a> jusqu'au milieu de <b> : a et b sont formatés.
+        // From inside <a> to the middle of <b>: a and b are formatted.
         let start = source.find("x/>").unwrap();
         let end = source.find("<y").unwrap() + 2;
         let formatted = format_xml_range(source, start..end, &FormatOptions::default()).unwrap();
@@ -1021,7 +1021,7 @@ mod tests {
             apply(source, &formatted),
             "<root>\n  <a>\n    <x/>\n  </a>\n  <b>\n    <y/>\n  </b>\n  <c/></root>"
         );
-        // Plage touchant une balise de l'élément : l'élément entier.
+        // Range touching a tag of the element: the whole element.
         let result = format_range_of(source, "<root><a>", &FormatOptions::default()).unwrap();
         assert_eq!(result, format_xml(source).unwrap().trim_end());
     }
@@ -1053,7 +1053,7 @@ mod tests {
                 }
             }
         }
-        // Formater tout le document par plage donne le formatage complet.
+        // Formatting the whole document by range gives the whole formatting.
         let whole = format_xml_range(source, 0..source.len(), &FormatOptions::default()).unwrap();
         assert_eq!(apply(source, &whole), formatted);
     }
@@ -1076,18 +1076,18 @@ mod tests {
 
     #[test]
     fn range_formatting_refuses_unformattable_regions() {
-        // Aucun élément complet.
+        // No complete element.
         assert_eq!(
             format_xml_range("<root><a>", 0..9, &FormatOptions::default()),
             None
         );
-        // Élément non fermé entre deux frères complets.
+        // Unclosed element between two complete siblings.
         let source = "<root><a/><open><b/></root>";
         assert_eq!(
             format_range_of(source, "<a/><open><b/>", &FormatOptions::default()),
             None
         );
-        // Entité mal formée dans la région.
+        // Malformed entity in the region.
         assert_eq!(
             format_range_of("<root><a>&</a></root>", "<a>", &FormatOptions::default()),
             None
@@ -1183,8 +1183,8 @@ mod tests {
             assert_stable(source, &joined),
             "<root a=\"1\" b=\"2\" c=\"3\"/>\n"
         );
-        // Avec une largeur maximale, les retours existants sont conservés et
-        // les espaces normalisés.
+        // With a maximum width, existing line breaks are kept and spaces
+        // normalized.
         let preserved = FormatOptions {
             max_line_width: 200,
             ..FormatOptions::default()
@@ -1209,7 +1209,7 @@ mod tests {
                 "<root>\n  <item first=\"aaaa\"\n    second=\"bbbb\" third=\"cccc\"\n    fourth=\"dddd\">t</item>\n</root>\n"
             );
         }
-        // Le texte n'est jamais replié.
+        // Text is never wrapped.
         let options = FormatOptions {
             max_line_width: 5,
             ..FormatOptions::default()
@@ -1240,7 +1240,7 @@ mod tests {
             "<root>\n  <a/>\n  <b x=\"1\"/>\n  <c/>\n  <d> t </d>\n  <e>\n    <!-- c -->\n  </e>\n</root>\n"
         );
         assert_eq!(assert_stable("<r></r>", &collapse), "<r/>\n");
-        // Le formatage de plage ne touche que les blancs.
+        // Range formatting only touches whitespace.
         let range = format_range_of(source, "<a/>", &expand).unwrap();
         assert!(range.contains("<a/>"));
     }

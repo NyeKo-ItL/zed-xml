@@ -1,24 +1,23 @@
-//! `textDocument/foldingRange` : plages de repli calquées sur LemMinX
-//! (`XMLFoldings`, réglage par défaut `includeClosingTagInFold = false`).
+//! `textDocument/foldingRange`: folding ranges modelled on LemMinX
+//! (`XMLFoldings`, default setting `includeClosingTagInFold = false`).
 //!
-//! - un élément multiligne se replie de la ligne de sa balise ouvrante
-//!   jusqu'à la ligne qui précède sa balise fermante, qui reste visible ; une
-//!   balise auto-fermante multiligne (nombreux attributs) se replie jusqu'à la
-//!   ligne qui précède `/>` ;
-//! - un commentaire multiligne (`kind = "comment"`) se replie jusqu'à la ligne
-//!   qui précède `-->` ;
-//! - `<!-- #region -->` ... `<!-- #endregion -->` (`kind = "region"`, régions
-//!   imbriquées) se replie jusqu'à la ligne qui précède `#endregion` ;
-//! - `<!DOCTYPE ... [ ... ]>`, les sections CDATA et les instructions de
-//!   traitement multilignes se replient jusqu'à la ligne qui précède leur
-//!   délimiteur fermant (LemMinX ne replie que la DOCTYPE).
+//! - a multi-line element folds from the line of its start tag to the line
+//!   before its end tag, which stays visible; a multi-line self-closing tag
+//!   (many attributes) folds up to the line
+//!   before `/>`;
+//! - a multi-line comment (`kind = "comment"`) folds up to the line
+//!   before `-->`;
+//! - `<!-- #region -->` ... `<!-- #endregion -->` (`kind = "region"`, nested
+//!   regions) folds up to the line before `#endregion`;
+//! - `<!DOCTYPE ... [ ... ]>`, CDATA sections and multi-line processing
+//!   instructions fold up to the line before their closing
+//!   delimiter (LemMinX only folds the DOCTYPE).
 //!
-//! Les éléments non fermés et les constructions non terminées ne produisent
-//! aucune plage. Comme LemMinX, deux plages d'élément consécutives (dans
-//! l'ordre de fermeture) partageant la même ligne de départ ne sont émises
-//! qu'une fois, et `rangeLimit` conserve en priorité les plages les moins
-//! imbriquées. Seules des lignes sont émises (`startCharacter`/`endCharacter`
-//! absents), ce qui respecte aussi `lineFoldingOnly`.
+//! Unclosed elements and unterminated constructs produce no range. Like
+//! LemMinX, two consecutive element ranges (in closing order) sharing the
+//! same start line are emitted only once, and `rangeLimit` keeps the least
+//! nested ranges first. Only lines are emitted (`startCharacter`/`endCharacter`
+//! omitted), which also honours `lineFoldingOnly`.
 
 use serde_json::{Map, Value, json};
 use xml_core::tags::{XmlMarkupKind, XmlTagKind, XmlTagTree, scan_markup};
@@ -26,20 +25,20 @@ use xml_core::tags::{XmlMarkupKind, XmlTagKind, XmlTagTree, scan_markup};
 const KIND_COMMENT: &str = "comment";
 const KIND_REGION: &str = "region";
 
-/// Préférences de repli annoncées par le client dans `initialize`
+/// Folding preferences announced by the client in `initialize`
 /// (`capabilities.textDocument.foldingRange`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FoldingSettings {
-    /// Nombre maximal de plages souhaité par le client.
+    /// Maximum number of ranges wanted by the client.
     pub range_limit: Option<usize>,
-    /// Types de plages (`foldingRangeKind.valueSet`) compris par le client ;
-    /// `None` si le client ne le précise pas.
+    /// Range kinds (`foldingRangeKind.valueSet`) understood by the client;
+    /// `None` when the client does not say.
     pub supported_kinds: Option<Vec<String>>,
 }
 
 impl FoldingSettings {
-    /// Lit les capacités de repli du client depuis les paramètres
-    /// d'`initialize`.
+    /// Reads the client's folding capabilities from the `initialize`
+    /// parameters.
     pub fn from_initialize_params(params: &Value) -> Self {
         let capabilities = params.pointer("/capabilities/textDocument/foldingRange");
         let range_limit = capabilities
@@ -69,7 +68,7 @@ impl FoldingSettings {
     }
 }
 
-/// Plage de repli en lignes (0-based).
+/// Folding range in lines (0-based).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Fold {
     pub start_line: usize,
@@ -77,7 +76,7 @@ pub struct Fold {
     pub kind: Option<&'static str>,
 }
 
-/// Retourne les plages de repli LSP (`FoldingRange[]`) de `source`.
+/// Returns the LSP folding ranges (`FoldingRange[]`) of `source`.
 pub fn folding_ranges(source: &str, settings: &FoldingSettings) -> Vec<Value> {
     folds(source, settings.range_limit)
         .into_iter()
@@ -93,22 +92,22 @@ pub fn folding_ranges(source: &str, settings: &FoldingSettings) -> Vec<Value> {
         .collect()
 }
 
-/// Candidat de repli, daté par l'offset de son délimiteur fermant pour
-/// reproduire l'ordre d'émission de LemMinX.
+/// Folding candidate, dated by the offset of its closing delimiter to
+/// reproduce LemMinX's emission order.
 struct Candidate {
     close: usize,
     fold: Fold,
-    /// Ignoré si la plage émise juste avant commence sur la même ligne
-    /// (éléments, régions et DOCTYPE chez LemMinX).
+    /// Skipped when the range emitted just before starts on the same line
+    /// (elements, regions and DOCTYPE in LemMinX).
     deduplicated: bool,
 }
 
-/// Calcule les plages de repli triées par ligne de départ.
+/// Computes the folding ranges sorted by start line.
 pub fn folds(source: &str, range_limit: Option<usize>) -> Vec<Fold> {
     let lines = LineIndex::new(source);
     let mut candidates = Vec::new();
-    // La ligne de fin est celle qui précède le délimiteur fermant ; une
-    // plage vide ou d'une seule ligne n'est pas repliable.
+    // The end line is the one before the closing delimiter; an empty or
+    // single-line range cannot be folded.
     let mut push = |start: usize, close: usize, kind, deduplicated| {
         let start_line = lines.line_of(start);
         let close_line = lines.line_of(close);
@@ -186,8 +185,8 @@ enum RegionMarker {
     End,
 }
 
-/// Reconnaît `#region` / `#endregion` en tête d'un commentaire (espaces
-/// initiaux ignorés), suivis d'une frontière de mot.
+/// Recognizes `#region` / `#endregion` at the start of a comment (leading
+/// whitespace ignored), followed by a word boundary.
 fn region_marker(comment: &str) -> Option<RegionMarker> {
     let rest = comment.trim_start().strip_prefix('#')?;
     [
@@ -205,12 +204,12 @@ fn region_marker(comment: &str) -> Option<RegionMarker> {
     })
 }
 
-/// Profondeur au-delà de laquelle les plages ne sont plus comptées
-/// (comme LemMinX / vscode-html-languageservice).
+/// Depth beyond which ranges are no longer counted
+/// (like LemMinX / vscode-html-languageservice).
 const MAX_NESTING_LEVEL: usize = 30;
 
-/// Réduit `folds` (triées par ligne de départ puis de fin) à `limit` plages
-/// en gardant d'abord les moins imbriquées, comme `limitRanges` de LemMinX.
+/// Reduces `folds` (sorted by start line then end line) to `limit` ranges,
+/// keeping the least nested first, like LemMinX's `limitRanges`.
 fn limit_folds(folds: Vec<Fold>, limit: usize) -> Vec<Fold> {
     let mut levels: Vec<Option<usize>> = vec![None; folds.len()];
     let mut level_counts = [0usize; MAX_NESTING_LEVEL];
@@ -232,7 +231,7 @@ fn limit_folds(folds: Vec<Fold>, limit: usize) -> Vec<Fold> {
                     }
                     Some(previous.len())
                 } else {
-                    // Chevauchement sans imbrication : plage ignorée.
+                    // Overlap without nesting: range skipped.
                     None
                 }
             }
@@ -271,7 +270,7 @@ fn limit_folds(folds: Vec<Fold>, limit: usize) -> Vec<Fold> {
         .collect()
 }
 
-/// Conversion offset UTF-8 -> numéro de ligne (`\n`, donc aussi `\r\n`).
+/// UTF-8 offset -> line number conversion (`\n`, hence also `\r\n`).
 struct LineIndex {
     newlines: Vec<usize>,
 }
@@ -330,7 +329,7 @@ mod tests {
 
     #[test]
     fn keeps_a_single_range_per_start_line_like_lemminx() {
-        // `<a><b>` : LemMinX émet `b` (fermé en premier) et ignore `a`.
+        // `<a><b>`: LemMinX emits `b` (closed first) and skips `a`.
         let source = "<a><b>\n  x\n  y\n</b>\n</a>";
         assert_eq!(lines(source), vec![(0, 2, None)]);
     }
@@ -362,7 +361,7 @@ mod tests {
                 (3, 4, Some(KIND_REGION)),
             ]
         );
-        // Marqueurs non appariés ou mal orthographiés : commentaires simples.
+        // Unpaired or misspelled markers: plain comments.
         let source = "<!-- #endregion -->\n<!-- #regionx -->\n<a/>\n<!-- #region -->";
         assert!(lines(source).is_empty());
         assert_eq!(region_marker("  #region"), Some(RegionMarker::Start));

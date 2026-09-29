@@ -1,20 +1,20 @@
-//! Références d'entités et validation d'un document d'instance contre une
-//! DTD, comme Xerces (messages en français).
+//! Entity references and validation of an instance document against a
+//! DTD, like Xerces.
 //!
-//! - [`check_entity_references`] : références `&nom;` du contenu et des
-//!   valeurs d'attributs non déclarées (les cinq entités prédéfinies sont
-//!   toujours permises), entités non analysées, récursives ou trop grandes,
-//!   entités externes ou contenant `<` dans une valeur d'attribut. S'applique
-//!   aussi sans DTD.
-//! - [`validate_instance`] : élément racine conforme à `<!DOCTYPE>`,
-//!   éléments et attributs déclarés, modèles de contenu (EMPTY, ANY, mixte,
-//!   `children`), attributs requis, valeurs fixes, énumérées, ID (uniques),
-//!   IDREF(S) (cibles existantes), NMTOKEN(S), ENTITY/ENTITIES. Une DTD qui ne
-//!   déclare aucun élément ne sert qu'aux entités : seuls ses attributs sont
-//!   vérifiés. Les attributs `xmlns`, `xmlns:*`, `xml:*` et `xsi:*` non
-//!   déclarés sont tolérés (documents validés aussi par XSD). Le contenu d'un
-//!   élément qui référence une entité contenant du balisage (ou externe) n'est
-//!   pas vérifié contre son modèle.
+//! - [`check_entity_references`]: undeclared `&name;` references in content
+//!   and attribute values (the five predefined entities are always
+//!   allowed), unparsed, recursive or too large entities, external entities
+//!   or entities containing `<` in an attribute value. Also applies
+//!   without a DTD.
+//! - [`validate_instance`]: root element matching `<!DOCTYPE>`, declared
+//!   elements and attributes, content models (EMPTY, ANY, mixed,
+//!   `children`), required attributes, fixed and enumerated values, (unique)
+//!   IDs, IDREF(S) (existing targets), NMTOKEN(S), ENTITY/ENTITIES. A DTD
+//!   declaring no element only serves for entities: only its attributes are
+//!   checked. Undeclared `xmlns`, `xmlns:*`, `xml:*` and `xsi:*` attributes
+//!   are tolerated (documents also validated by XSD). The content of an
+//!   element referencing an entity that contains markup (or is external) is
+//!   not checked against its model.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -36,7 +36,7 @@ pub enum InstanceProblemKind {
     UndefinedEntity {
         name: String,
     },
-    /// Référence à une entité récursive ou trop grande.
+    /// Reference to a recursive or too large entity.
     EntityExpansion,
     UnparsedEntityReference,
     ExternalEntityInAttribute,
@@ -48,9 +48,9 @@ pub enum InstanceProblemKind {
     MissingAttribute {
         element: String,
         attribute: String,
-        /// Valeur proposée (première valeur énumérée, sinon vide).
+        /// Proposed value (first enumerated value, otherwise empty).
         value: String,
-        /// Offset d'insertion de ` attribut="valeur"` dans la balise.
+        /// Insertion offset of ` attribute="value"` in the tag.
         insert_at: usize,
     },
     InvalidAttributeValue,
@@ -74,7 +74,7 @@ pub enum InstanceProblemKind {
 }
 
 impl InstanceProblemKind {
-    /// Identifiant stable, publié dans `data.kind`.
+    /// Stable identifier, published in `data.kind`.
     pub fn id(&self) -> &'static str {
         match self {
             InstanceProblemKind::UndefinedEntity { .. } => "undefinedEntity",
@@ -99,7 +99,7 @@ impl InstanceProblemKind {
     }
 }
 
-/// Problème localisé (offsets UTF-8) dans le document d'instance.
+/// Located problem (UTF-8 offsets) in the instance document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstanceProblem {
     pub kind: InstanceProblemKind,
@@ -113,8 +113,8 @@ fn is_predefined(name: &str) -> bool {
         .any(|(predefined, _)| *predefined == name)
 }
 
-/// Références `&nom;` (hors références de caractères) de `text` : étendue
-/// de la référence et du nom, décalées de `base`.
+/// `&name;` references (excluding character references) of `text`: range
+/// of the reference and of the name, shifted by `base`.
 fn entity_references(text: &str, base: usize) -> Vec<(Range<usize>, Range<usize>)> {
     let bytes = text.as_bytes();
     let mut references = Vec::new();
@@ -138,17 +138,17 @@ fn entity_references(text: &str, base: usize) -> Vec<(Range<usize>, Range<usize>
     references
 }
 
-/// Nom de la référence `&nom;` (ou `%nom;` avec `parameter`) qui contient
-/// `offset` dans `source` (bornes incluses).
+/// Name of the `&name;` reference (or `%name;` with `parameter`) containing
+/// `offset` in `source` (bounds included).
 pub fn entity_reference_at(source: &str, offset: usize, parameter: bool) -> Option<Range<usize>> {
     let offset = offset.min(source.len());
     let sigil = if parameter { '%' } else { '&' };
-    // Une référence ne s'étend pas au-delà d'une ligne raisonnable.
+    // A reference does not extend beyond a reasonable line.
     let window = offset.saturating_sub(256);
     let window = (window..=offset)
         .find(|&index| source.is_char_boundary(index))
         .unwrap_or(offset);
-    // Le curseur peut être sur le `&` lui-même.
+    // The cursor may be on the `&` itself.
     let until = (offset + 1..=source.len())
         .find(|&index| source.is_char_boundary(index))
         .unwrap_or(source.len());
@@ -162,7 +162,7 @@ pub fn entity_reference_at(source: &str, offset: usize, parameter: bool) -> Opti
     .then_some(name)
 }
 
-/// Segments de texte du document hors balises et hors balisage.
+/// Text segments of the document outside tags and markup.
 fn text_segments(source: &str) -> Vec<Range<usize>> {
     let mut blocked = scan_tags(source)
         .into_iter()
@@ -184,20 +184,20 @@ fn text_segments(source: &str) -> Vec<Range<usize>> {
     segments
 }
 
-/// Référence d'entité générale du document.
+/// General entity reference of the document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntityReference {
-    /// `&nom;` entier.
+    /// Whole `&name;`.
     pub range: Range<usize>,
-    /// Nom seul.
+    /// Name only.
     pub name: Range<usize>,
-    /// Dans une valeur d'attribut (sinon dans le contenu).
+    /// In an attribute value (otherwise in content).
     pub in_attribute: bool,
 }
 
-/// Références `&nom;` du contenu et des valeurs d'attributs du document
-/// (hors commentaires, CDATA, instructions de traitement et DOCTYPE), dans
-/// l'ordre du document.
+/// `&name;` references of the content and attribute values of the document
+/// (excluding comments, CDATA, processing instructions and DOCTYPE), in
+/// document order.
 pub fn general_entity_references(source: &str) -> Vec<EntityReference> {
     let mut references = Vec::new();
     for segment in text_segments(source) {
@@ -230,7 +230,7 @@ pub fn general_entity_references(source: &str) -> Vec<EntityReference> {
     references
 }
 
-/// Vérifie les références d'entités générales du document (voir le module).
+/// Checks the general entity references of the document (see the module).
 pub fn check_entity_references(source: &str, dtd: Option<&Dtd>) -> Vec<InstanceProblem> {
     let mut problems = Vec::new();
     for reference in general_entity_references(source) {
@@ -264,7 +264,7 @@ fn check_reference(
                 name: name.to_owned(),
             },
             range: reference,
-            message: format!("l'entité « {name} » est référencée mais n'est pas déclarée"),
+            message: format!("the entity '{name}' is referenced but not declared"),
         });
         return;
     };
@@ -272,15 +272,15 @@ fn check_reference(
     let (kind, message) = if expansion.unparsed {
         (
             InstanceProblemKind::UnparsedEntityReference,
-            format!("l'entité non analysée « {name} » (NDATA) ne peut pas être référencée"),
+            format!("the unparsed entity '{name}' (NDATA) cannot be referenced"),
         )
     } else if let Some(error) = expansion.error {
         (
             InstanceProblemKind::EntityExpansion,
             match error {
-                ExpansionError::Recursive => format!("l'entité « {name} » est récursive"),
+                ExpansionError::Recursive => format!("the entity '{name}' is recursive"),
                 ExpansionError::TooLarge => format!(
-                    "le développement de l'entité « {name} » dépasse la limite de {} octets",
+                    "the expansion of the entity '{name}' exceeds the limit of {} bytes",
                     crate::MAX_ENTITY_EXPANSION
                 ),
             },
@@ -288,13 +288,13 @@ fn check_reference(
     } else if in_attribute && expansion.external {
         (
             InstanceProblemKind::ExternalEntityInAttribute,
-            format!("une valeur d'attribut ne peut pas référencer l'entité externe « {name} »"),
+            format!("an attribute value cannot reference the external entity '{name}'"),
         )
     } else if in_attribute && expansion.markup {
         (
             InstanceProblemKind::InvalidAttributeValue,
             format!(
-                "le développement de l'entité « {name} » contient « < », interdit dans une valeur d'attribut"
+                "the expansion of the entity '{name}' contains '<', which is not allowed in an attribute value"
             ),
         )
     } else {
@@ -307,7 +307,7 @@ fn check_reference(
     });
 }
 
-/// Valide le document `source` contre `dtd` (voir le module).
+/// Validates the document `source` against `dtd` (see the module).
 pub fn validate_instance(source: &str, dtd: &Dtd) -> Vec<InstanceProblem> {
     if !dtd.declares_elements() && dtd.attributes.is_empty() {
         return Vec::new();
@@ -329,24 +329,24 @@ pub fn validate_instance(source: &str, dtd: &Dtd) -> Vec<InstanceProblem> {
 
 fn list(names: &[String]) -> String {
     if names.is_empty() {
-        return "aucun élément".to_owned();
+        return "no element".to_owned();
     }
     names
         .iter()
-        .map(|name| format!("« {name} »"))
+        .map(|name| format!("'{name}'"))
         .collect::<Vec<_>>()
         .join(", ")
 }
 
-/// Contenu direct d'un élément hors éléments enfants.
+/// Direct content of an element, excluding child elements.
 #[derive(Debug, Default)]
 struct ContentSummary {
-    /// Premier texte non blanc (ou section CDATA).
+    /// First non-whitespace text (or CDATA section).
     text: Option<Range<usize>>,
-    /// Présence de blancs.
+    /// Whether there is whitespace.
     whitespace: bool,
-    /// Référence à une entité contenant du balisage, externe ou inconnue :
-    /// le contenu réel n'est pas connu.
+    /// Reference to an entity containing markup, external or unknown: the
+    /// actual content is not known.
     opaque: bool,
 }
 
@@ -393,7 +393,7 @@ impl<'a> Validator<'a> {
                     },
                     root.start_tag.name.clone(),
                     format!(
-                        "l'élément racine « {name} » ne correspond pas au nom « {expected} » de la déclaration DOCTYPE"
+                        "the root element '{name}' does not match the name '{expected}' of the DOCTYPE declaration"
                     ),
                 );
             }
@@ -405,7 +405,7 @@ impl<'a> Validator<'a> {
                 self.push(
                     InstanceProblemKind::UndeclaredElement,
                     element.start_tag.name.clone(),
-                    format!("l'élément « {name} » n'est pas déclaré dans la DTD"),
+                    format!("the element '{name}' is not declared in the DTD"),
                 );
             }
             self.check_attributes(element, declaration.is_some());
@@ -429,7 +429,7 @@ impl<'a> Validator<'a> {
                 self.push(
                     InstanceProblemKind::UnknownIdRef,
                     range,
-                    format!("aucun élément ne porte l'ID « {value} »"),
+                    format!("no element has the ID '{value}'"),
                 );
             }
         }
@@ -453,7 +453,7 @@ impl<'a> Validator<'a> {
                         InstanceProblemKind::UndeclaredAttribute,
                         attribute.name.clone(),
                         format!(
-                            "l'attribut « {attribute_name} » n'est pas déclaré pour l'élément « {name} »"
+                            "the attribute '{attribute_name}' is not declared for the element '{name}'"
                         ),
                     );
                 }
@@ -496,14 +496,14 @@ impl<'a> Validator<'a> {
                 },
                 tag.name.clone(),
                 format!(
-                    "l'attribut requis « {} » est absent de l'élément « {name} »",
+                    "the required attribute '{}' is missing from the element '{name}'",
                     declaration.name
                 ),
             );
         }
     }
 
-    /// Étendue du jeton `token` dans la valeur brute, ou la valeur entière.
+    /// Range of the token `token` in the raw value, or the whole value.
     fn token_range(&self, value: &Range<usize>, token: &str) -> Range<usize> {
         self.source[value.clone()]
             .find(token)
@@ -515,7 +515,7 @@ impl<'a> Validator<'a> {
     fn check_value(&mut self, declaration: &AttributeDecl, range: Range<usize>) {
         let raw = &self.source[range.clone()];
         let cdata = declaration.attribute_type == AttributeType::CData;
-        // Références invalides : signalées par `check_entity_references`.
+        // Invalid references: reported by `check_entity_references`.
         let Some(value) = self.dtd.normalize_attribute_value(raw, cdata) else {
             return;
         };
@@ -528,7 +528,7 @@ impl<'a> Validator<'a> {
                     },
                     range,
                     format!(
-                        "l'attribut « {attribute} » a la valeur fixe « {expected} » (#FIXED), « {value} » trouvé"
+                        "the attribute '{attribute}' has the fixed value '{expected}' (#FIXED), found '{value}'"
                     ),
                 );
             }
@@ -542,19 +542,19 @@ impl<'a> Validator<'a> {
             AttributeType::CData => {}
             AttributeType::Id => {
                 if !is_name(&value) {
-                    self.invalid(range, &value, attribute, "un nom XML (ID)");
+                    self.invalid(range, &value, attribute, "an XML name (ID)");
                 } else if !self.ids.insert(value.clone()) {
                     self.push(
                         InstanceProblemKind::DuplicateId,
                         range,
-                        format!("l'ID « {value} » est déjà utilisé dans le document"),
+                        format!("the ID '{value}' is already used in the document"),
                     );
                 }
             }
             AttributeType::IdRef | AttributeType::IdRefs => {
                 let multiple = declaration.attribute_type == AttributeType::IdRefs;
                 if tokens.is_empty() || (!multiple && tokens.len() > 1) {
-                    self.invalid(range, &value, attribute, "un nom XML (IDREF)");
+                    self.invalid(range, &value, attribute, "an XML name (IDREF)");
                     return;
                 }
                 for token in tokens {
@@ -562,14 +562,14 @@ impl<'a> Validator<'a> {
                     if is_name(token) {
                         self.references.push((token.to_owned(), token_range));
                     } else {
-                        self.invalid(token_range, token, attribute, "un nom XML (IDREF)");
+                        self.invalid(token_range, token, attribute, "an XML name (IDREF)");
                     }
                 }
             }
             AttributeType::Entity | AttributeType::Entities => {
                 let multiple = declaration.attribute_type == AttributeType::Entities;
                 if tokens.is_empty() || (!multiple && tokens.len() > 1) {
-                    self.invalid(range, &value, attribute, "un nom d'entité non analysée");
+                    self.invalid(range, &value, attribute, "an unparsed entity name");
                     return;
                 }
                 for token in tokens {
@@ -582,21 +582,19 @@ impl<'a> Validator<'a> {
                         self.push(
                             InstanceProblemKind::InvalidEntityAttribute,
                             token_range,
-                            format!(
-                                "« {token} » n'est pas une entité non analysée (NDATA) déclarée"
-                            ),
+                            format!("'{token}' is not a declared unparsed entity (NDATA)"),
                         );
                     }
                 }
             }
             AttributeType::NmToken => {
                 if !is_nmtoken(&value) {
-                    self.invalid(range, &value, attribute, "un NMTOKEN");
+                    self.invalid(range, &value, attribute, "an NMTOKEN");
                 }
             }
             AttributeType::NmTokens => {
                 if tokens.is_empty() || !tokens.iter().all(|token| is_nmtoken(token)) {
-                    self.invalid(range, &value, attribute, "une liste de NMTOKEN");
+                    self.invalid(range, &value, attribute, "a list of NMTOKENs");
                 }
             }
             AttributeType::Notation(values) | AttributeType::Enumeration(values) => {
@@ -607,7 +605,7 @@ impl<'a> Validator<'a> {
                         },
                         range,
                         format!(
-                            "la valeur « {value} » n'est pas permise pour l'attribut « {attribute} » (attendu : {})",
+                            "the value '{value}' is not allowed for the attribute '{attribute}' (expected: {})",
                             values.join(", ")
                         ),
                     );
@@ -620,11 +618,11 @@ impl<'a> Validator<'a> {
         self.push(
             InstanceProblemKind::InvalidAttributeValue,
             range,
-            format!("la valeur « {value} » de l'attribut « {attribute} » doit être {expected}"),
+            format!("the value '{value}' of the attribute '{attribute}' must be {expected}"),
         );
     }
 
-    /// Texte, blancs et références d'entités du contenu direct.
+    /// Text, whitespace and entity references of the direct content.
     fn summarize(
         &self,
         content: Range<usize>,
@@ -649,7 +647,7 @@ impl<'a> Validator<'a> {
         let mut cursor = content.start;
         for (range, cdata) in blocked {
             if range.start < cursor {
-                // Balisage à l'intérieur d'un enfant.
+                // Markup inside a child.
                 continue;
             }
             gaps.push(cursor..range.start);
@@ -709,7 +707,7 @@ impl<'a> Validator<'a> {
                     }
                 }
             }
-            // Références de caractères : texte.
+            // Character references: text.
             if summary.text.is_none()
                 && let Some(offset) = text.find("&#")
             {
@@ -751,7 +749,7 @@ impl<'a> Validator<'a> {
                         InstanceProblemKind::EmptyContent,
                         name_range,
                         format!(
-                            "l'élément « {name} » est déclaré EMPTY et ne doit avoir aucun contenu"
+                            "the element '{name}' is declared EMPTY and must not have any content"
                         ),
                     );
                 }
@@ -762,11 +760,11 @@ impl<'a> Validator<'a> {
                     if !names.iter().any(|allowed| allowed == child_name) {
                         let message = if names.is_empty() {
                             format!(
-                                "l'élément « {child_name} » n'est pas permis : « {name} » ne contient que du texte"
+                                "the element '{child_name}' is not allowed: '{name}' only contains text"
                             )
                         } else {
                             format!(
-                                "l'élément « {child_name} » n'est pas permis dans « {name} » (attendu : {})",
+                                "the element '{child_name}' is not allowed in '{name}' (expected: {})",
                                 list(names)
                             )
                         };
@@ -785,9 +783,7 @@ impl<'a> Validator<'a> {
                     self.push(
                         InstanceProblemKind::TextNotAllowed,
                         range,
-                        format!(
-                            "le texte n'est pas permis dans l'élément « {name} » (contenu {content})"
-                        ),
+                        format!("text is not allowed in the element '{name}' (content {content})"),
                     );
                 }
                 let automaton = self
@@ -801,11 +797,11 @@ impl<'a> Validator<'a> {
                         let expected = matcher.expected();
                         let message = if expected.is_empty() {
                             format!(
-                                "l'élément « {child_name} » n'est pas attendu ici : le contenu de « {name} » est complet ({content})"
+                                "the element '{child_name}' is not expected here: the content of '{name}' is complete ({content})"
                             )
                         } else {
                             format!(
-                                "l'élément « {child_name} » n'est pas attendu ici dans « {name} » (attendu : {})",
+                                "the element '{child_name}' is not expected here in '{name}' (expected: {})",
                                 list(&expected)
                             )
                         };
@@ -820,7 +816,7 @@ impl<'a> Validator<'a> {
                 if !matcher.accepts() {
                     let expected = matcher.expected();
                     let message = format!(
-                        "le contenu de l'élément « {name} » est incomplet (attendu : {}) ; modèle {content}",
+                        "the content of the element '{name}' is incomplete (expected: {}); model {content}",
                         list(&expected)
                     );
                     self.problems.push(InstanceProblem {
@@ -877,7 +873,7 @@ mod tests {
                 ("unexpectedElement", "chapter".to_owned()),
                 ("textNotAllowed", "text".to_owned()),
                 ("emptyContent", "note".to_owned()),
-                // Comme Xerces : élément non déclaré et non permis ici.
+                // Like Xerces: element not declared and not allowed here.
                 ("unexpectedElement", "unknown".to_owned()),
                 ("undeclaredElement", "unknown".to_owned()),
             ]
@@ -980,7 +976,7 @@ mod tests {
                 ("entityExpansion", "&loop;".to_owned()),
             ]
         );
-        // Sans DTD, seules les entités prédéfinies sont connues.
+        // Without a DTD, only the predefined entities are known.
         assert_eq!(
             entities("<r a='&x;'>&quot;&apos;&gt;&y;</r>"),
             vec![
@@ -994,7 +990,7 @@ mod tests {
     fn skips_content_models_behind_markup_entities() {
         let document =
             format!("{BOOK}<book><title>t</title><chapter id=\"a\">&frag;</chapter>&frag;</book>");
-        // `&frag;` insère des éléments : le contenu n'est pas vérifié.
+        // `&frag;` inserts elements: the content is not checked.
         assert_eq!(validate(&document), Vec::new());
     }
 

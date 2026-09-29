@@ -1,18 +1,18 @@
-//! Symboles : `textDocument/documentSymbol` hiérarchique et `workspace/symbol`.
+//! Symbols: hierarchical `textDocument/documentSymbol` and `workspace/symbol`.
 //!
-//! `workspace/symbol` indexe les documents ouverts et les fichiers XML/XSD des
-//! dossiers du workspace (parcours paresseux au premier appel, borné en nombre
-//! et en taille de fichiers, cache par date de modification ; un buffer ouvert
-//! remplace toujours le contenu sur disque).
+//! `workspace/symbol` indexes open documents and the XML/XSD files of the
+//! workspace folders (lazy scan on the first call, bounded in number and
+//! file size, cached by modification time; an open buffer always replaces
+//! the content on disk).
 //!
-//! Choix des symboles, à la manière d'IntelliJ (« Go to Symbol ») :
-//! - XSD : composants globaux nommés (`xs:element`, `xs:attribute`,
+//! Symbol selection, in the manner of IntelliJ ("Go to Symbol"):
+//! - XSD: named global components (`xs:element`, `xs:attribute`,
 //!   `xs:complexType`, `xs:simpleType`, `xs:group`, `xs:attributeGroup`,
-//!   `xs:notation`, y compris sous `xs:redefine`/`xs:override`) ;
-//! - XML : l'élément racine et les éléments identifiés par `xml:id`, `id` ou
-//!   `name` (`<bean id="x">`). Lister chaque élément de chaque fichier
-//!   noierait les résultats (LemMinX ne publie l'arbre complet que dans
-//!   `textDocument/documentSymbol`, pas dans le workspace).
+//!   `xs:notation`, including under `xs:redefine`/`xs:override`);
+//! - XML: the root element and the elements identified by `xml:id`, `id` or
+//!   `name` (`<bean id="x">`). Listing every element of every file would
+//!   drown the results (LemMinX only publishes the full tree in
+//!   `textDocument/documentSymbol`, not in the workspace).
 
 use std::{
     collections::{HashMap, HashSet},
@@ -29,7 +29,7 @@ use xsd_core::model::XSD_NAMESPACE;
 
 use crate::{links::unescape, path_to_uri, selection::LineIndex, uri_to_path};
 
-/// `SymbolKind` LSP utilisés.
+/// LSP `SymbolKind`s used.
 pub(crate) mod kind {
     pub const MODULE: u32 = 2;
     pub const CLASS: u32 = 5;
@@ -42,45 +42,45 @@ pub(crate) mod kind {
     pub const STRUCT: u32 = 23;
 }
 
-/// Extensions indexées sur disque (celles du langage XML de l'extension).
+/// Extensions indexed on disk (those of the extension's XML language).
 const INDEXED_EXTENSIONS: &[&str] = &[
     "xml", "xsd", "xsl", "xslt", "svg", "wsdl", "plist", "xjb", "axml",
 ];
-/// Motif des fichiers surveillés (`workspace/didChangeWatchedFiles`).
+/// Pattern of the watched files (`workspace/didChangeWatchedFiles`).
 pub(crate) const WATCHED_FILES_GLOB: &str = "**/*.{xml,xsd,xsl,xslt,svg,wsdl,plist,xjb,axml}";
-/// Dossiers jamais parcourus (en plus des dossiers cachés).
+/// Directories never scanned (in addition to hidden directories).
 const SKIPPED_DIRECTORIES: &[&str] = &["target", "node_modules", "bower_components"];
-/// Nombre maximal de fichiers indexés sur disque.
+/// Maximum number of files indexed on disk.
 pub(crate) const MAX_FILES: usize = 5_000;
-/// Nombre maximal d'entrées de répertoire examinées par parcours.
+/// Maximum number of directory entries examined per scan.
 const MAX_ENTRIES: usize = 100_000;
-/// Taille maximale d'un fichier indexé.
+/// Maximum size of an indexed file.
 pub(crate) const MAX_FILE_SIZE: u64 = 4 * 1024 * 1024;
-/// Nombre maximal de symboles retenus par fichier.
+/// Maximum number of symbols kept per file.
 const MAX_SYMBOLS_PER_FILE: usize = 2_000;
-/// Profondeur au-delà de laquelle les éléments ne sont plus publiés dans
-/// `textDocument/documentSymbol` (leur étendue reste couverte par leurs
-/// ancêtres) : borne la récursion des clients et de la sérialisation JSON.
+/// Depth beyond which elements are no longer published in
+/// `textDocument/documentSymbol` (their range stays covered by their
+/// ancestors): bounds the recursion of clients and of JSON serialization.
 const MAX_SYMBOL_DEPTH: usize = 128;
-/// Nombre maximal de résultats pour une requête non vide.
+/// Maximum number of results for a non-empty query.
 pub(crate) const MAX_RESULTS: usize = 256;
-/// Nombre maximal de résultats pour une requête vide.
+/// Maximum number of results for an empty query.
 pub(crate) const MAX_EMPTY_QUERY_RESULTS: usize = 100;
-/// Délai minimal entre deux parcours du disque (sauf notification de
-/// changement de fichiers).
+/// Minimum delay between two disk scans (unless a file change notification
+/// arrives).
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
-/// Symbole indexé, positions LSP déjà calculées.
+/// Indexed symbol, LSP positions already computed.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct IndexedSymbol {
     pub name: String,
     pub kind: u32,
     pub container: Option<String>,
-    /// `Range` LSP (UTF-16) du nom du symbole.
+    /// LSP `Range` (UTF-16) of the symbol name.
     pub range: Value,
 }
 
-/// Élément et attributs de sa balise ouvrante.
+/// Element and the attributes of its start tag.
 struct Parsed<'s> {
     source: &'s str,
     tree: XmlTagTree,
@@ -108,7 +108,7 @@ impl<'s> Parsed<'s> {
             .find(|attribute| attribute.name(self.source) == name)
     }
 
-    /// Valeur (entités résolues, espaces de bord retirés) et étendue.
+    /// Value (entities resolved, surrounding whitespace removed) and range.
     fn attribute_value(&self, element: usize, name: &str) -> Option<(String, Range<usize>)> {
         let range = self.attribute(element, name)?.value.clone()?;
         let value = unescape(self.source[range.clone()].trim());
@@ -121,7 +121,7 @@ impl<'s> Parsed<'s> {
         &self.source[local]
     }
 
-    /// Espace de noms de l'élément (`None` : préfixe non déclaré).
+    /// Namespace of the element (`None`: undeclared prefix).
     fn namespace(&self, element: usize) -> Option<Option<&'s str>> {
         let name = self.tree.elements()[element].start_tag.name.clone();
         let (prefix, _) = qualified_name_parts(self.source, name);
@@ -129,8 +129,8 @@ impl<'s> Parsed<'s> {
         resolve_namespace(self.source, &self.tree, &self.attributes, element, prefix)
     }
 
-    /// Élément dans l'espace de noms XSD (préfixe non déclaré toléré quand
-    /// `lenient`, pour un `.xsd` en cours d'écriture).
+    /// Element in the XSD namespace (undeclared prefix tolerated when
+    /// `lenient`, for a `.xsd` being written).
     fn is_xsd(&self, element: usize, lenient: bool) -> bool {
         match self.namespace(element) {
             Some(namespace) => namespace == Some(XSD_NAMESPACE),
@@ -138,7 +138,7 @@ impl<'s> Parsed<'s> {
         }
     }
 
-    /// Premier attribut identifiant (`xml:id`, `id`, puis `name`).
+    /// First identifying attribute (`xml:id`, `id`, then `name`).
     fn identifier(&self, element: usize) -> Option<(&'static str, String, Range<usize>)> {
         ["xml:id", "id", "name"].into_iter().find_map(|name| {
             self.attribute_value(element, name)
@@ -160,8 +160,8 @@ fn has_xsd_extension(name: &str) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("xsd"))
 }
 
-/// Symboles de workspace d'un document. `location` est l'URI ou le chemin
-/// du document (utilisé pour le nom de fichier et l'extension).
+/// Workspace symbols of a document. `location` is the URI or path of the
+/// document (used for the file name and extension).
 pub(crate) fn index_document(source: &str, location: &str) -> Vec<IndexedSymbol> {
     let parsed = Parsed::new(source);
     let lines = LineIndex::new(source);
@@ -266,9 +266,9 @@ fn has_enumeration(parsed: &Parsed, simple_type: usize) -> bool {
         .any(|(index, _)| parsed.local_name(index) == "enumeration")
 }
 
-/// `DocumentSymbol[]` hiérarchiques : un symbole par élément (tolérant aux
-/// documents mal formés), `detail` = attribut identifiant (`id="x"`).
-/// L'étendue d'un élément non fermé couvre ses descendants.
+/// Hierarchical `DocumentSymbol[]`: one symbol per element (tolerant of
+/// malformed documents), `detail` = identifying attribute (`id="x"`).
+/// The range of an unclosed element covers its descendants.
 pub(crate) fn document_symbols(source: &str) -> Vec<Value> {
     let parsed = Parsed::new(source);
     let lines = LineIndex::new(source);
@@ -281,8 +281,8 @@ pub(crate) fn document_symbols(source: &str) -> Vec<Value> {
             None => roots.push(index),
         }
     }
-    // Les parents précèdent leurs enfants : construction de la fin vers le
-    // début, sans récursion (documents très imbriqués).
+    // Parents precede their children: built from the end to the start,
+    // without recursion (deeply nested documents).
     let mut built: Vec<Option<(Option<Value>, usize)>> = vec![None; elements.len()];
     for index in (0..elements.len()).rev() {
         let element = &elements[index];
@@ -325,10 +325,10 @@ pub(crate) fn document_symbols(source: &str) -> Vec<Value> {
         .collect()
 }
 
-/// Score de correspondance insensible à la casse (plus petit = meilleur) :
-/// égalité, préfixe (du nom ou de sa partie locale), sous-chaîne (au plus
-/// tôt), puis sous-séquence (au moins de trous). `None` : pas de
-/// correspondance. `query` doit être en minuscules.
+/// Case-insensitive match score (smaller = better): equality, prefix (of
+/// the name or its local part), substring (earliest), then subsequence
+/// (fewest gaps). `None`: no match. `query` must be
+/// lowercase.
 pub(crate) fn match_score(query: &str, name: &str) -> Option<(u8, usize)> {
     if query.is_empty() {
         return Some((0, 0));
@@ -363,7 +363,7 @@ pub(crate) fn match_score(query: &str, name: &str) -> Option<(u8, usize)> {
     Some((3, gaps))
 }
 
-/// Symboles déjà calculés d'un fichier sur disque.
+/// Already computed symbols of a file on disk.
 struct CachedFile {
     modified: SystemTime,
     len: u64,
@@ -371,7 +371,7 @@ struct CachedFile {
     symbols: Arc<Vec<IndexedSymbol>>,
 }
 
-/// Index des symboles du workspace.
+/// Workspace symbol index.
 pub(crate) struct WorkspaceIndex {
     roots: Vec<PathBuf>,
     files: HashMap<PathBuf, CachedFile>,
@@ -395,8 +395,8 @@ fn folder_path(uri: &str) -> Option<PathBuf> {
 }
 
 impl WorkspaceIndex {
-    /// Dossiers du workspace depuis les paramètres `initialize`
-    /// (`workspaceFolders`, sinon `rootUri`, sinon `rootPath`).
+    /// Workspace folders from the `initialize` parameters
+    /// (`workspaceFolders`, otherwise `rootUri`, otherwise `rootPath`).
     pub(crate) fn from_initialize_params(params: &Value) -> Self {
         let mut roots = params
             .get("workspaceFolders")
@@ -475,8 +475,8 @@ impl WorkspaceIndex {
         self.last_scan = None;
     }
 
-    /// `workspace/didChangeWatchedFiles` : oublie les fichiers modifiés et
-    /// force un nouveau parcours à la prochaine requête.
+    /// `workspace/didChangeWatchedFiles`: forgets the modified files and
+    /// forces a new scan on the next request.
     pub(crate) fn files_changed(&mut self, params: &Value) {
         for change in params
             .get("changes")
@@ -491,7 +491,7 @@ impl WorkspaceIndex {
         self.last_scan = None;
     }
 
-    /// Met à jour le cache depuis le disque (paresseux, borné).
+    /// Updates the cache from the disk (lazy, bounded).
     fn refresh(&mut self) {
         if self
             .last_scan
@@ -527,8 +527,8 @@ impl WorkspaceIndex {
         self.files.retain(|path, _| seen.contains(path));
     }
 
-    /// Répond à `workspace/symbol` (`SymbolInformation[]`), documents ouverts
-    /// prioritaires sur le disque.
+    /// Answers `workspace/symbol` (`SymbolInformation[]`), open documents
+    /// taking precedence over the disk.
     pub(crate) fn query(&mut self, documents: &HashMap<String, String>, query: &str) -> Vec<Value> {
         self.refresh();
         let query = query.trim().to_lowercase();
@@ -585,9 +585,9 @@ impl WorkspaceIndex {
     }
 }
 
-/// Fichiers indexables des dossiers : `(chemin, date de modification,
-/// taille)`, dossiers cachés, `target/`, `node_modules/`... ignorés, liens
-/// symboliques non suivis, bornes [`MAX_FILES`] et [`MAX_FILE_SIZE`].
+/// Indexable files of the folders: `(path, modification time, size)`;
+/// hidden directories, `target/`, `node_modules/`... ignored, symbolic
+/// links not followed, bounded by [`MAX_FILES`] and [`MAX_FILE_SIZE`].
 pub(crate) fn scan_workspace(roots: &[PathBuf]) -> Vec<(PathBuf, SystemTime, u64)> {
     let mut files = Vec::new();
     let mut seen = HashSet::new();
@@ -641,7 +641,7 @@ pub(crate) fn scan_workspace(roots: &[PathBuf]) -> Vec<(PathBuf, SystemTime, u64
                 let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
                 files.push((path, modified, metadata.len()));
             }
-            // Ordre de parcours déterministe (premier dossier d'abord).
+            // Deterministic scan order (first folder first).
             stack.extend(subdirectories.into_iter().rev());
         }
     }
@@ -705,7 +705,7 @@ mod tests {
                 .iter()
                 .all(|symbol| symbol.container.as_deref() == Some("urn:shop"))
         );
-        // L'étendue couvre la valeur de `name` (sans guillemets).
+        // The range covers the value of `name` (without quotes).
         assert_eq!(
             symbols[0].range,
             json!({"start": {"line": 2, "character": 20}, "end": {"line": 2, "character": 25}})
@@ -787,7 +787,7 @@ mod tests {
         assert_eq!(children[0]["detail"], "id=\"x\"");
         assert_eq!(children[0]["children"][0]["name"], "p:prop");
         assert_eq!(children[0]["children"][0]["detail"], "name=\"n\"");
-        // Élément non fermé : son étendue couvre ses descendants.
+        // Unclosed element: its range covers its descendants.
         let open = &children[1];
         assert_eq!(open["name"], "open");
         assert_eq!(open["children"][0]["name"], "leaf");
@@ -871,7 +871,7 @@ mod tests {
         assert_eq!(results[0]["location"]["uri"], path_to_uri(&schema));
         assert_eq!(results[0]["containerName"], "urn:shop");
 
-        // Le buffer ouvert (non enregistré) remplace le fichier sur disque.
+        // The open (unsaved) buffer replaces the file on disk.
         documents.insert(
             path_to_uri(&directory.join("beans.xml")),
             "<beans><bean id=\"orderRepository\"/></beans>".to_owned(),
@@ -882,8 +882,8 @@ mod tests {
         );
         documents.clear();
 
-        // Modification sur disque : le cache est invalidé par la taille ou la
-        // date de modification ; un fichier supprimé disparaît.
+        // Change on disk: the cache is invalidated by size or modification
+        // time; a deleted file disappears.
         fs::write(
             directory.join("beans.xml"),
             "<beans><bean id=\"orderServiceImpl\"/></beans>",
@@ -895,7 +895,7 @@ mod tests {
             vec!["orderServiceImpl"]
         );
 
-        // Requête vide : liste bornée.
+        // Empty query: bounded list.
         let many = (0..300)
             .map(|index| format!("<item id=\"i{index}\"/>"))
             .collect::<String>();

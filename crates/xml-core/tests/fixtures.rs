@@ -20,8 +20,8 @@ fn valid_fixture_builds_a_document_and_formats_idempotently() {
 fn malformed_fixture_reports_syntax_and_structure() {
     let parsed = parse_xml(MALFORMED);
 
-    // `</catalog>` ferme la racine : <book> et <title> restent non fermés,
-    // chacun signalé sur le nom de sa balise ouvrante.
+    // `</catalog>` closes the root: <book> and <title> stay unclosed, each
+    // reported on the name of its start tag.
     let unclosed = parsed
         .diagnostics
         .iter()

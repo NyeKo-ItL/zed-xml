@@ -1,32 +1,32 @@
-//! Couleurs du document (`textDocument/documentColor`) et leurs présentations
+//! Document colors (`textDocument/documentColor`) and their presentations
 //! (`textDocument/colorPresentation`).
 //!
-//! Sources de couleurs reconnues :
+//! Recognized color sources:
 //!
-//! - attributs de présentation SVG sans préfixe (`fill`, `stroke`,
-//!   `stop-color`, `flood-color`, `lighting-color`, `color`, `solid-color`) ;
-//! - déclarations CSS de l'attribut `style="..."` ;
-//! - contenu CSS (texte et sections CDATA) des éléments `<style>` ;
-//! - ressources Android : attributs des espaces de noms Android
-//!   (`android:textColor`, `app:tint`, `android:background`...) et contenu
-//!   textuel des éléments `<color>`, `<item>` et `<drawable>` d'un fichier de
-//!   ressources (`<resources>` racine ou fichier sous `res/values*/`).
+//! - unprefixed SVG presentation attributes (`fill`, `stroke`,
+//!   `stop-color`, `flood-color`, `lighting-color`, `color`, `solid-color`);
+//! - CSS declarations of the `style="..."` attribute;
+//! - CSS content (text and CDATA sections) of `<style>` elements;
+//! - Android resources: attributes of the Android namespaces
+//!   (`android:textColor`, `app:tint`, `android:background`...) and text
+//!   content of the `<color>`, `<item>` and `<drawable>` elements of a
+//!   resource file (`<resources>` root or a file under `res/values*/`).
 //!
-//! Sémantique hexadécimale, décidée par le contexte :
+//! Hexadecimal semantics, decided by the context:
 //!
-//! - CSS/SVG (attributs de présentation, `style`, `<style>`) : `#rgb`,
-//!   `#rgba`, `#rrggbb`, `#rrggbbaa` — alpha en **dernier** ;
-//! - Android (attribut dont le préfixe est lié à
-//!   `http://schemas.android.com/apk/res/android`, `.../res-auto` ou
-//!   `.../tools` — ou préfixe `android`/`app`/`tools` non déclaré — et texte
-//!   d'un fichier de ressources) : `#RGB`, `#ARGB`, `#RRGGBB`, `#AARRGGBB` —
-//!   alpha en **premier**. Seule une valeur entièrement hexadécimale est une
-//!   couleur (`@color/x` et `?attr/y` sont des références).
+//! - CSS/SVG (presentation attributes, `style`, `<style>`): `#rgb`,
+//!   `#rgba`, `#rrggbb`, `#rrggbbaa` — alpha **last**;
+//! - Android (attribute whose prefix is bound to
+//!   `http://schemas.android.com/apk/res/android`, `.../res-auto` or
+//!   `.../tools` — or an undeclared `android`/`app`/`tools` prefix — and text
+//!   of a resource file): `#RGB`, `#ARGB`, `#RRGGBB`, `#AARRGGBB` —
+//!   alpha **first**. Only a fully hexadecimal value is a
+//!   color (`@color/x` and `?attr/y` are references).
 //!
-//! En CSS, `rgb()`/`rgba()` (virgules ou espaces avec `/ alpha`, nombres ou
-//! pourcentages), `hsl()`/`hsla()` (teinte en `deg`/`rad`/`grad`/`turn`) et
-//! les couleurs nommées (y compris `transparent`) sont aussi reconnues ;
-//! `currentColor`, `none`, `inherit` et les `url(...)` sont ignorés.
+//! In CSS, `rgb()`/`rgba()` (commas or spaces with `/ alpha`, numbers or
+//! percentages), `hsl()`/`hsla()` (hue in `deg`/`rad`/`grad`/`turn`) and
+//! named colors (including `transparent`) are also recognized;
+//! `currentColor`, `none`, `inherit` and `url(...)` are ignored.
 
 use std::ops::Range;
 
@@ -37,14 +37,14 @@ use xml_core::tags::{
 
 use crate::selection::LineIndex;
 
-/// Espace de noms des attributs de la plateforme Android.
+/// Namespace of the Android platform attributes.
 pub(crate) const ANDROID_NAMESPACE: &str = "http://schemas.android.com/apk/res/android";
-/// Espace de noms des attributs d'application Android (`app:`).
+/// Namespace of the Android application attributes (`app:`).
 pub(crate) const ANDROID_AUTO_NAMESPACE: &str = "http://schemas.android.com/apk/res-auto";
-/// Espace de noms des attributs d'outillage Android (`tools:`).
+/// Namespace of the Android tools attributes (`tools:`).
 pub(crate) const ANDROID_TOOLS_NAMESPACE: &str = "http://schemas.android.com/tools";
 
-/// Attributs de présentation SVG dont la valeur est une couleur.
+/// SVG presentation attributes whose value is a color.
 const SVG_COLOR_ATTRIBUTES: &[&str] = &[
     "color",
     "fill",
@@ -55,7 +55,7 @@ const SVG_COLOR_ATTRIBUTES: &[&str] = &[
     "stroke",
 ];
 
-/// Propriétés CSS dont les identifiants ne sont jamais des couleurs.
+/// CSS properties whose identifiers are never colors.
 const NON_COLOR_PROPERTIES: &[&str] = &[
     "animation",
     "animation-name",
@@ -72,7 +72,7 @@ const NON_COLOR_PROPERTIES: &[&str] = &[
     "will-change",
 ];
 
-/// Couleur RVBA, composantes dans `[0, 1]`.
+/// RGBA color, components in `[0, 1]`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Rgba {
     pub red: f64,
@@ -91,7 +91,7 @@ impl Rgba {
         }
     }
 
-    /// Couleur LSP `Color` extraite de `value` (composantes bornées).
+    /// LSP `Color` extracted from `value` (clamped components).
     pub(crate) fn from_json(value: &Value) -> Option<Self> {
         let component = |name: &str| Some(value.get(name)?.as_f64()?.clamp(0.0, 1.0));
         Some(Self {
@@ -111,7 +111,7 @@ impl Rgba {
         })
     }
 
-    /// Composantes sur 8 bits `[r, g, b, a]`.
+    /// 8-bit components `[r, g, b, a]`.
     fn bytes(self) -> [u8; 4] {
         [self.red, self.green, self.blue, self.alpha].map(channel)
     }
@@ -121,28 +121,28 @@ fn channel(value: f64) -> u8 {
     (value.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
-/// Position de l'alpha dans une couleur hexadécimale.
+/// Position of the alpha in a hexadecimal color.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HexSyntax {
-    /// `#rgb[a]` / `#rrggbb[aa]` : alpha en dernier.
+    /// `#rgb[a]` / `#rrggbb[aa]`: alpha last.
     Css,
-    /// `#[a]rgb` / `#[aa]rrggbb` : alpha en premier.
+    /// `#[a]rgb` / `#[aa]rrggbb`: alpha first.
     Android,
 }
 
-/// Forme écrite d'une couleur, réutilisée comme première présentation.
+/// Written form of a color, reused as the first presentation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ColorFormat {
     Hex {
         syntax: HexSyntax,
-        /// Nombre de chiffres (3, 4, 6 ou 8).
+        /// Number of digits (3, 4, 6 or 8).
         digits: usize,
         uppercase: bool,
     },
     Rgb {
-        /// Fonction écrite `rgba`.
+        /// Function written as `rgba`.
         alpha_function: bool,
-        /// Syntaxe à virgules (sinon espaces et `/ alpha`).
+        /// Comma syntax (otherwise spaces and `/ alpha`).
         legacy: bool,
     },
     Hsl {
@@ -152,16 +152,16 @@ pub(crate) enum ColorFormat {
     Named,
 }
 
-/// Couleur trouvée dans le document.
+/// Color found in the document.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ColorMatch {
-    /// Étendue (octets UTF-8) du texte de la couleur.
+    /// Range (UTF-8 bytes) of the color text.
     pub range: Range<usize>,
     pub color: Rgba,
     pub format: ColorFormat,
 }
 
-/// Réponse JSON à `textDocument/documentColor`.
+/// JSON response to `textDocument/documentColor`.
 pub(crate) fn document_colors(uri: &str, source: &str) -> Value {
     let index = LineIndex::new(source);
     Value::Array(
@@ -180,9 +180,9 @@ pub(crate) fn document_colors(uri: &str, source: &str) -> Value {
     )
 }
 
-/// Réponse JSON à `textDocument/colorPresentation` : la forme d'origine de la
-/// couleur située sur `range` d'abord, puis les autres formes, chacune avec un
-/// `textEdit` qui remplace `lsp_range`.
+/// JSON response to `textDocument/colorPresentation`: the original form of
+/// the color at `range` first, then the other forms, each with a
+/// `textEdit` replacing `lsp_range`.
 pub(crate) fn color_presentations(
     uri: &str,
     source: &str,
@@ -213,7 +213,7 @@ pub(crate) fn color_presentations(
     )
 }
 
-/// Libellés proposés pour `color`, forme d'origine en premier, sans doublon.
+/// Labels offered for `color`, original form first, without duplicates.
 pub(crate) fn presentations(color: Rgba, original: Option<ColorFormat>) -> Vec<String> {
     let mut labels = Vec::new();
     let original = original.unwrap_or(ColorFormat::Hex {
@@ -256,8 +256,8 @@ pub(crate) fn presentations(color: Rgba, original: Option<ColorFormat>) -> Vec<S
     unique
 }
 
-/// Écrit `color` dans la forme `format` (`None` pour une couleur nommée sans
-/// nom exact).
+/// Writes `color` in the `format` form (`None` for a named color without
+/// an exact name).
 fn format_color(color: Rgba, format: ColorFormat) -> Option<String> {
     Some(match format {
         ColorFormat::Hex {
@@ -277,9 +277,9 @@ fn format_color(color: Rgba, format: ColorFormat) -> Option<String> {
     })
 }
 
-/// Forme hexadécimale au plus proche de `digits` : les formes courtes (3/4)
-/// ne sont gardées que si elles sont exactes, et l'alpha est écrit si la
-/// forme d'origine l'avait (4/8) ou si la couleur n'est pas opaque.
+/// Hexadecimal form closest to `digits`: short forms (3/4) are only kept
+/// when exact, and the alpha is written if the original form had it (4/8)
+/// or if the color is not opaque.
 fn format_hex(color: Rgba, syntax: HexSyntax, digits: usize, uppercase: bool) -> String {
     let [red, green, blue, alpha] = color.bytes();
     let with_alpha = matches!(digits, 4 | 8) || alpha != 255;
@@ -353,8 +353,8 @@ fn format_hsl(color: Rgba, alpha_function: bool, legacy: bool) -> String {
     }
 }
 
-/// Nom CSS exact de `color` (`transparent` pour un noir totalement
-/// transparent), le premier dans l'ordre alphabétique en cas d'alias.
+/// Exact CSS name of `color` (`transparent` for a fully transparent
+/// black), the first in alphabetical order in case of aliases.
 fn color_name(color: Rgba) -> Option<&'static str> {
     let [red, green, blue, alpha] = color.bytes();
     if alpha == 0 && [red, green, blue] == [0, 0, 0] {
@@ -370,7 +370,7 @@ fn color_name(color: Rgba) -> Option<&'static str> {
         .map(|(name, _)| *name)
 }
 
-/// Teinte en degrés, saturation et luminosité dans `[0, 1]`.
+/// Hue in degrees, saturation and lightness in `[0, 1]`.
 fn rgb_to_hsl(color: Rgba) -> (f64, f64, f64) {
     let [red, green, blue] = [color.red, color.green, color.blue];
     let max = red.max(green).max(blue);
@@ -428,8 +428,8 @@ fn hsl_to_rgb(hue: f64, saturation: f64, lightness: f64, alpha: f64) -> Rgba {
     }
 }
 
-/// Analyse une valeur entière (espaces de bord ignorés) : couleur
-/// hexadécimale selon `syntax`, et en CSS aussi `rgb()`, `hsl()` et les noms.
+/// Parses a whole value (surrounding whitespace ignored): hexadecimal color
+/// according to `syntax`, and in CSS also `rgb()`, `hsl()` and names.
 pub(crate) fn parse_color(text: &str, syntax: HexSyntax) -> Option<(Rgba, ColorFormat)> {
     let text = text.trim();
     if let Some(digits) = text.strip_prefix('#') {
@@ -445,7 +445,7 @@ pub(crate) fn parse_color(text: &str, syntax: HexSyntax) -> Option<(Rgba, ColorF
     named_color(text).map(|color| (color, ColorFormat::Named))
 }
 
-/// Chiffres d'une couleur hexadécimale, `#` exclu.
+/// Digits of a hexadecimal color, `#` excluded.
 fn parse_hex(digits: &str, syntax: HexSyntax) -> Option<(Rgba, ColorFormat)> {
     if !matches!(digits.len(), 3 | 4 | 6 | 8) || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
@@ -487,8 +487,8 @@ fn hex_value(byte: u8) -> u8 {
     }
 }
 
-/// `rgb()`, `rgba()`, `hsl()` ou `hsla()` (nom insensible à la casse) avec
-/// ses arguments (parenthèses exclues).
+/// `rgb()`, `rgba()`, `hsl()` or `hsla()` (case-insensitive name) with its
+/// arguments (parentheses excluded).
 fn parse_function(name: &str, arguments: &str) -> Option<(Rgba, ColorFormat)> {
     let name = name.to_ascii_lowercase();
     let is_rgb = match name.as_str() {
@@ -557,7 +557,7 @@ fn parse_function(name: &str, arguments: &str) -> Option<(Rgba, ColorFormat)> {
     Some((color, format))
 }
 
-/// Nombre CSS (`+`/`-`, décimales, exposant) ; rejette `inf`/`NaN`.
+/// CSS number (`+`/`-`, decimals, exponent); rejects `inf`/`NaN`.
 fn parse_number(text: &str) -> Option<f64> {
     let valid = !text.is_empty()
         && text.bytes().any(|b| b.is_ascii_digit())
@@ -570,7 +570,7 @@ fn parse_number(text: &str) -> Option<f64> {
     text.parse::<f64>().ok().filter(|value| value.is_finite())
 }
 
-/// `none` vaut 0 dans la syntaxe moderne (CSS Color 4).
+/// `none` counts as 0 in the modern syntax (CSS Color 4).
 fn is_none(text: &str, legacy: bool) -> bool {
     !legacy && text.eq_ignore_ascii_case("none")
 }
@@ -595,8 +595,8 @@ fn parse_alpha(text: &str, legacy: bool) -> Option<f64> {
     }
 }
 
-/// Saturation ou luminosité : pourcentage (obligatoire en syntaxe à
-/// virgules, un nombre nu étant accepté en syntaxe moderne).
+/// Saturation or lightness: percentage (required in comma syntax, a bare
+/// number being accepted in the modern syntax).
 fn parse_percentage(text: &str, legacy: bool) -> Option<f64> {
     if is_none(text, legacy) {
         return Some(0.0);
@@ -608,7 +608,7 @@ fn parse_percentage(text: &str, legacy: bool) -> Option<f64> {
     }
 }
 
-/// Teinte en degrés (`deg`, `rad`, `grad`, `turn` ou sans unité).
+/// Hue in degrees (`deg`, `rad`, `grad`, `turn` or unitless).
 fn parse_hue(text: &str, legacy: bool) -> Option<f64> {
     if is_none(text, legacy) {
         return Some(0.0);
@@ -645,9 +645,9 @@ fn named_color(name: &str) -> Option<Rgba> {
 }
 
 // ---------------------------------------------------------------------------
-// Parcours du document
+// Document traversal
 
-/// Toutes les couleurs du document, dans l'ordre du document.
+/// All colors of the document, in document order.
 pub(crate) fn find_colors(uri: &str, source: &str) -> Vec<ColorMatch> {
     let tree = XmlTagTree::parse(source);
     let elements = tree.elements();
@@ -727,7 +727,7 @@ fn is_android_namespace(namespace: &str) -> bool {
     )
 }
 
-/// Attributs Android dont la valeur peut être une couleur littérale.
+/// Android attributes whose value may be a literal color.
 fn is_android_color_attribute(local: &str) -> bool {
     let lower = local.to_ascii_lowercase();
     lower.contains("color")
@@ -738,7 +738,7 @@ fn is_android_color_attribute(local: &str) -> bool {
         )
 }
 
-/// Fichier de ressources de valeurs Android (`.../res/values*/*.xml`).
+/// Android values resource file (`.../res/values*/*.xml`).
 fn is_android_values_uri(uri: &str) -> bool {
     let path = uri.replace('\\', "/");
     let mut segments = path.rsplit('/');
@@ -752,8 +752,8 @@ fn is_android_values_uri(uri: &str) -> bool {
         && (directory == "values" || directory.starts_with("values-"))
 }
 
-/// Ajoute la couleur si tout le texte de `range` (espaces de bord exclus) en
-/// est une.
+/// Adds the color if the whole text of `range` (surrounding whitespace
+/// excluded) is one.
 fn push_whole(colors: &mut Vec<ColorMatch>, source: &str, range: Range<usize>, syntax: HexSyntax) {
     let text = &source[range.clone()];
     let trimmed = text.trim();
@@ -767,9 +767,9 @@ fn push_whole(colors: &mut Vec<ColorMatch>, source: &str, range: Range<usize>, s
     }
 }
 
-/// Contenu d'un élément `<style>` où les délimiteurs CDATA, les commentaires
-/// XML, les instructions de traitement et les balises enfants sont remplacés
-/// par des espaces (les offsets sont conservés).
+/// Content of a `<style>` element where CDATA delimiters, XML comments,
+/// processing instructions and child tags are replaced by spaces (offsets
+/// are preserved).
 fn masked_content(
     source: &str,
     tree: &XmlTagTree,
@@ -813,7 +813,7 @@ fn is_ident_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_') || byte >= 0x80
 }
 
-/// Fin (exclue) d'une chaîne CSS commençant par le guillemet en `start`.
+/// End (exclusive) of a CSS string starting with the quote at `start`.
 fn skip_string(bytes: &[u8], start: usize) -> usize {
     let quote = bytes[start];
     let mut index = start + 1;
@@ -827,7 +827,7 @@ fn skip_string(bytes: &[u8], start: usize) -> usize {
     bytes.len()
 }
 
-/// Fin (exclue) d'un commentaire CSS commençant en `start` (`/*`).
+/// End (exclusive) of a CSS comment starting at `start` (`/*`).
 fn skip_comment(bytes: &[u8], start: usize) -> usize {
     bytes[start + 2..]
         .windows(2)
@@ -835,9 +835,9 @@ fn skip_comment(bytes: &[u8], start: usize) -> usize {
         .map_or(bytes.len(), |end| start + 2 + end + 2)
 }
 
-/// Parcourt une feuille de style (`nested`) ou une liste de déclarations
-/// (`style="..."`) et analyse la valeur de chaque déclaration.
-/// `base` est l'offset de `bytes[0]` dans le document.
+/// Walks a style sheet (`nested`) or a declaration list (`style="..."`)
+/// and parses the value of each declaration.
+/// `base` is the offset of `bytes[0]` in the document.
 fn scan_css_declarations(bytes: &[u8], base: usize, nested: bool, colors: &mut Vec<ColorMatch>) {
     let mut depth = usize::from(!nested);
     let mut segment = 0;
@@ -869,7 +869,7 @@ fn scan_css_declarations(bytes: &[u8], base: usize, nested: bool, colors: &mut V
     }
 }
 
-/// Analyse la valeur de la déclaration `propriété: valeur` de `range`.
+/// Parses the value of the `property: value` declaration of `range`.
 fn declaration(bytes: &[u8], range: Range<usize>, base: usize, colors: &mut Vec<ColorMatch>) {
     let segment = &bytes[range.clone()];
     let Some(colon) = segment.iter().position(|&byte| byte == b':') else {
@@ -887,8 +887,8 @@ fn declaration(bytes: &[u8], range: Range<usize>, base: usize, colors: &mut Vec<
     scan_css_value(&bytes[value.clone()], base + value.start, colors);
 }
 
-/// Repère les couleurs d'une valeur CSS : `#hex`, `rgb[a]()`, `hsl[a]()` et
-/// couleurs nommées, hors chaînes, commentaires et `url(...)`.
+/// Finds the colors of a CSS value: `#hex`, `rgb[a]()`, `hsl[a]()` and
+/// named colors, outside strings, comments and `url(...)`.
 fn scan_css_value(bytes: &[u8], base: usize, colors: &mut Vec<ColorMatch>) {
     let mut index = 0;
     while index < bytes.len() {
@@ -934,7 +934,7 @@ fn scan_css_value(bytes: &[u8], base: usize, colors: &mut Vec<ColorMatch>) {
                         index = close + 1;
                         continue;
                     }
-                    // Autre fonction (`var(--x, red)`...) : on analyse ses arguments.
+                    // Other function (`var(--x, red)`...): its arguments are parsed.
                     index = end + 1;
                     continue;
                 }
@@ -959,7 +959,7 @@ fn ident_end(bytes: &[u8], mut index: usize) -> usize {
     index
 }
 
-/// Parenthèse fermante correspondant à celle en `open`.
+/// Closing parenthesis matching the one at `open`.
 fn closing_parenthesis(bytes: &[u8], open: usize) -> Option<usize> {
     let mut depth = 0usize;
     let mut index = open;
@@ -983,7 +983,7 @@ fn closing_parenthesis(bytes: &[u8], open: usize) -> Option<usize> {
     None
 }
 
-/// Couleurs nommées CSS (CSS Color 4, hors `transparent`), triées.
+/// CSS named colors (CSS Color 4, excluding `transparent`), sorted.
 const NAMED_COLORS: &[(&str, u32)] = &[
     ("aliceblue", 0xf0f8ff),
     ("antiquewhite", 0xfaebd7),
@@ -1147,7 +1147,7 @@ mod tests {
         parse_color(text, HexSyntax::Android).map(|(color, _)| color.bytes())
     }
 
-    /// Couleurs trouvées sous forme `(texte, [r, g, b, a])`.
+    /// Colors found as `(text, [r, g, b, a])`.
     fn found(uri: &str, source: &str) -> Vec<(String, [u8; 4])> {
         find_colors(uri, source)
             .into_iter()
@@ -1322,7 +1322,7 @@ mod tests {
             vec![
                 ("#80FF0000".to_owned(), [255, 0, 0, 0x80]),
                 ("#0F0".to_owned(), [0, 255, 0, 255]),
-                // Attribut SVG sans préfixe : sémantique CSS (alpha en dernier).
+                // Unprefixed SVG attribute: CSS semantics (alpha last).
                 ("#80FF0000".to_owned(), [0x80, 255, 0, 0]),
             ]
         );
@@ -1330,12 +1330,12 @@ mod tests {
 
     #[test]
     fn detects_android_context_from_namespace_or_path() {
-        // Préfixe `android` non déclaré (fragment) : convention Android.
+        // Undeclared `android` prefix (fragment): Android convention.
         assert_eq!(
             found("file:///x.xml", "<View android:background=\"#8000\"/>"),
             vec![("#8000".to_owned(), [0, 0, 0, 0x88])]
         );
-        // Préfixe `android` lié à un autre espace de noms : ignoré.
+        // `android` prefix bound to another namespace: ignored.
         assert!(
             found(
                 "file:///x.xml",
@@ -1343,7 +1343,7 @@ mod tests {
             )
             .is_empty()
         );
-        // Fichier sous res/values sans racine <resources> (document partiel).
+        // File under res/values without a <resources> root (partial document).
         assert_eq!(
             texts(
                 "file:///C:/p/res/values-night/c.xml",
@@ -1376,7 +1376,7 @@ mod tests {
             ),
             vec!["lime"]
         );
-        // Valeur non terminée et document mal formé.
+        // Unterminated value and malformed document.
         assert_eq!(texts("file:///a.svg", "<a fill=\"red"), vec!["red"]);
         assert_eq!(
             texts("file:///a.svg", "<a><b fill='#000'></a>"),
@@ -1469,7 +1469,7 @@ mod tests {
             )[0],
             "rgba(0, 0, 255, 1)"
         );
-        // Couleur nommée modifiée : plus de nom exact, les autres formes restent.
+        // Modified named color: no exact name anymore, the other forms remain.
         assert_eq!(
             presentations(rgba(1, 2, 3, 255), Some(ColorFormat::Named)),
             vec!["#010203", "rgb(1, 2, 3)", "hsl(210, 50%, 1%)"]

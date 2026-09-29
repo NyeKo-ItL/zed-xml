@@ -1,61 +1,60 @@
-//! Contrôle tolérant de la bonne formation, localisé précisément.
+//! Tolerant, precisely located well-formedness check.
 //!
-//! `quick-xml` s'arrête à la première erreur et ne vérifie ni les attributs
-//! dupliqués, ni les valeurs sans guillemets, ni les caractères `&`/`<` non
-//! échappés. Ce module s'appuie sur l'analyseur lexical de [`crate::tags`]
-//! pour relever tous les problèmes du document avec l'étendue exacte de la
-//! construction fautive et les informations nécessaires aux correctifs
-//! rapides (`textDocument/codeAction`) :
+//! `quick-xml` stops at the first error and checks neither duplicate
+//! attributes, nor unquoted values, nor unescaped `&`/`<` characters. This
+//! module relies on the [`crate::tags`] lexer to report every problem of
+//! the document with the exact range of the faulty construct and the
+//! information needed by quick fixes (`textDocument/codeAction`):
 //!
-//! - balise fermante qui ne correspond pas à l'élément ouvert
-//!   ([`XmlProblemKind::MismatchedEndTag`]) ou sans élément ouvert
-//!   ([`XmlProblemKind::UnmatchedEndTag`]) ;
-//! - élément sans balise fermante ([`XmlProblemKind::UnclosedElement`]) ;
-//! - balise sans `>` final ([`XmlProblemKind::UnclosedTag`]) ;
-//! - attribut dupliqué ([`XmlProblemKind::DuplicateAttribute`]) ou valeur
-//!   sans guillemets ([`XmlProblemKind::UnquotedAttributeValue`]) ;
-//! - `&` ou `<` non échappé dans le texte ou une valeur d'attribut
+//! - end tag that does not match the open element
+//!   ([`XmlProblemKind::MismatchedEndTag`]) or without an open element
+//!   ([`XmlProblemKind::UnmatchedEndTag`]);
+//! - element without an end tag ([`XmlProblemKind::UnclosedElement`]);
+//! - tag without a final `>` ([`XmlProblemKind::UnclosedTag`]);
+//! - duplicate attribute ([`XmlProblemKind::DuplicateAttribute`]) or
+//!   unquoted value ([`XmlProblemKind::UnquotedAttributeValue`]);
+//! - unescaped `&` or `<` in text or an attribute value
 //!   ([`XmlProblemKind::UnescapedCharacter`]).
 //!
-//! Les offsets sont des offsets d'octets UTF-8 dans la source.
+//! Offsets are UTF-8 byte offsets into the source.
 
 use std::ops::Range;
 
 use crate::tags::{XmlTag, XmlTagKind, scan_attributes, scan_markup, scan_tags};
 
-/// Nature d'un problème de bonne formation et données utiles à sa correction.
+/// Kind of a well-formedness problem and the data needed to fix it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum XmlProblemKind {
-    /// Balise fermante (étendue signalée : son nom) qui ferme l'élément
-    /// ouvert `expected`, dont le nom est en `start_name`.
+    /// End tag (reported range: its name) that closes the open element
+    /// `expected`, whose name is at `start_name`.
     MismatchedEndTag {
         expected: String,
         start_name: Range<usize>,
     },
-    /// Balise fermante (étendue signalée : son nom) sans élément ouvert
-    /// correspondant ; `tag` couvre toute la balise.
+    /// End tag (reported range: its name) without a matching open element;
+    /// `tag` covers the whole tag.
     UnmatchedEndTag { tag: Range<usize> },
-    /// Élément (étendue signalée : nom de la balise ouvrante) sans balise
-    /// fermante. `insert_at` est la position où la balise fermante est
-    /// attendue et `tag_end` la position du `>` de la balise ouvrante.
+    /// Element (reported range: the start tag name) without an end tag.
+    /// `insert_at` is where the end tag is expected and `tag_end` the
+    /// position of the start tag's `>`.
     UnclosedElement { insert_at: usize, tag_end: usize },
-    /// Balise (étendue signalée : son nom) sans `>` final ; `insert_at` suit
-    /// le dernier caractère significatif de la balise. `start_tag` indique une
-    /// balise ouvrante (qui peut aussi devenir auto-fermante).
+    /// Tag (reported range: its name) without a final `>`; `insert_at`
+    /// follows the last significant character of the tag. `start_tag` marks a
+    /// start tag (which may also become self-closing).
     UnclosedTag { insert_at: usize, start_tag: bool },
-    /// Attribut (étendue signalée : son nom) déjà présent sur la balise ;
-    /// `removal` couvre l'attribut et les espaces qui le précèdent.
+    /// Attribute (reported range: its name) already present on the tag;
+    /// `removal` covers the attribute and the whitespace before it.
     DuplicateAttribute { removal: Range<usize> },
-    /// Valeur d'attribut (étendue signalée) sans guillemets.
+    /// Attribute value (reported range) without quotes.
     UnquotedAttributeValue,
-    /// Caractère `&` ou `<` (étendue signalée) à remplacer par `&amp;` ou
+    /// `&` or `<` character (reported range) to replace with `&amp;` or
     /// `&lt;`.
     UnescapedCharacter { character: char },
 }
 
 impl XmlProblemKind {
-    /// Identifiant stable du problème, publié dans `data.kind` des
-    /// diagnostics LSP.
+    /// Stable identifier of the problem, published in `data.kind` of LSP
+    /// diagnostics.
     pub fn id(&self) -> &'static str {
         match self {
             Self::MismatchedEndTag { .. } => "mismatchedEndTag",
@@ -68,8 +67,8 @@ impl XmlProblemKind {
         }
     }
 
-    /// Indique un problème de structure (appariement des balises) plutôt
-    /// qu'un problème de syntaxe.
+    /// Whether this is a structure problem (tag matching) rather than a
+    /// syntax problem.
     pub fn is_structural(&self) -> bool {
         matches!(
             self,
@@ -80,17 +79,17 @@ impl XmlProblemKind {
     }
 }
 
-/// Problème de bonne formation localisé.
+/// Located well-formedness problem.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XmlProblem {
     pub kind: XmlProblemKind,
-    /// Étendue signalée (voir [`XmlProblemKind`]).
+    /// Reported range (see [`XmlProblemKind`]).
     pub range: Range<usize>,
     pub message: String,
 }
 
-/// Relève les problèmes de bonne formation de la source, dans l'ordre du
-/// document.
+/// Reports the well-formedness problems of the source, in document
+/// order.
 pub fn check_well_formedness(source: &str) -> Vec<XmlProblem> {
     let tags = scan_tags(source);
     let mut problems = Vec::new();
@@ -107,7 +106,7 @@ fn check_tags(source: &str, tags: &[XmlTag], problems: &mut Vec<XmlProblem>) {
     let mut open: Vec<usize> = Vec::new();
     let unclosed = |index: usize, insert_at: usize, problems: &mut Vec<XmlProblem>| {
         let tag: &XmlTag = &tags[index];
-        // Une balise ouvrante sans `>` est déjà signalée.
+        // A start tag without `>` is already reported.
         if tag.closed {
             problems.push(XmlProblem {
                 kind: XmlProblemKind::UnclosedElement {
@@ -115,7 +114,7 @@ fn check_tags(source: &str, tags: &[XmlTag], problems: &mut Vec<XmlProblem>) {
                     tag_end: tag.range.end - 1,
                 },
                 range: tag.name.clone(),
-                message: format!("balise non fermée <{}>", tag.name(source)),
+                message: format!("unclosed element <{}>", tag.name(source)),
             });
         }
     };
@@ -125,8 +124,8 @@ fn check_tags(source: &str, tags: &[XmlTag], problems: &mut Vec<XmlProblem>) {
         if !tag.closed {
             let insert_at = source[..tag.range.end.min(source.len())].trim_end().len();
             let (start_tag, label) = match tag.kind {
-                XmlTagKind::End => (false, format!("balise fermante </{name}>")),
-                _ => (true, format!("balise <{name}>")),
+                XmlTagKind::End => (false, format!("end tag </{name}>")),
+                _ => (true, format!("tag <{name}>")),
             };
             problems.push(XmlProblem {
                 kind: XmlProblemKind::UnclosedTag {
@@ -134,7 +133,7 @@ fn check_tags(source: &str, tags: &[XmlTag], problems: &mut Vec<XmlProblem>) {
                     start_tag,
                 },
                 range: tag.name.clone(),
-                message: format!("{label} non terminée : `>` manquant"),
+                message: format!("{label} is not terminated: missing `>`"),
             });
         }
         match tag.kind {
@@ -155,8 +154,8 @@ fn check_tags(source: &str, tags: &[XmlTag], problems: &mut Vec<XmlProblem>) {
                     problems.push(unmatched(source, tag));
                     continue;
                 };
-                // Si la balise fermante suivante ferme l'élément ouvert, celle-ci
-                // est en trop ; sinon elle était destinée à l'élément ouvert.
+                // If the next end tag closes the open element, this one is
+                // extra; otherwise it was meant for the open element.
                 let expected = tags[top].name(source);
                 let next_closes_top = tags[index + 1..]
                     .iter()
@@ -171,7 +170,7 @@ fn check_tags(source: &str, tags: &[XmlTag], problems: &mut Vec<XmlProblem>) {
                             start_name: tags[top].name.clone(),
                         },
                         range: tag.name.clone(),
-                        message: format!("balise fermante </{name}> attend </{expected}>"),
+                        message: format!("end tag </{name}> does not match </{expected}>"),
                     });
                     open.pop();
                 }
@@ -189,7 +188,7 @@ fn unmatched(source: &str, tag: &XmlTag) -> XmlProblem {
             tag: tag.range.clone(),
         },
         range: tag.name.clone(),
-        message: format!("balise fermante inattendue </{}>", tag.name(source)),
+        message: format!("unexpected end tag </{}>", tag.name(source)),
     }
 }
 
@@ -213,7 +212,7 @@ fn check_attributes(source: &str, tag: &XmlTag, problems: &mut Vec<XmlProblem>) 
                     removal: start..end,
                 },
                 range: attribute.name.clone(),
-                message: format!("attribut {name} dupliqué sur <{}>", tag.name(source)),
+                message: format!("duplicate attribute {name} on <{}>", tag.name(source)),
             });
         }
         let Some(value) = &attribute.value else {
@@ -223,7 +222,7 @@ fn check_attributes(source: &str, tag: &XmlTag, problems: &mut Vec<XmlProblem>) 
             problems.push(XmlProblem {
                 kind: XmlProblemKind::UnquotedAttributeValue,
                 range: value.clone(),
-                message: format!("valeur de l'attribut {name} sans guillemets"),
+                message: format!("unquoted value for attribute {name}"),
             });
             continue;
         }
@@ -235,8 +234,8 @@ fn is_quote(byte: Option<&u8>) -> bool {
     matches!(byte, Some(b'"' | b'\''))
 }
 
-/// Texte hors balises, commentaires, CDATA, instructions de traitement et
-/// déclarations.
+/// Text outside tags, comments, CDATA, processing instructions and
+/// declarations.
 fn check_text(source: &str, tags: &[XmlTag], problems: &mut Vec<XmlProblem>) {
     let mut constructs = tags
         .iter()
@@ -268,13 +267,13 @@ fn check_characters(source: &str, range: Range<usize>, problems: &mut Vec<XmlPro
         problems.push(XmlProblem {
             kind: XmlProblemKind::UnescapedCharacter { character },
             range: start..start + 1,
-            message: format!("caractère `{character}` non échappé (utiliser `{escaped}`)"),
+            message: format!("unescaped `{character}` character (use `{escaped}`)"),
         });
     }
 }
 
-/// Indique si `text` (qui commence par `&`) débute par une référence
-/// d'entité ou de caractère complète (`&name;`, `&#10;`, `&#x1F;`).
+/// Whether `text` (starting with `&`) begins with a complete entity or
+/// character reference (`&name;`, `&#10;`, `&#x1F;`).
 fn starts_with_reference(text: &str) -> bool {
     let Some(end) = text.find(';') else {
         return false;
@@ -328,10 +327,10 @@ mod tests {
         );
         assert_eq!(
             problems[0].message,
-            "balise fermante </chidl> attend </child>"
+            "end tag </chidl> does not match </child>"
         );
 
-        // La balise suivante ferme l'élément ouvert : celle-ci est en trop.
+        // The next tag closes the open element: this one is extra.
         let source = "<root></extra></root>";
         assert_eq!(kinds(source), vec![("unmatchedEndTag", "extra")]);
         assert_eq!(kinds("<a/></b>"), vec![("unmatchedEndTag", "b")]);
@@ -409,7 +408,7 @@ mod tests {
                 ("unescapedCharacter", "&"),
             ]
         );
-        // Unicode et CRLF : les offsets restent des frontières de caractères.
+        // Unicode and CRLF: offsets stay on character boundaries.
         let source = "<é>\r\n😀 & ü\r\n</é>";
         let problems = check_well_formedness(source);
         assert_eq!(problems.len(), 1);

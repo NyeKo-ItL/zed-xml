@@ -1,24 +1,24 @@
-//! Grammaires DTD, comme LemMinX (Xerces) : analyse des sous-ensembles
-//! interne (`<!DOCTYPE r [ ... ]>`) et externe (`SYSTEM`/`PUBLIC`), modèles
-//! de contenu et validation d'un document d'instance.
+//! DTD grammars, like LemMinX (Xerces): parsing of the internal
+//! (`<!DOCTYPE r [ ... ]>`) and external (`SYSTEM`/`PUBLIC`) subsets, content
+//! models and validation of an instance document.
 //!
-//! - [`parser`] : déclarations `ELEMENT` (EMPTY, ANY, mixte, `children` avec
+//! - [`parser`]: `ELEMENT` declarations (EMPTY, ANY, mixed, `children` with
 //!   `, | ? * +`), `ATTLIST` (CDATA, ID, IDREF(S), NMTOKEN(S), ENTITY/
-//!   ENTITIES, énumérations, NOTATION ; `#REQUIRED`, `#IMPLIED`, `#FIXED`,
-//!   valeur par défaut), `ENTITY` (générales et paramètres, internes et
-//!   externes, `NDATA`), `NOTATION`, commentaires (documentation de la
-//!   déclaration suivante), développement des entités paramètres (entre les
-//!   déclarations et à l'intérieur de celles-ci) et sections conditionnelles
-//!   `INCLUDE`/`IGNORE` du sous-ensemble externe. Les ressources externes
-//!   sont lues par un [`ExternalLoader`] fourni par l'appelant.
-//! - [`content`] : automate de reconnaissance des modèles `children`.
-//! - [`validate`] : références d'entités du document et validation
-//!   (déclarations, modèles de contenu, attributs, ID/IDREF).
+//!   ENTITIES, enumerations, NOTATION; `#REQUIRED`, `#IMPLIED`, `#FIXED`,
+//!   default value), `ENTITY` (general and parameter, internal and
+//!   external, `NDATA`), `NOTATION`, comments (documentation of the
+//!   following declaration), parameter entity expansion (between
+//!   declarations and inside them) and `INCLUDE`/`IGNORE` conditional
+//!   sections of the external subset. External resources
+//!   are read by an [`ExternalLoader`] provided by the caller.
+//! - [`content`]: recognition automaton of `children` models.
+//! - [`validate`]: entity references of the document and validation
+//!   (declarations, content models, attributes, ID/IDREF).
 //!
-//! Sécurité : le développement des entités est borné
+//! Security: entity expansion is bounded
 //! ([`MAX_ENTITY_EXPANSION`], [`MAX_PARAMETER_EXPANSION`],
-//! [`MAX_ENTITY_DEPTH`]) ; les entités générales ne sont jamais développées
-//! en mémoire, seule leur taille est calculée (attaque « billion laughs »).
+//! [`MAX_ENTITY_DEPTH`]); general entities are never expanded in memory,
+//! only their size is computed ("billion laughs" attack).
 
 pub mod content;
 mod names;
@@ -44,7 +44,7 @@ pub use validate::{
     entity_reference_at, general_entity_references, validate_instance,
 };
 
-/// Entités prédéfinies, toujours disponibles.
+/// Predefined entities, always available.
 pub const PREDEFINED_ENTITIES: [(&str, &str); 5] = [
     ("amp", "&"),
     ("lt", "<"),
@@ -53,29 +53,29 @@ pub const PREDEFINED_ENTITIES: [(&str, &str); 5] = [
     ("apos", "'"),
 ];
 
-/// Taille maximale (octets) du développement complet d'une entité générale.
+/// Maximum size (bytes) of the full expansion of a general entity.
 pub const MAX_ENTITY_EXPANSION: usize = 1 << 20;
-/// Taille cumulée maximale (octets) des textes de remplacement d'entités
-/// paramètres développés pour une grammaire.
+/// Maximum cumulative size (bytes) of the parameter entity replacement
+/// texts expanded for a grammar.
 pub const MAX_PARAMETER_EXPANSION: usize = 4 << 20;
-/// Profondeur maximale d'imbrication des entités et sections
-/// conditionnelles.
+/// Maximum nesting depth of entities and conditional
+/// sections.
 pub const MAX_ENTITY_DEPTH: usize = 32;
-/// Nombre maximal de sources (fichiers, textes de remplacement) d'une
-/// grammaire.
+/// Maximum number of sources (files, replacement texts) of a
+/// grammar.
 pub const MAX_SOURCES: usize = 256;
 
 pub type SourceId = usize;
 
-/// Origine d'un texte analysé.
+/// Origin of a parsed text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceKind {
-    /// Document analysé directement : document d'instance (sous-ensemble
-    /// interne) ou fichier `.dtd` ouvert ; chemin s'il est local.
+    /// Directly parsed document: instance document (internal subset) or
+    /// open `.dtd` file; its path when local.
     Document(Option<PathBuf>),
-    /// Sous-ensemble externe ou entité paramètre externe lue sur disque.
+    /// External subset or external parameter entity read from disk.
     External(PathBuf),
-    /// Texte de remplacement d'une entité paramètre interne développée en
+    /// Replacement text of an internal parameter entity expanded at
     /// `reference`.
     Replacement { entity: String, reference: Location },
 }
@@ -84,12 +84,12 @@ pub enum SourceKind {
 pub struct DtdSource {
     pub kind: SourceKind,
     pub text: Arc<str>,
-    /// Référence qui a introduit la source (identifiant système du
-    /// sous-ensemble externe, `%nom;`), `None` pour un document.
+    /// Reference that introduced the source (system identifier of the
+    /// external subset, `%name;`), `None` for a document.
     pub reference: Option<Location>,
 }
 
-/// Étendue (octets UTF-8) dans une source de la grammaire.
+/// Range (UTF-8 bytes) in a source of the grammar.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Location {
     pub source: SourceId,
@@ -99,12 +99,12 @@ pub struct Location {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ElementDecl {
     pub name: String,
-    /// Nom dans la déclaration.
+    /// Name in the declaration.
     pub location: Location,
-    /// Déclaration entière (`<!ELEMENT ... >`).
+    /// Whole declaration (`<!ELEMENT ... >`).
     pub declaration: Location,
     pub content: ContentSpec,
-    /// Commentaire qui précède la déclaration.
+    /// Comment preceding the declaration.
     pub documentation: Option<String>,
 }
 
@@ -123,7 +123,7 @@ pub enum AttributeType {
 }
 
 impl AttributeType {
-    /// Valeurs permises d'une énumération ou d'un type `NOTATION`.
+    /// Allowed values of an enumeration or a `NOTATION` type.
     pub fn values(&self) -> Option<&[String]> {
         match self {
             AttributeType::Notation(values) | AttributeType::Enumeration(values) => Some(values),
@@ -155,14 +155,14 @@ impl fmt::Display for AttributeType {
 pub enum DefaultDecl {
     Required,
     Implied,
-    /// `#FIXED "valeur"` (valeur normalisée).
+    /// `#FIXED "value"` (normalized value).
     Fixed(String),
-    /// Valeur par défaut (normalisée).
+    /// Default value (normalized).
     Default(String),
 }
 
 impl DefaultDecl {
-    /// Valeur fixe ou par défaut.
+    /// Fixed or default value.
     pub fn value(&self) -> Option<&str> {
         match self {
             DefaultDecl::Fixed(value) | DefaultDecl::Default(value) => Some(value),
@@ -202,7 +202,7 @@ pub struct AttributeDecl {
 }
 
 impl AttributeDecl {
-    /// Définition au format `<!ATTLIST element nom TYPE DÉFAUT>`.
+    /// Definition in the `<!ATTLIST element name TYPE DEFAULT>` format.
     pub fn display(&self) -> String {
         format!(
             "<!ATTLIST {} {} {} {}>",
@@ -213,34 +213,34 @@ impl AttributeDecl {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EntityValue {
-    /// Texte de remplacement (références de caractères et d'entités
-    /// paramètres développées, références d'entités générales conservées).
+    /// Replacement text (character references and parameter entity
+    /// references expanded, general entity references kept).
     Internal(String),
     External {
         public: Option<String>,
         system: String,
-        /// Notation `NDATA` d'une entité non analysée.
+        /// `NDATA` notation of an unparsed entity.
         notation: Option<String>,
-        /// Chemin de la source déclarante, base des chemins relatifs.
+        /// Path of the declaring source, base of relative paths.
         base: Option<PathBuf>,
     },
 }
 
-/// Résultat du développement (calculé, jamais matérialisé) d'une entité
-/// générale.
+/// Result of the expansion (computed, never materialized) of a general
+/// entity.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EntityExpansion {
-    /// Taille du développement complet, en octets (saturée).
+    /// Size of the full expansion, in bytes (saturated).
     pub length: usize,
-    /// Le développement ne contient que des espaces blancs.
+    /// The expansion only contains whitespace.
     pub blank: bool,
-    /// Le développement contient du balisage (`<`).
+    /// The expansion contains markup (`<`).
     pub markup: bool,
-    /// L'entité, ou une entité qu'elle référence, est externe.
+    /// The entity, or an entity it references, is external.
     pub external: bool,
-    /// Entité non analysée (`NDATA`).
+    /// Unparsed entity (`NDATA`).
     pub unparsed: bool,
-    /// Développement impossible : récursion ou limite dépassée.
+    /// Expansion impossible: recursion or limit exceeded.
     pub error: Option<ExpansionError>,
 }
 
@@ -258,13 +258,13 @@ pub struct EntityDecl {
     pub declaration: Location,
     pub value: EntityValue,
     pub documentation: Option<String>,
-    /// Développement des entités générales (défaut pour les entités
-    /// paramètres).
+    /// Expansion of general entities (default for parameter
+    /// entities).
     pub expansion: EntityExpansion,
 }
 
 impl EntityDecl {
-    /// Déclaration au format `<!ENTITY ...>`.
+    /// Declaration in the `<!ENTITY ...>` format.
     pub fn display(&self) -> String {
         let percent = if self.parameter { "% " } else { "" };
         let value = match &self.value {
@@ -299,35 +299,35 @@ pub struct NotationDecl {
     pub documentation: Option<String>,
 }
 
-/// Problème de la grammaire elle-même.
+/// Problem of the grammar itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DtdProblemKind {
-    /// Erreur de syntaxe d'une déclaration.
+    /// Syntax error in a declaration.
     Syntax,
     DuplicateElement,
     DuplicateNotation,
-    /// Plus d'un attribut de type ID pour un élément.
+    /// More than one ID attribute for an element.
     MultipleIdAttributes,
-    /// Attribut ID avec une valeur par défaut ou fixe.
+    /// ID attribute with a default or fixed value.
     IdAttributeDefault,
-    /// Valeur par défaut hors énumération.
+    /// Default value outside the enumeration.
     InvalidDefaultValue,
     UndeclaredParameterEntity,
     UndeclaredNotation,
-    /// Entité qui se référence elle-même.
+    /// Entity referencing itself.
     EntityRecursion,
-    /// Limite de développement dépassée.
+    /// Expansion limit exceeded.
     EntityExpansionLimit,
-    /// Section conditionnelle dans le sous-ensemble interne.
+    /// Conditional section in the internal subset.
     ConditionalSection,
-    /// Ressource externe non chargée ; `remote` pour une URL distante.
+    /// External resource not loaded; `remote` for a remote URL.
     ExternalLoad {
         remote: bool,
     },
 }
 
 impl DtdProblemKind {
-    /// Identifiant stable, publié dans `data.kind`.
+    /// Stable identifier, published in `data.kind`.
     pub fn id(&self) -> &'static str {
         match self {
             DtdProblemKind::Syntax => "dtdSyntax",
@@ -353,12 +353,12 @@ pub struct DtdProblem {
     pub message: String,
 }
 
-/// Grammaire DTD : sources analysées, déclarations (la première déclaration
-/// d'une entité ou d'un attribut l'emporte, comme en XML) et problèmes.
+/// DTD grammar: parsed sources, declarations (the first declaration of an
+/// entity or attribute wins, as in XML) and problems.
 #[derive(Debug, Clone, Default)]
 pub struct Dtd {
     pub sources: Vec<DtdSource>,
-    /// Nom de l'élément racine annoncé par `<!DOCTYPE>`.
+    /// Name of the root element announced by `<!DOCTYPE>`.
     pub doctype_name: Option<String>,
     pub elements: Vec<ElementDecl>,
     pub attributes: Vec<AttributeDecl>,
@@ -366,8 +366,8 @@ pub struct Dtd {
     pub parameter_entities: Vec<EntityDecl>,
     pub notations: Vec<NotationDecl>,
     pub problems: Vec<DtdProblem>,
-    /// Des déclarations peuvent manquer (sous-ensemble externe ou entité
-    /// paramètre externe non lu).
+    /// Declarations may be missing (external subset or external parameter
+    /// entity not read).
     pub incomplete: bool,
     element_index: HashMap<String, usize>,
     attribute_index: HashMap<String, Vec<usize>>,
@@ -383,7 +383,7 @@ impl Dtd {
             .map(|&index| &self.elements[index])
     }
 
-    /// Attributs déclarés pour `element`, dans l'ordre des déclarations.
+    /// Attributes declared for `element`, in declaration order.
     pub fn attributes_of<'a>(&'a self, element: &str) -> impl Iterator<Item = &'a AttributeDecl> {
         self.attribute_index
             .get(element)
@@ -415,9 +415,9 @@ impl Dtd {
             .map(|&index| &self.notations[index])
     }
 
-    /// La grammaire déclare au moins un élément : la validation structurelle
-    /// du document s'applique (une DTD qui ne déclare que des entités sert
-    /// seulement à les définir).
+    /// The grammar declares at least one element: structural validation of
+    /// the document applies (a DTD declaring only entities only serves to
+    /// define them).
     pub fn declares_elements(&self) -> bool {
         !self.elements.is_empty()
     }
@@ -428,7 +428,7 @@ impl Dtd {
             .map_or("", |source| source.text.as_ref())
     }
 
-    /// Chemin local de la source (document ou fichier externe).
+    /// Local path of the source (document or external file).
     pub fn source_path(&self, source: SourceId) -> Option<&Path> {
         match &self.sources.get(source)?.kind {
             SourceKind::Document(path) => path.as_deref(),
@@ -437,8 +437,8 @@ impl Dtd {
         }
     }
 
-    /// Ramène `location` dans un texte réel : une étendue d'un texte de
-    /// remplacement d'entité paramètre devient la référence `%nom;`.
+    /// Maps `location` back into a real text: a range of a parameter entity
+    /// replacement text becomes the `%name;` reference.
     pub fn anchor(&self, location: &Location) -> Location {
         let mut location = location.clone();
         for _ in 0..=MAX_SOURCES {
@@ -450,9 +450,9 @@ impl Dtd {
         location
     }
 
-    /// Ramène `location` dans la source `root` en remontant les références
-    /// qui ont introduit chaque source (textes de remplacement, fichiers
-    /// externes) ; `None` si la source ne descend pas de `root`.
+    /// Maps `location` back into the source `root` by walking up the
+    /// references that introduced each source (replacement texts, external
+    /// files); `None` if the source does not descend from `root`.
     pub fn origin_in(&self, location: &Location, root: SourceId) -> Option<Location> {
         let mut location = location.clone();
         for _ in 0..=self.sources.len() {
@@ -464,9 +464,9 @@ impl Dtd {
         None
     }
 
-    /// Enfants permis dans `parent` (`None` : élément racine) après les
-    /// enfants `preceding`, pour la complétion. Si `preceding` ne respecte
-    /// déjà pas le modèle, tous les noms du modèle sont proposés.
+    /// Children allowed in `parent` (`None`: root element) after the
+    /// `preceding` children, for completion. If `preceding` already breaks
+    /// the model, all names of the model are proposed.
     pub fn allowed_children(&self, parent: Option<&str>, preceding: &[&str]) -> Vec<String> {
         let all = || {
             let mut names = self
@@ -502,12 +502,12 @@ impl Dtd {
         }
     }
 
-    /// Normalise une valeur d'attribut (XML 1.0 §3.3.3) : références de
-    /// caractères et d'entités internes développées (bornées), blancs
-    /// remplacés par des espaces ; pour un type autre que CDATA, espaces de
-    /// bord supprimés et suites d'espaces réduites. `None` si la valeur
-    /// référence une entité externe, non analysée, inconnue, trop grande ou
-    /// contenant `<`.
+    /// Normalizes an attribute value (XML 1.0 §3.3.3): character and
+    /// internal entity references expanded (bounded), whitespace replaced
+    /// by spaces; for a type other than CDATA, leading and trailing spaces
+    /// removed and runs of spaces collapsed. `None` if the value references
+    /// an external, unparsed, unknown or too large entity, or one
+    /// containing `<`.
     pub fn normalize_attribute_value(&self, raw: &str, cdata: bool) -> Option<String> {
         let mut value = String::new();
         let mut budget = MAX_ENTITY_EXPANSION;
@@ -539,7 +539,7 @@ impl Dtd {
             value.push_str(&rest[..position]);
             let tail = &rest[position..];
             if !tail.starts_with('&') {
-                // `\r\n` est un seul saut de ligne.
+                // `\r\n` is a single line break.
                 let skip = if tail.starts_with("\r\n") { 2 } else { 1 };
                 value.push(' ');
                 rest = &tail[skip..];
@@ -610,7 +610,7 @@ mod tests {
             dtd.allowed_children(Some("book"), &["title", "chapter"]),
             vec!["appendix", "chapter"]
         );
-        // Contenu déjà invalide : tous les noms du modèle.
+        // Content already invalid: all names of the model.
         assert_eq!(
             dtd.allowed_children(Some("book"), &["chapter"]),
             vec!["title", "chapter", "appendix"]

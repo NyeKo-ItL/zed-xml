@@ -1,10 +1,10 @@
 # XML fixtures
 
-Fixtures communes aux tests du parser et du serveur LSP.
+Fixtures shared by the parser and LSP server tests.
 
-- `valid.xml` : document valide avec déclaration et attribut.
-- `malformed.xml` : balises mal fermées et non fermées.
-- `namespaces.xml` : noms qualifiés et namespace XML.
-- `cdata.xml` : contenu CDATA.
-- `mixed-content.xml` : contenu texte et éléments imbriqués.
-- `schema-location.xml` : association avec un XSD relatif.
+- `valid.xml`: valid document with a declaration and an attribute.
+- `malformed.xml`: badly closed and unclosed tags.
+- `namespaces.xml`: qualified names and the XML namespace.
+- `cdata.xml`: CDATA content.
+- `mixed-content.xml`: text content and nested elements.
+- `schema-location.xml`: association with a relative XSD.

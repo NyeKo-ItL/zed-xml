@@ -1,27 +1,27 @@
-//! Différence minimale entre deux textes, pour transformer un résultat de
-//! formatage en modifications ciblées (les curseurs de l'éditeur restent
-//! stables hors des lignes modifiées).
+//! Minimal difference between two texts, to turn a formatting result into
+//! targeted edits (editor cursors stay stable outside the modified
+//! lines).
 
 use std::ops::Range;
 
-/// Remplacement de `old[range]` (offsets UTF-8) par `text`.
+/// Replacement of `old[range]` (UTF-8 offsets) with `text`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextChange {
     pub range: Range<usize>,
     pub text: String,
 }
 
-/// Distance d'édition (en lignes) au-delà de laquelle l'algorithme de Myers
-/// est abandonné au profit d'un seul remplacement.
+/// Edit distance (in lines) beyond which the Myers algorithm is abandoned in
+/// favour of a single replacement.
 const MAX_EDIT_DISTANCE: usize = 1024;
 
-/// Calcule les remplacements, triés et disjoints, qui transforment `old` en
+/// Computes the sorted, disjoint replacements that turn `old` into
 /// `new`.
 ///
-/// La comparaison se fait ligne à ligne (algorithme de Myers), puis chaque
-/// bloc modifié est réduit à la partie qui diffère réellement. Au-delà de
-/// [`MAX_EDIT_DISTANCE`] lignes modifiées, un seul remplacement couvre la
-/// zone comprise entre le préfixe et le suffixe communs.
+/// The comparison is done line by line (Myers algorithm), then each changed
+/// block is reduced to the part that actually differs. Beyond
+/// [`MAX_EDIT_DISTANCE`] changed lines, a single replacement covers the
+/// region between the common prefix and suffix.
 pub fn diff_text(old: &str, new: &str) -> Vec<TextChange> {
     if old == new {
         return Vec::new();
@@ -66,7 +66,7 @@ pub fn diff_text(old: &str, new: &str) -> Vec<TextChange> {
     changes
 }
 
-/// Début de chaque ligne, suivi de la longueur du texte.
+/// Start of each line, followed by the length of the text.
 fn line_starts(text: &str) -> Vec<usize> {
     let mut starts = vec![0];
     starts.extend(text.match_indices('\n').map(|(index, _)| index + 1));
@@ -76,7 +76,7 @@ fn line_starts(text: &str) -> Vec<usize> {
     starts
 }
 
-/// Lignes (fin de ligne comprise) délimitées par `starts`.
+/// Lines (line ending included) delimited by `starts`.
 fn lines<'a>(text: &'a str, starts: &[usize]) -> Vec<&'a str> {
     starts
         .windows(2)
@@ -84,7 +84,7 @@ fn lines<'a>(text: &'a str, starts: &[usize]) -> Vec<&'a str> {
         .collect()
 }
 
-/// Réduit un remplacement à la partie qui diffère.
+/// Reduces a replacement to the part that differs.
 fn refine(old: &str, range: Range<usize>, text: &str) -> TextChange {
     let replaced = &old[range.clone()];
     let mut prefix = replaced
@@ -112,8 +112,8 @@ fn refine(old: &str, range: Range<usize>, text: &str) -> TextChange {
     }
 }
 
-/// Paires de lignes identiques d'une plus courte suite d'éditions (Myers),
-/// ou `None` si la distance dépasse [`MAX_EDIT_DISTANCE`].
+/// Pairs of identical lines of a shortest edit script (Myers), or `None` if
+/// the distance exceeds [`MAX_EDIT_DISTANCE`].
 fn myers(old: &[&str], new: &[&str]) -> Option<Vec<(usize, usize)>> {
     let (n, m) = (old.len() as isize, new.len() as isize);
     if n == 0 || m == 0 {
@@ -122,7 +122,7 @@ fn myers(old: &[&str], new: &[&str]) -> Option<Vec<(usize, usize)>> {
     let limit = (old.len() + new.len()).min(MAX_EDIT_DISTANCE) as isize;
     let offset = limit + 1;
     let mut v = vec![0isize; 2 * limit as usize + 3];
-    // trace[d] : valeurs de v pour k dans -d..=d après l'étape d.
+    // trace[d]: values of v for k in -d..=d after step d.
     let mut trace: Vec<Vec<isize>> = Vec::new();
     for d in 0..=limit {
         for k in (-d..=d).step_by(2) {

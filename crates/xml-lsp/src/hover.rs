@@ -1,25 +1,25 @@
-//! `textDocument/hover` : documentation XSD au survol, comme LemMinX.
+//! `textDocument/hover`: XSD documentation on hover, like LemMinX.
 //!
-//! Dans un document d'instance lié à un schéma (`xsi:schemaLocation`,
-//! `xsi:noNamespaceSchemaLocation`) :
+//! In an instance document bound to a schema (`xsi:schemaLocation`,
+//! `xsi:noNamespaceSchemaLocation`):
 //!
-//! - nom d'élément (balise ouvrante ou fermante) : déclaration résolue dans
-//!   son contexte (déclarations locales du modèle de contenu du parent,
-//!   références, groupes, extensions, groupes de substitution, `xsi:type`),
-//!   espace de noms, type et type de base, cardinalité, valeurs par défaut ou
-//!   fixe, documentation `xs:documentation` et lien vers le schéma source ;
-//! - nom d'attribut : déclaration, type, utilisation (`use`), valeur par
-//!   défaut ou fixe et documentation ;
-//! - valeur d'attribut ou contenu texte d'un élément de type simple :
-//!   documentation de la valeur d'énumération et résumé des facettes.
+//! - element name (start or end tag): declaration resolved in its context
+//!   (local declarations of the parent's content model, references,
+//!   groups, extensions, substitution groups, `xsi:type`), namespace, type
+//!   and base type, cardinality, default or fixed values, `xs:documentation`
+//!   documentation and a link to the source schema;
+//! - attribute name: declaration, type, usage (`use`), default or fixed
+//!   value and documentation;
+//! - attribute value or text content of a simple-typed element:
+//!   documentation of the enumeration value and a summary of the facets.
 //!
-//! Dans un schéma XSD, une référence `type`, `ref`, `base`, `itemType`,
-//! `memberTypes` ou `substitutionGroup` (ou le `name` d'un composant global)
-//! affiche la documentation du composant référencé, y compris dans les
-//! schémas inclus ou importés.
+//! In an XSD schema, a `type`, `ref`, `base`, `itemType`, `memberTypes` or
+//! `substitutionGroup` reference (or the `name` of a global component)
+//! shows the documentation of the referenced component, including in
+//! included or imported schemas.
 //!
-//! Sans schéma, un survol minimal (nom et espace de noms) est conservé. Le
-//! contenu est du Markdown et la réponse porte l'étendue survolée.
+//! Without a schema, a minimal hover (name and namespace) is kept. The
+//! content is Markdown and the response carries the hovered range.
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -48,36 +48,36 @@ use crate::{
 };
 
 const XSI_NAMESPACE: &str = "http://www.w3.org/2001/XMLSchema-instance";
-/// Nombre maximal de valeurs d'énumération listées.
+/// Maximum number of listed enumeration values.
 const MAX_LISTED_VALUES: usize = 20;
-/// Longueur maximale d'une valeur recopiée dans le titre.
+/// Maximum length of a value copied into the title.
 const MAX_VALUE_CHARS: usize = 80;
 
-/// Modèles XSD lus sur disque, invalidés par date de modification, avec les
-/// dépendances (`xs:include`, `xs:import`) de chaque schéma.
+/// XSD models read from disk, invalidated by modification time, with the
+/// dependencies (`xs:include`, `xs:import`) of each schema.
 pub type ModelCache = HashMap<PathBuf, (SystemTime, Arc<XsdModel>, Vec<PathBuf>)>;
 
-/// Schémas chargés pour une requête : `paths[i]` est la source de
+/// Schemas loaded for a request: `paths[i]` is the source of
 /// `set.models()[i]`.
 pub(crate) struct LoadedModels {
     pub(crate) paths: Vec<PathBuf>,
     pub(crate) set: XsdModelSet,
 }
 
-/// Contexte partagé par les requêtes de survol.
+/// Context shared by hover requests.
 pub struct HoverContext<'a> {
-    /// Documents ouverts (URI -> contenu), prioritaires sur le disque.
+    /// Open documents (URI -> content), taking precedence over the disk.
     pub documents: &'a HashMap<String, String>,
     pub cache: &'a mut ModelCache,
-    /// Schémas associés au document de la requête par
-    /// `xml.fileAssociations`, utilisés lorsqu'il n'en déclare aucun.
+    /// Schemas associated with the request's document by
+    /// `xml.fileAssociations`, used when it declares none.
     pub associated_schemas: Vec<PathBuf>,
-    /// Catalogues XML (`xml.catalogs`) consultés pour résoudre les
-    /// emplacements de schémas.
+    /// XML catalogs (`xml.catalogs`) consulted to resolve schema
+    /// locations.
     pub catalogs: &'a Catalogs,
 }
 
-/// Répond à `textDocument/hover` pour le document `uri` au curseur `offset`.
+/// Answers `textDocument/hover` for the document `uri` at the cursor `offset`.
 pub fn hover(
     context: &mut HoverContext<'_>,
     uri: &str,
@@ -102,16 +102,16 @@ pub fn hover(
     }))
 }
 
-/// Construction survolée.
+/// Hovered construct.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Target {
-    /// Nom d'une balise ouvrante ou fermante de l'élément.
+    /// Name of a start or end tag of the element.
     ElementName { element: usize, name: Range<usize> },
-    /// Nom de l'attribut `attribute` de l'élément.
+    /// Name of the attribute `attribute` of the element.
     AttributeName { element: usize, attribute: usize },
-    /// Valeur de l'attribut `attribute` de l'élément.
+    /// Value of the attribute `attribute` of the element.
     AttributeValue { element: usize, attribute: usize },
-    /// Contenu texte (espaces de bord exclus) de l'élément.
+    /// Text content (surrounding whitespace excluded) of the element.
     Text { element: usize, range: Range<usize> },
 }
 
@@ -184,7 +184,7 @@ impl<'a> Document<'a> {
         if offset < content.start || offset > content.end {
             return None;
         }
-        // Segment de texte entre les enfants qui entourent le curseur.
+        // Text segment between the children surrounding the cursor.
         let mut segment = content.clone();
         for child in elements
             .iter()
@@ -216,7 +216,7 @@ impl<'a> Document<'a> {
         resolve_namespace(self.source, &self.tree, &self.attributes, element, prefix).flatten()
     }
 
-    /// Espace de noms et nom local d'un nom qualifié lu dans `element`.
+    /// Namespace and local name of a qualified name read in `element`.
     pub(crate) fn split(&self, element: usize, name: &'a str) -> (Option<&'a str>, &'a str) {
         match name.split_once(':') {
             Some((prefix, local)) => (self.namespace(element, Some(prefix)), local),
@@ -228,7 +228,7 @@ impl<'a> Document<'a> {
         &self.attributes[element][attribute]
     }
 
-    /// Attribut non préfixé `name` de l'élément.
+    /// Unprefixed attribute `name` of the element.
     fn attribute_value(&self, element: usize, name: &str) -> Option<&'a str> {
         self.attributes[element]
             .iter()
@@ -249,7 +249,7 @@ impl<'a> Document<'a> {
             .is_some_and(|root| self.is_xsd(root, "schema"))
     }
 
-    /// Chemin de l'élément dans l'instance, racine en premier.
+    /// Path of the element in the instance, root first.
     pub(crate) fn instance_path(&self, element: usize) -> Vec<XsdInstanceStep> {
         let mut indices = self.tree.ancestors(element).collect::<Vec<_>>();
         indices.reverse();
@@ -267,9 +267,9 @@ impl<'a> Document<'a> {
             .collect()
     }
 
-    /// Schémas référencés par `xsi:schemaLocation` et
-    /// `xsi:noNamespaceSchemaLocation`, lus de façon tolérante (document mal
-    /// formé en cours de saisie), résolus via les catalogues.
+    /// Schemas referenced by `xsi:schemaLocation` and
+    /// `xsi:noNamespaceSchemaLocation`, read tolerantly (malformed document
+    /// being typed), resolved through the catalogs.
     fn schema_locations(&self, document_path: &Path, catalogs: &Catalogs) -> Vec<PathBuf> {
         let base = document_path.parent().unwrap_or_else(|| Path::new(""));
         let mut paths = Vec::new();
@@ -331,7 +331,7 @@ impl<'a> Document<'a> {
 }
 
 // ---------------------------------------------------------------------------
-// Chargement des schémas
+// Schema loading
 // ---------------------------------------------------------------------------
 
 fn open_document<'d>(documents: &'d HashMap<String, String>, path: &Path) -> Option<&'d String> {
@@ -352,8 +352,8 @@ fn dependency_paths(source: &str, path: &Path, catalogs: &Catalogs) -> Vec<PathB
         .unwrap_or_default()
 }
 
-/// Charge les schémas `roots` et leurs dépendances, en largeur d'abord pour
-/// que les schémas référencés directement soient prioritaires.
+/// Loads the schemas `roots` and their dependencies, breadth first so that
+/// directly referenced schemas take precedence.
 pub(crate) fn load_models(
     context: &mut HoverContext<'_>,
     loaded: Vec<(PathBuf, Arc<XsdModel>)>,
@@ -406,11 +406,11 @@ pub(crate) fn load_models(
 }
 
 // ---------------------------------------------------------------------------
-// Documents d'instance
+// Instance documents
 // ---------------------------------------------------------------------------
 
-/// Schémas d'un document d'instance (`xsi:schemaLocation`,
-/// `xsi:noNamespaceSchemaLocation`) et leurs dépendances.
+/// Schemas of an instance document (`xsi:schemaLocation`,
+/// `xsi:noNamespaceSchemaLocation`) and their dependencies.
 pub(crate) fn instance_models(
     context: &mut HoverContext<'_>,
     uri: &str,
@@ -426,7 +426,7 @@ pub(crate) fn instance_models(
             .into_iter()
             .map(|reference| reference.path)
             .collect(),
-        // Document en cours de saisie : lecture tolérante des attributs xsi.
+        // Document being typed: tolerant reading of the xsi attributes.
         Err(_) => document.schema_locations(&uri_to_path(uri), catalogs),
     };
     let roots = if roots.is_empty() {
@@ -449,7 +449,7 @@ fn instance_hover(
         Target::ElementName { element, name } => {
             let path = document.instance_path(*element);
             let title = format!(
-                "**Élément** {}",
+                "**Element** {}",
                 code(&format!("<{}>", &source[name.clone()]))
             );
             let markdown = match models.set.resolve_element_path(&path) {
@@ -473,17 +473,17 @@ fn instance_hover(
             if name == "xmlns" || name.starts_with("xmlns:") {
                 let value = attribute.value(source).unwrap_or_default();
                 let markdown = format!(
-                    "**Déclaration d'espace de noms** {}\n\n{}",
+                    "**Namespace declaration** {}\n\n{}",
                     code(name),
                     if value.is_empty() {
-                        "Aucun espace de noms".to_owned()
+                        "No namespace".to_owned()
                     } else {
                         code(value)
                     }
                 );
                 return Some((markdown, attribute.name.clone()));
             }
-            let title = format!("**Attribut** {}", code(name));
+            let title = format!("**Attribute** {}", code(name));
             let markdown = match resolve_instance_attribute(&models.set, document, *element, name) {
                 Some(resolved) => render_attribute(&models, &title, resolved.0, resolved.1),
                 None => {
@@ -527,7 +527,7 @@ pub(crate) fn attribute_namespace<'a>(
 ) -> (Option<&'a str>, &'a str) {
     match name.split_once(':') {
         Some((prefix, local)) => (document.namespace(element, Some(prefix)), local),
-        // Un attribut non préfixé n'appartient à aucun espace de noms.
+        // An unprefixed attribute belongs to no namespace.
         None => (None, name),
     }
 }
@@ -547,16 +547,16 @@ fn resolve_instance_attribute<'m>(
 fn fallback_element(title: &str, namespace: Option<&str>) -> String {
     let mut markdown = title.to_owned();
     if let Some(namespace) = namespace {
-        markdown.push_str(&format!("\n\nEspace de noms : {}", code(namespace)));
+        markdown.push_str(&format!("\n\nNamespace: {}", code(namespace)));
     }
     markdown
 }
 
 // ---------------------------------------------------------------------------
-// Documents XSD
+// XSD documents
 // ---------------------------------------------------------------------------
 
-/// Espace de symboles d'une référence XSD.
+/// Symbol space of an XSD reference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ComponentKind {
     Element,
@@ -622,7 +622,7 @@ fn schema_hover(
 
     if kind == ComponentKind::Type && namespace == Some(XSD_NAMESPACE) {
         let markdown = format!(
-            "**Type prédéfini** {}\n\nType prédéfini de XML Schema ({}).",
+            "**Built-in type** {}\n\nXML Schema built-in type ({}).",
             code(token),
             code(XSD_NAMESPACE)
         );
@@ -640,7 +640,7 @@ fn schema_hover(
             let declaration = set.global_element(namespace, local)?;
             render_element(
                 &models,
-                &title("Élément"),
+                &title("Element"),
                 declaration,
                 declaration,
                 set.element_type(declaration),
@@ -648,14 +648,14 @@ fn schema_hover(
         }
         ComponentKind::Attribute => {
             let declaration = set.global_attribute(namespace, local)?;
-            render_attribute(&models, &title("Attribut"), declaration, declaration)
+            render_attribute(&models, &title("Attribute"), declaration, declaration)
         }
         ComponentKind::Type => {
             let found = set.global_type(namespace, local)?;
             let label = if found.item.complex {
-                "Type complexe"
+                "Complex type"
             } else {
-                "Type simple"
+                "Simple type"
             };
             render_type(&models, &title(label), found)
         }
@@ -663,7 +663,7 @@ fn schema_hover(
             let found = set.group(namespace, local)?;
             render_component(
                 &models,
-                &title("Groupe"),
+                &title("Group"),
                 found.item.namespace.as_deref(),
                 found.item.documentation.as_deref(),
                 found.schema,
@@ -673,7 +673,7 @@ fn schema_hover(
             let found = set.attribute_group(namespace, local)?;
             render_component(
                 &models,
-                &title("Groupe d'attributs"),
+                &title("Attribute group"),
                 found.item.namespace.as_deref(),
                 found.item.documentation.as_deref(),
                 found.schema,
@@ -683,8 +683,8 @@ fn schema_hover(
     Some((markdown, range))
 }
 
-/// Jeton (nom qualifié) contenant `offset` dans une valeur d'attribut
-/// éventuellement composée de plusieurs noms séparés par des espaces.
+/// Token (qualified name) containing `offset` in an attribute value possibly
+/// made of several space-separated names.
 fn token_at(source: &str, value: Range<usize>, offset: usize) -> Option<Range<usize>> {
     let text = &source[value.clone()];
     let mut start = None;
@@ -707,10 +707,10 @@ fn token_at(source: &str, value: Range<usize>, offset: usize) -> Option<Range<us
 }
 
 // ---------------------------------------------------------------------------
-// Rendu Markdown
+// Markdown rendering
 // ---------------------------------------------------------------------------
 
-/// Échappe le texte libre (documentation) pour le Markdown.
+/// Escapes free text (documentation) for Markdown.
 fn escape_markdown(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());
     for character in text.chars() {
@@ -725,7 +725,7 @@ fn escape_markdown(text: &str) -> String {
     escaped
 }
 
-/// Span de code Markdown, robuste aux accents graves.
+/// Markdown code span, robust to backticks.
 fn code(text: &str) -> String {
     if text.contains('`') {
         format!("`` {text} ``")
@@ -741,13 +741,13 @@ fn source_line(models: &LoadedModels, schema: usize) -> Option<String> {
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.to_string_lossy().into_owned());
     Some(format!(
-        "Source : [{}]({})",
+        "Source: [{}]({})",
         escape_markdown(&name),
         path_to_uri(path)
     ))
 }
 
-/// Assemble titre, propriétés, documentation et source.
+/// Assembles title, properties, documentation and source.
 fn assemble(
     title: &str,
     properties: &[String],
@@ -771,7 +771,7 @@ fn assemble(
     sections.join("\n\n")
 }
 
-/// Description d'un type : nom (ou « anonyme ») et dérivation.
+/// Description of a type: name (or "anonymous") and derivation.
 fn describe_type(reference: XsdTypeRef<'_>) -> String {
     let name = reference
         .name
@@ -783,13 +783,13 @@ fn describe_type(reference: XsdTypeRef<'_>) -> String {
                 .map(code)
         });
     let Some(definition) = reference.definition else {
-        return name.unwrap_or_else(|| "inconnu".to_owned());
+        return name.unwrap_or_else(|| "unknown".to_owned());
     };
     let name = name.unwrap_or_else(|| {
         if definition.complex {
-            "complexe anonyme".to_owned()
+            "anonymous complex".to_owned()
         } else {
-            "simple anonyme".to_owned()
+            "anonymous simple".to_owned()
         }
     });
     match derivation(definition) {
@@ -804,21 +804,21 @@ fn derivation(definition: &xsd_core::model::XsdTypeDef) -> Option<String> {
             .base
             .as_ref()
             .map(|base| code(&base.display()))
-            .unwrap_or_else(|| "type anonyme".to_owned())
+            .unwrap_or_else(|| "anonymous type".to_owned())
     };
     Some(match definition.derivation? {
-        XsdDerivation::Restriction => format!("restriction de {}", base()),
-        XsdDerivation::Extension => format!("extension de {}", base()),
+        XsdDerivation::Restriction => format!("restriction of {}", base()),
+        XsdDerivation::Extension => format!("extension of {}", base()),
         XsdDerivation::List => format!(
-            "liste de {}",
+            "list of {}",
             definition
                 .item_type
                 .as_ref()
                 .map(|item| code(&item.display()))
-                .unwrap_or_else(|| "type anonyme".to_owned())
+                .unwrap_or_else(|| "anonymous type".to_owned())
         ),
         XsdDerivation::Union => format!(
-            "union de {}",
+            "union of {}",
             definition
                 .member_types
                 .iter()
@@ -827,7 +827,7 @@ fn derivation(definition: &xsd_core::model::XsdTypeDef) -> Option<String> {
                     definition
                         .inline_types
                         .iter()
-                        .map(|_| "type anonyme".to_owned())
+                        .map(|_| "anonymous type".to_owned())
                 )
                 .collect::<Vec<_>>()
                 .join(", ")
@@ -845,10 +845,10 @@ fn render_element(
     let item = declaration.item;
     let mut properties = Vec::new();
     if let Some(namespace) = &item.namespace {
-        properties.push(format!("Espace de noms : {}", code(namespace)));
+        properties.push(format!("Namespace: {}", code(namespace)));
     }
     if let Some(element_type) = element_type {
-        properties.push(format!("Type : {}", describe_type(element_type)));
+        properties.push(format!("Type: {}", describe_type(element_type)));
     }
     if !particle.item.global {
         let max = particle
@@ -856,19 +856,19 @@ fn render_element(
             .max_occurs
             .map_or_else(|| "*".to_owned(), |max| max.to_string());
         properties.push(format!(
-            "Cardinalité : {}",
+            "Cardinality: {}",
             code(&format!("{}..{max}", particle.item.min_occurs))
         ));
     }
     if let Some(default) = &item.default {
-        properties.push(format!("Valeur par défaut : {}", code(default)));
+        properties.push(format!("Default value: {}", code(default)));
     }
     if let Some(fixed) = &item.fixed {
-        properties.push(format!("Valeur fixe : {}", code(fixed)));
+        properties.push(format!("Fixed value: {}", code(fixed)));
     }
     if !item.substitution_groups.is_empty() {
         properties.push(format!(
-            "Groupe de substitution : {}",
+            "Substitution group: {}",
             item.substitution_groups
                 .iter()
                 .map(|head| code(&head.display()))
@@ -877,10 +877,10 @@ fn render_element(
         ));
     }
     if item.is_abstract {
-        properties.push("Abstrait".to_owned());
+        properties.push("Abstract".to_owned());
     }
     if item.nillable {
-        properties.push("Accepte `xsi:nil`".to_owned());
+        properties.push("Accepts `xsi:nil`".to_owned());
     }
     let documentation = particle
         .item
@@ -910,26 +910,26 @@ fn render_attribute(
     let attribute_type = models.set.attribute_type(declaration);
     let mut properties = Vec::new();
     if let Some(namespace) = &item.namespace {
-        properties.push(format!("Espace de noms : {}", code(namespace)));
+        properties.push(format!("Namespace: {}", code(namespace)));
     }
     if let Some(attribute_type) = attribute_type {
-        properties.push(format!("Type : {}", describe_type(attribute_type)));
+        properties.push(format!("Type: {}", describe_type(attribute_type)));
     }
     if !usage.item.global || usage.item.reference.is_some() {
         properties.push(format!(
-            "Utilisation : {}",
+            "Use: {}",
             match usage.item.usage {
-                XsdUse::Required => "obligatoire",
-                XsdUse::Optional => "facultative",
-                XsdUse::Prohibited => "interdite",
+                XsdUse::Required => "required",
+                XsdUse::Optional => "optional",
+                XsdUse::Prohibited => "prohibited",
             }
         ));
     }
     if let Some(default) = usage.item.default.as_ref().or(item.default.as_ref()) {
-        properties.push(format!("Valeur par défaut : {}", code(default)));
+        properties.push(format!("Default value: {}", code(default)));
     }
     if let Some(fixed) = usage.item.fixed.as_ref().or(item.fixed.as_ref()) {
-        properties.push(format!("Valeur fixe : {}", code(fixed)));
+        properties.push(format!("Fixed value: {}", code(fixed)));
     }
     if let Some(attribute_type) = attribute_type {
         properties.extend(facet_lines(models, attribute_type));
@@ -964,13 +964,13 @@ fn render_type(
     };
     let mut properties = Vec::new();
     if let Some(namespace) = &found.item.namespace {
-        properties.push(format!("Espace de noms : {}", code(namespace)));
+        properties.push(format!("Namespace: {}", code(namespace)));
     }
     if let Some(derivation) = derivation(found.item) {
-        properties.push(format!("Dérivation : {derivation}"));
+        properties.push(format!("Derivation: {derivation}"));
     }
     if found.item.mixed {
-        properties.push("Contenu mixte".to_owned());
+        properties.push("Mixed content".to_owned());
     }
     properties.extend(facet_lines(models, reference));
     assemble(
@@ -989,7 +989,7 @@ fn render_component(
     schema: usize,
 ) -> String {
     let properties = namespace
-        .map(|namespace| vec![format!("Espace de noms : {}", code(namespace))])
+        .map(|namespace| vec![format!("Namespace: {}", code(namespace))])
         .unwrap_or_default();
     assemble(
         title,
@@ -999,7 +999,7 @@ fn render_component(
     )
 }
 
-/// Résumé des facettes d'un type simple (ou à contenu simple).
+/// Summary of the facets of a simple type (or a type with simple content).
 fn facet_lines(models: &LoadedModels, reference: XsdTypeRef<'_>) -> Vec<String> {
     if reference
         .definition
@@ -1018,36 +1018,36 @@ fn facet_lines(models: &LoadedModels, reference: XsdTypeRef<'_>) -> Vec<String> 
             .map(|enumeration| code(&enumeration.value))
             .collect::<Vec<_>>();
         if facets.enumerations.len() > MAX_LISTED_VALUES {
-            values.push(format!("… ({} valeurs)", facets.enumerations.len()));
+            values.push(format!("… ({} values)", facets.enumerations.len()));
         }
-        lines.push(format!("Valeurs autorisées : {}", values.join(", ")));
+        lines.push(format!("Allowed values: {}", values.join(", ")));
     }
     for pattern in &facets.patterns {
-        lines.push(format!("Motif : {}", code(pattern)));
+        lines.push(format!("Pattern: {}", code(pattern)));
     }
     let bounds = [
-        ("Longueur", &facets.length),
-        ("Longueur minimale", &facets.min_length),
-        ("Longueur maximale", &facets.max_length),
-        ("Minimum (inclus)", &facets.min_inclusive),
-        ("Minimum (exclu)", &facets.min_exclusive),
-        ("Maximum (inclus)", &facets.max_inclusive),
-        ("Maximum (exclu)", &facets.max_exclusive),
-        ("Nombre total de chiffres", &facets.total_digits),
-        ("Chiffres après la virgule", &facets.fraction_digits),
-        ("Espaces", &facets.white_space),
+        ("Length", &facets.length),
+        ("Minimum length", &facets.min_length),
+        ("Maximum length", &facets.max_length),
+        ("Minimum (inclusive)", &facets.min_inclusive),
+        ("Minimum (exclusive)", &facets.min_exclusive),
+        ("Maximum (inclusive)", &facets.max_inclusive),
+        ("Maximum (exclusive)", &facets.max_exclusive),
+        ("Total digits", &facets.total_digits),
+        ("Fraction digits", &facets.fraction_digits),
+        ("Whitespace", &facets.white_space),
     ];
     for (label, value) in bounds {
         if let Some(value) = value {
-            lines.push(format!("{label} : {}", code(value)));
+            lines.push(format!("{label}: {}", code(value)));
         }
     }
     if let Some(item_type) = &info.item_type {
-        lines.push(format!("Liste de {}", code(item_type)));
+        lines.push(format!("List of {}", code(item_type)));
     }
     if !info.member_types.is_empty() {
         lines.push(format!(
-            "Union de {}",
+            "Union of {}",
             info.member_types
                 .iter()
                 .map(|member| code(member))
@@ -1059,7 +1059,7 @@ fn facet_lines(models: &LoadedModels, reference: XsdTypeRef<'_>) -> Vec<String> 
     if let Some(builtin) = &info.builtin
         && displayed.as_deref() != Some(builtin.display().as_str())
     {
-        lines.push(format!("Type prédéfini : {}", code(&builtin.display())));
+        lines.push(format!("Built-in type: {}", code(&builtin.display())));
     }
     lines
 }
@@ -1077,8 +1077,8 @@ fn render_value(models: &LoadedModels, value: &str, value_type: XsdTypeRef<'_>) 
     } else {
         trimmed.to_owned()
     };
-    let title = format!("**Valeur** {}", code(&shown));
-    let mut properties = vec![format!("Type : {}", describe_type(value_type))];
+    let title = format!("**Value** {}", code(&shown));
+    let mut properties = vec![format!("Type: {}", describe_type(value_type))];
     properties.extend(facet_lines(models, value_type));
     let documentation = models
         .set
@@ -1214,27 +1214,27 @@ mod tests {
         assert_eq!(
             hover["contents"]["value"],
             format!(
-                "**Élément** `<l:library>`\n\n- Espace de noms : `urn:lib`\n- Type : complexe anonyme\n\nA library of \\*books\\*.\n\nSource : [main.xsd]({main_uri})"
+                "**Element** `<l:library>`\n\n- Namespace: `urn:lib`\n- Type: anonymous complex\n\nA library of \\*books\\*.\n\nSource: [main.xsd]({main_uri})"
             )
         );
 
-        // Déclaration locale de <library>, pas la déclaration globale homonyme.
+        // Local declaration of <library>, not the homonymous global declaration.
         let local = fixture.markdown(&uri, at(INSTANCE, "l:title", 0));
-        assert!(local.contains("- Type : `xs:string`"), "{local}");
-        assert!(local.contains("- Cardinalité : `1..1`"), "{local}");
+        assert!(local.contains("- Type: `xs:string`"), "{local}");
+        assert!(local.contains("- Cardinality: `1..1`"), "{local}");
         assert!(local.contains("Library name."), "{local}");
         assert!(!local.contains("Global title."), "{local}");
 
-        // Déclaration locale du type hérité, dans le schéma inclus.
+        // Local declaration of the inherited type, in the included schema.
         let nested = fixture.markdown(&uri, at(INSTANCE, "l:title", 2) + 4);
         assert!(
-            nested.contains("- Type : `lib:Title` (restriction de `xs:string`)"),
+            nested.contains("- Type: `lib:Title` (restriction of `xs:string`)"),
             "{nested}"
         );
         assert!(nested.contains("Book title."), "{nested}");
-        assert!(nested.contains(&format!("Source : [types.xsd]({types_uri})")));
+        assert!(nested.contains(&format!("Source: [types.xsd]({types_uri})")));
 
-        // Balise fermante : documentation du type à défaut de celle de l'élément.
+        // End tag: documentation of the type when the element has none.
         let book = fixture
             .hover(&uri, at(INSTANCE, "</l:book", 0) + 3)
             .unwrap();
@@ -1244,10 +1244,10 @@ mod tests {
         );
         let book = book["contents"]["value"].as_str().unwrap();
         assert!(
-            book.contains("- Type : `lib:Book` (extension de `lib:Item`)"),
+            book.contains("- Type: `lib:Book` (extension of `lib:Item`)"),
             "{book}"
         );
-        assert!(book.contains("- Cardinalité : `0..*`"), "{book}");
+        assert!(book.contains("- Cardinality: `0..*`"), "{book}");
         assert!(book.contains("\n\nA book.\n\n"), "{book}");
         assert!(!book.contains("Un livre"), "{book}");
     }
@@ -1266,21 +1266,21 @@ mod tests {
         assert_eq!(
             id["contents"]["value"],
             format!(
-                "**Attribut** `id`\n\n- Type : `xs:ID`\n- Utilisation : obligatoire\n\nUnique identifier.\n\nSource : [types.xsd]({types_uri})"
+                "**Attribute** `id`\n\n- Type: `xs:ID`\n- Use: required\n\nUnique identifier.\n\nSource: [types.xsd]({types_uri})"
             )
         );
 
         let format = fixture.markdown(&uri, at(INSTANCE, "format=", 0));
-        assert!(format.contains("- Type : `lib:Format` (restriction de `xs:string`)"));
-        assert!(format.contains("- Utilisation : facultative"), "{format}");
-        assert!(format.contains("- Valeur par défaut : `paper`"), "{format}");
-        assert!(format.contains("- Valeurs autorisées : `paper`, `ebook`"));
+        assert!(format.contains("- Type: `lib:Format` (restriction of `xs:string`)"));
+        assert!(format.contains("- Use: optional"), "{format}");
+        assert!(format.contains("- Default value: `paper`"), "{format}");
+        assert!(format.contains("- Allowed values: `paper`, `ebook`"));
         assert!(format.contains("Publication format."), "{format}");
 
         let namespace = fixture.markdown(&uri, at(INSTANCE, "xmlns:l", 0) + 6);
         assert_eq!(
             namespace,
-            "**Déclaration d'espace de noms** `xmlns:l`\n\n`urn:lib`"
+            "**Namespace declaration** `xmlns:l`\n\n`urn:lib`"
         );
     }
 
@@ -1295,21 +1295,21 @@ mod tests {
             json!({"start": {"line": 2, "character": 26}, "end": {"line": 2, "character": 31}})
         );
         let value = value["contents"]["value"].as_str().unwrap();
-        assert!(value.starts_with("**Valeur** `paper`\n\n"), "{value}");
-        assert!(value.contains("- Valeurs autorisées : `paper`, `ebook`"));
+        assert!(value.starts_with("**Value** `paper`\n\n"), "{value}");
+        assert!(value.contains("- Allowed values: `paper`, `ebook`"));
         assert!(value.contains("Printed edition."), "{value}");
 
         let isbn = fixture.markdown(&uri, at(INSTANCE, "9780", 0) + 5);
-        assert!(isbn.contains("- Type : `lib:Isbn` (restriction de `xs:string`)"));
-        assert!(isbn.contains("- Motif : `[0-9]{13}`"), "{isbn}");
-        assert!(isbn.contains("- Longueur : `13`"), "{isbn}");
-        assert!(isbn.contains("- Type prédéfini : `xs:string`"), "{isbn}");
+        assert!(isbn.contains("- Type: `lib:Isbn` (restriction of `xs:string`)"));
+        assert!(isbn.contains("- Pattern: `[0-9]{13}`"), "{isbn}");
+        assert!(isbn.contains("- Length: `13`"), "{isbn}");
+        assert!(isbn.contains("- Built-in type: `xs:string`"), "{isbn}");
 
         let title = fixture.markdown(&uri, at(INSTANCE, "Dune", 0));
-        assert!(title.contains("- Longueur minimale : `1`"), "{title}");
-        assert!(title.contains("- Longueur maximale : `200`"), "{title}");
+        assert!(title.contains("- Minimum length: `1`"), "{title}");
+        assert!(title.contains("- Maximum length: `200`"), "{title}");
 
-        // Positions UTF-16 (emoji hors plan multilingue de base) et CRLF.
+        // UTF-16 positions (emoji outside the Basic Multilingual Plane) and CRLF.
         let text = fixture.hover(&uri, at(INSTANCE, "Città", 0) + 1).unwrap();
         assert_eq!(
             text["range"],
@@ -1319,10 +1319,10 @@ mod tests {
             text["contents"]["value"]
                 .as_str()
                 .unwrap()
-                .contains("- Type : `xs:string`")
+                .contains("- Type: `xs:string`")
         );
 
-        // Espaces entre éléments, contenu complexe : pas de survol.
+        // Whitespace between elements, complex content: no hover.
         assert!(
             fixture
                 .hover(&uri, at(INSTANCE, "\r\n  <l:book", 0) + 2)
@@ -1342,38 +1342,38 @@ mod tests {
         assert_eq!(
             book["contents"]["value"],
             format!(
-                "**Type complexe** `lib:Book`\n\n- Espace de noms : `urn:lib`\n- Dérivation : extension de `lib:Item`\n\nA book.\n\nSource : [types.xsd]({types_uri})"
+                "**Complex type** `lib:Book`\n\n- Namespace: `urn:lib`\n- Derivation: extension of `lib:Item`\n\nA book.\n\nSource: [types.xsd]({types_uri})"
             )
         );
         assert_eq!(book["range"]["start"], json!({"line": 6, "character": 36}));
 
         let builtin = fixture.markdown(&main_uri, at(MAIN_XSD, "xs:string", 0));
         assert!(
-            builtin.starts_with("**Type prédéfini** `xs:string`"),
+            builtin.starts_with("**Built-in type** `xs:string`"),
             "{builtin}"
         );
 
         let global = fixture.markdown(&main_uri, at(MAIN_XSD, "\"title\"", 1) + 1);
         assert!(global.contains("Global title."), "{global}");
-        // Déclaration locale : pas de composant global à documenter.
+        // Local declaration: no global component to document.
         assert!(
             fixture
                 .hover(&main_uri, at(MAIN_XSD, "\"title\"", 0) + 1)
                 .is_none_or(|hover| !hover.to_string().contains("Library name"))
         );
 
-        // Un schéma ouvert non enregistré est prioritaire sur le disque.
+        // An unsaved open schema takes precedence over the disk.
         let edited = TYPES_XSD.replace(">A book.<", ">An edited book.<");
         let types_uri = fixture.open("types.xsd", &edited);
         let book = fixture.markdown(&main_uri, at(MAIN_XSD, "lib:Book", 0));
         assert!(book.contains("An edited book."), "{book}");
 
         let item = fixture.markdown(&types_uri, at(&edited, "lib:Item", 0) + 4);
-        assert!(item.contains("**Type complexe** `lib:Item`"), "{item}");
+        assert!(item.contains("**Complex type** `lib:Item`"), "{item}");
         assert!(item.contains("Base item."), "{item}");
         let format = fixture.markdown(&types_uri, at(&edited, "\"Format\"", 0) + 2);
-        assert!(format.starts_with("**Type simple** `Format`"), "{format}");
-        assert!(format.contains("- Valeurs autorisées : `paper`, `ebook`"));
+        assert!(format.starts_with("**Simple type** `Format`"), "{format}");
+        assert!(format.contains("- Allowed values: `paper`, `ebook`"));
         assert!(format.contains("Publication format."), "{format}");
     }
 
@@ -1405,14 +1405,14 @@ mod tests {
         assert!(
             fixture
                 .markdown(&uri, at(source, "\"string\"", 0) + 1)
-                .starts_with("**Type prédéfini** `string`")
+                .starts_with("**Built-in type** `string`")
         );
         let union = fixture.markdown(&uri, at(source, "\"AB\"", 0) + 1);
-        assert!(union.contains("- Union de `t:A`, `t:B`"), "{union}");
+        assert!(union.contains("- Union of `t:A`, `t:B`"), "{union}");
         assert!(
             fixture
                 .markdown(&uri, at(source, "t:G", 0))
-                .contains("**Groupe** `t:G`")
+                .contains("**Group** `t:G`")
         );
         assert!(
             fixture
@@ -1420,12 +1420,12 @@ mod tests {
                 .contains("Group AG")
         );
         let lang = fixture.markdown(&uri, at(source, "t:lang", 0));
-        assert!(lang.contains("**Attribut** `t:lang`"), "{lang}");
+        assert!(lang.contains("**Attribute** `t:lang`"), "{lang}");
         assert!(lang.contains("Lang attribute"), "{lang}");
-        // Hors d'une référence : survol XML minimal.
+        // Outside a reference: minimal XML hover.
         assert_eq!(
             fixture.markdown(&uri, at(source, "sequence", 0)),
-            "**Élément** `<sequence>`\n\nEspace de noms : `http://www.w3.org/2001/XMLSchema`"
+            "**Element** `<sequence>`\n\nNamespace: `http://www.w3.org/2001/XMLSchema`"
         );
     }
 
@@ -1437,19 +1437,19 @@ mod tests {
 
         assert_eq!(
             fixture.markdown(&uri, 3),
-            "**Élément** `<a:root>`\n\nEspace de noms : `urn:x`"
+            "**Element** `<a:root>`\n\nNamespace: `urn:x`"
         );
         assert_eq!(
             fixture.markdown(&uri, at(source, "child", 0)),
-            "**Élément** `<child>`"
+            "**Element** `<child>`"
         );
         assert_eq!(
             fixture.markdown(&uri, at(source, "b=", 0)),
-            "**Attribut** `b`"
+            "**Attribute** `b`"
         );
         assert_eq!(
             fixture.markdown(&uri, at(source, "a:c", 0)),
-            "**Attribut** `a:c`\n\nEspace de noms : `urn:x`"
+            "**Attribute** `a:c`\n\nNamespace: `urn:x`"
         );
         assert!(fixture.hover(&uri, at(source, "\"1\"", 0) + 1).is_none());
         assert!(fixture.hover(&uri, at(source, "text", 0) + 1).is_none());
@@ -1472,13 +1472,13 @@ mod tests {
 
         let shape = fixture.markdown(&uri, 2);
         assert!(
-            shape.contains("- Type : `Circle` (extension de `t:Shape`)"),
+            shape.contains("- Type: `Circle` (extension of `t:Shape`)"),
             "{shape}"
         );
         assert!(shape.contains("A circle."), "{shape}");
         let radius = fixture.markdown(&uri, at(source, "radius", 0));
         assert!(radius.contains("Radius \\<cm\\>."), "{radius}");
         let value = fixture.markdown(&uri, at(source, "\"2\"", 0) + 1);
-        assert!(value.contains("- Type : `xs:decimal`"), "{value}");
+        assert!(value.contains("- Type: `xs:decimal`"), "{value}");
     }
 }

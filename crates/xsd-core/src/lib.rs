@@ -1,4 +1,4 @@
-//! Modèle et parsing XSD partagés par le serveur LSP.
+//! XSD model and parsing shared by the LSP server.
 
 pub mod model;
 
@@ -14,7 +14,7 @@ use regex::Regex;
 
 const MAX_XSD_SOURCE_BYTES: usize = 16 * 1024 * 1024;
 
-/// Cardinalité d'un élément XSD.
+/// Cardinality of an XSD element.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct XsdOccurs {
     pub min: usize,
@@ -30,7 +30,7 @@ impl Default for XsdOccurs {
     }
 }
 
-/// Élément déclaré par un schéma XSD.
+/// Element declared by an XSD schema.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct XsdElement {
     pub name: String,
@@ -42,7 +42,7 @@ pub struct XsdElement {
     pub nillable: bool,
 }
 
-/// Restriction simple portée par un type XSD.
+/// Simple restriction carried by an XSD type.
 #[derive(Debug, Default, PartialEq, Eq, Clone)]
 pub struct XsdRestriction {
     pub length: Option<usize>,
@@ -58,7 +58,7 @@ pub struct XsdRestriction {
     pub pattern: Option<String>,
 }
 
-/// Schéma XSD minimal.
+/// Minimal XSD schema.
 #[derive(Debug, Default, PartialEq, Eq, Clone)]
 pub struct XsdSchema {
     pub target_namespace: Option<String>,
@@ -87,7 +87,7 @@ pub struct XsdSchema {
     pub imports: Vec<(Option<String>, String)>,
 }
 
-/// Fusionne plusieurs schémas XSD dans un modèle utilisable par la validation.
+/// Merges several XSD schemas into a model usable by validation.
 pub fn merge_schemas(schemas: impl IntoIterator<Item = XsdSchema>) -> XsdSchema {
     let mut merged = XsdSchema::default();
     for schema in schemas {
@@ -139,21 +139,21 @@ fn merge_string_lists(
     }
 }
 
-/// Référence XSD extraite d'un document XML.
+/// XSD reference extracted from an XML document.
 #[derive(Debug, PartialEq, Eq)]
 pub struct SchemaReference {
     pub namespace: Option<String>,
     pub path: PathBuf,
 }
 
-/// Élément proposé par l’autocomplétion XSD.
+/// Item proposed by XSD completion.
 #[derive(Debug, PartialEq, Eq)]
 pub struct XsdCompletion {
     pub label: String,
     pub insert_text: String,
 }
 
-/// Règle de validation XSD à l'origine d'un diagnostic.
+/// XSD validation rule behind a diagnostic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum XsdDiagnosticKind {
     MissingRoot,
@@ -170,7 +170,7 @@ pub enum XsdDiagnosticKind {
 }
 
 impl XsdDiagnosticKind {
-    /// Identifiant stable de la règle (publié dans `data.rule` côté LSP).
+    /// Stable identifier of the rule (published in `data.rule` by the LSP).
     pub fn id(self) -> &'static str {
         match self {
             Self::MissingRoot => "missingRoot",
@@ -188,28 +188,28 @@ impl XsdDiagnosticKind {
     }
 }
 
-/// Diagnostic de validation XSD minimal.
+/// Minimal XSD validation diagnostic.
 #[derive(Debug, PartialEq, Eq)]
 pub struct XsdDiagnostic {
     pub kind: XsdDiagnosticKind,
     pub message: String,
 }
 
-/// Diagnostic XSD associé à une étendue du document XML.
+/// XSD diagnostic associated with a range of the XML document.
 #[derive(Debug, PartialEq, Eq)]
 pub struct LocatedXsdDiagnostic {
     pub kind: XsdDiagnosticKind,
     pub message: String,
-    /// Début de la balise ouvrante concernée (`<`).
+    /// Start of the relevant start tag (`<`).
     pub offset: usize,
-    /// Fin du nom de cette balise (`offset` si l'élément est inconnu).
+    /// End of the name of that tag (`offset` if the element is unknown).
     pub end: usize,
 }
 
-/// Parse un `xs:schema`, ses éléments et une première `xs:sequence`.
+/// Parses an `xs:schema`, its elements and a first `xs:sequence`.
 pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
     if source.len() > MAX_XSD_SOURCE_BYTES {
-        return Err("schéma XSD trop volumineux".to_owned());
+        return Err("XSD schema too large".to_owned());
     }
     let mut reader = Reader::from_str(source);
     let mut schema = XsdSchema::default();
@@ -460,7 +460,7 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                                 .as_deref()
                                 .unwrap_or("1")
                                 .parse()
-                                .map_err(|_| "minOccurs invalide".to_owned())?,
+                                .map_err(|_| "invalid minOccurs".to_owned())?,
                             max: parse_max_occurs(attribute(&element, "maxOccurs"))?,
                         },
                         type_name: attribute(&element, "type"),
@@ -683,7 +683,7 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                                 .as_deref()
                                 .unwrap_or("1")
                                 .parse()
-                                .map_err(|_| "minOccurs invalide".to_owned())?,
+                                .map_err(|_| "invalid minOccurs".to_owned())?,
                             max: parse_max_occurs(attribute(&element, "maxOccurs"))?,
                         },
                         type_name: attribute(&element, "type"),
@@ -719,7 +719,7 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
             }
             Ok(Event::Eof) => break,
             Ok(_) => {}
-            Err(error) => return Err(format!("erreur XSD : {error}")),
+            Err(error) => return Err(format!("XSD error: {error}")),
         }
     }
 
@@ -727,44 +727,44 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
     apply_model_group_references(source, &mut schema)?;
     apply_content_extensions(&mut schema);
     if schema.elements.is_empty() {
-        return Err("le schéma XSD ne contient aucun xs:element".to_owned());
+        return Err("the XSD schema contains no xs:element".to_owned());
     }
 
     Ok(schema)
 }
 
-/// Nature d'un emplacement de schéma à résoudre.
+/// Kind of a schema location to resolve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SchemaLocationKind {
-    /// Emplacement d'une paire de `xsi:schemaLocation`.
+    /// Location of an `xsi:schemaLocation` pair.
     SchemaLocation,
     /// `xsi:noNamespaceSchemaLocation`.
     NoNamespaceSchemaLocation,
     /// `xs:include/@schemaLocation`.
     Include,
-    /// `xs:import` (avec ou sans `schemaLocation`).
+    /// `xs:import` (with or without `schemaLocation`).
     Import,
 }
 
-/// Emplacement de schéma tel qu'écrit dans le document, avant résolution.
+/// Schema location as written in the document, before resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SchemaLocation<'a> {
     pub kind: SchemaLocationKind,
-    /// Espace de noms associé (`xsi:schemaLocation`, `xs:import`).
+    /// Associated namespace (`xsi:schemaLocation`, `xs:import`).
     pub namespace: Option<&'a str>,
-    /// Valeur de l'emplacement (`None` : `xs:import` sans `schemaLocation`).
+    /// Location value (`None`: `xs:import` without `schemaLocation`).
     pub location: Option<&'a str>,
-    /// Dossier du document qui porte la référence.
+    /// Directory of the document holding the reference.
     pub base_directory: &'a Path,
 }
 
-/// Résolveur d'emplacements (catalogue XML…) consulté avant la résolution
-/// par défaut ; `None` laisse la résolution par défaut s'appliquer.
+/// Location resolver (XML catalog…) consulted before the default
+/// resolution; `None` lets the default resolution apply.
 pub type LocationResolver<'r> = dyn Fn(&SchemaLocation<'_>) -> Option<PathBuf> + 'r;
 
-/// Résout `request` avec `resolver`, puis par défaut avec
-/// [`resolve_location`]. `None` pour un `xs:import` sans `schemaLocation`
-/// que le résolveur ne connaît pas.
+/// Resolves `request` with `resolver`, then by default with
+/// [`resolve_location`]. `None` for an `xs:import` without `schemaLocation`
+/// unknown to the resolver.
 pub fn resolve_schema_location(
     request: &SchemaLocation<'_>,
     resolver: &LocationResolver<'_>,
@@ -776,8 +776,8 @@ pub fn resolve_schema_location(
     })
 }
 
-/// Schéma d'URI de `value` (au moins deux caractères, pour ne pas confondre
-/// une lettre de lecteur Windows `C:` avec un schéma).
+/// URI scheme of `value` (at least two characters, so that a Windows drive
+/// letter `C:` is not mistaken for a scheme).
 fn uri_scheme(value: &str) -> Option<&str> {
     let (scheme, _) = value.split_once(':')?;
     let mut chars = scheme.chars();
@@ -787,10 +787,10 @@ fn uri_scheme(value: &str) -> Option<&str> {
     .then_some(scheme)
 }
 
-/// Résolution par défaut d'un emplacement de schéma : URI `file:`, chemin
-/// absolu ou relatif à `base_directory` (décodé en pourcentage si le chemin
-/// brut n'existe pas). Une URL distante est conservée telle quelle : elle ne
-/// désigne aucun fichier lisible (voir [`is_remote_location`]).
+/// Default resolution of a schema location: `file:` URI, absolute path or
+/// path relative to `base_directory` (percent-decoded if the raw path does
+/// not exist). A remote URL is kept as is: it does not designate any
+/// readable file (see [`is_remote_location`]).
 pub fn resolve_location(base_directory: &Path, location: &str) -> PathBuf {
     let location = location.trim();
     if let Some(scheme) = uri_scheme(location) {
@@ -806,16 +806,16 @@ pub fn resolve_location(base_directory: &Path, location: &str) -> PathBuf {
     resolve_path(base_directory, &percent_decode(location))
 }
 
-/// Le chemin est en fait une URL non locale (`http:`, `https:`, `urn:`…)
-/// conservée par [`resolve_location`].
+/// The path is actually a non-local URL (`http:`, `https:`, `urn:`…) kept
+/// by [`resolve_location`].
 pub fn is_remote_location(path: &Path) -> bool {
     path.to_str()
         .and_then(uri_scheme)
         .is_some_and(|scheme| !scheme.eq_ignore_ascii_case("file"))
 }
 
-/// Chemin local d'une URI `file:` (`file:///a%20b.xsd` -> `/a b.xsd`) ;
-/// requête et fragment ignorés.
+/// Local path of a `file:` URI (`file:///a%20b.xsd` -> `/a b.xsd`); query
+/// and fragment ignored.
 pub fn file_uri_to_path(uri: &str) -> PathBuf {
     let raw = uri.get(5..).filter(|_| {
         uri.get(..5)
@@ -835,7 +835,7 @@ pub fn file_uri_to_path(uri: &str) -> PathBuf {
     PathBuf::from(percent_decode(raw))
 }
 
-/// Décode les séquences `%XX` (les séquences invalides sont conservées).
+/// Decodes `%XX` sequences (invalid sequences are kept).
 pub fn percent_decode(value: &str) -> String {
     let bytes = value.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
@@ -858,7 +858,7 @@ pub fn percent_decode(value: &str) -> String {
     String::from_utf8_lossy(&decoded).into_owned()
 }
 
-/// Résout les références XSD d'un document XML par rapport à son chemin.
+/// Resolves the XSD references of an XML document relative to its path.
 pub fn resolve_schema_locations(
     source: &str,
     document_path: impl AsRef<Path>,
@@ -866,8 +866,8 @@ pub fn resolve_schema_locations(
     resolve_schema_locations_with(source, document_path, &|_| None)
 }
 
-/// Comme [`resolve_schema_locations`], en consultant d'abord `resolver`
-/// (catalogue XML) pour chaque emplacement.
+/// Like [`resolve_schema_locations`], consulting `resolver` (XML catalog)
+/// first for each location.
 pub fn resolve_schema_locations_with(
     source: &str,
     document_path: impl AsRef<Path>,
@@ -887,8 +887,7 @@ pub fn resolve_schema_locations_with(
                     let values = value.split_whitespace().collect::<Vec<_>>();
                     if values.len() % 2 != 0 {
                         return Err(
-                            "xsi:schemaLocation doit contenir des paires namespace/chemin"
-                                .to_owned(),
+                            "xsi:schemaLocation must contain namespace/path pairs".to_owned()
                         );
                     }
                     for pair in values.chunks_exact(2) {
@@ -923,14 +922,14 @@ pub fn resolve_schema_locations_with(
             }
             Ok(Event::Eof) => break,
             Ok(_) => {}
-            Err(error) => return Err(format!("erreur XML : {error}")),
+            Err(error) => return Err(format!("XML error: {error}")),
         }
     }
 
     Ok(references)
 }
 
-/// Résout les dépendances `xs:include` et `xs:import` d’un schéma XSD.
+/// Resolves the `xs:include` and `xs:import` dependencies of an XSD schema.
 pub fn resolve_schema_dependencies(
     source: &str,
     schema_path: impl AsRef<Path>,
@@ -938,9 +937,9 @@ pub fn resolve_schema_dependencies(
     resolve_schema_dependencies_with(source, schema_path, &|_| None)
 }
 
-/// Comme [`resolve_schema_dependencies`], en consultant d'abord `resolver` ;
-/// un `xs:import` sans `schemaLocation` n'est retenu que si `resolver` le
-/// résout (catalogue XML par espace de noms).
+/// Like [`resolve_schema_dependencies`], consulting `resolver` first; an
+/// `xs:import` without `schemaLocation` is only kept if `resolver` resolves
+/// it (XML catalog by namespace).
 pub fn resolve_schema_dependencies_with(
     source: &str,
     schema_path: impl AsRef<Path>,
@@ -981,7 +980,7 @@ pub fn resolve_schema_dependencies_with(
             }
             Ok(Event::Eof) => break,
             Ok(_) => {}
-            Err(error) => return Err(format!("erreur XSD : {error}")),
+            Err(error) => return Err(format!("XSD error: {error}")),
         }
     }
     Ok(references)
@@ -1070,7 +1069,7 @@ fn apply_model_group_references(source: &str, schema: &mut XsdSchema) -> Result<
             }
             Ok(Event::Eof) => break,
             Ok(_) => {}
-            Err(error) => return Err(format!("erreur XSD : {error}")),
+            Err(error) => return Err(format!("XSD error: {error}")),
         }
     }
 
@@ -1116,7 +1115,7 @@ fn apply_model_group_references(source: &str, schema: &mut XsdSchema) -> Result<
             }
             Ok(Event::Eof) => break,
             Ok(_) => {}
-            Err(error) => return Err(format!("erreur XSD : {error}")),
+            Err(error) => return Err(format!("XSD error: {error}")),
         }
     }
     Ok(())
@@ -1171,7 +1170,7 @@ fn apply_attribute_group_references(source: &str, schema: &mut XsdSchema) -> Res
             }
             Ok(Event::Eof) => break,
             Ok(_) => {}
-            Err(error) => return Err(format!("erreur XSD : {error}")),
+            Err(error) => return Err(format!("XSD error: {error}")),
         }
     }
 
@@ -1216,14 +1215,14 @@ fn apply_attribute_group_references(source: &str, schema: &mut XsdSchema) -> Res
             }
             Ok(Event::Eof) => break,
             Ok(_) => {}
-            Err(error) => return Err(format!("erreur XSD : {error}")),
+            Err(error) => return Err(format!("XSD error: {error}")),
         }
     }
     Ok(())
 }
 
-/// Résout un chemin de schéma (`schemaLocation`) relatif à `base_directory`
-/// et normalise les composants `.` et `..`.
+/// Resolves a schema path (`schemaLocation`) relative to `base_directory`
+/// and normalizes the `.` and `..` components.
 pub fn resolve_path(base_directory: &Path, value: &str) -> PathBuf {
     let path = Path::new(value);
     if path.is_absolute() {
@@ -1247,7 +1246,7 @@ fn normalize_path(path: &Path) -> PathBuf {
     normalized
 }
 
-/// Retourne les éléments XSD adaptés au contexte XML courant.
+/// Returns the XSD elements suited to the current XML context.
 pub fn complete_attribute_values(
     source: &str,
     offset: usize,
@@ -1303,7 +1302,7 @@ pub fn complete_attribute_values(
         .collect()
 }
 
-/// Retourne les attributs XSD adaptés à l’élément ouvert courant.
+/// Returns the XSD attributes suited to the current open element.
 pub fn complete_attributes(source: &str, offset: usize, schema: &XsdSchema) -> Vec<XsdCompletion> {
     let prefix = &source[..offset.min(source.len())];
     let Some(opening) = prefix.rfind('<') else {
@@ -1468,7 +1467,7 @@ fn open_xml_elements(source: &str) -> Vec<String> {
     stack
 }
 
-/// Retourne le nom du premier élément XML rencontré.
+/// Returns the name of the first XML element encountered.
 pub fn root_element_name(source: &str) -> Option<String> {
     let mut reader = Reader::from_str(source);
     loop {
@@ -1486,13 +1485,13 @@ struct XmlFrame {
     name: String,
     children: Vec<String>,
     text: String,
-    /// Étendue `<name` de la balise ouvrante.
+    /// `<name` range of the start tag.
     location: Range<usize>,
 }
 
-/// Vérifie le document XML et associe chaque diagnostic à la balise ouvrante
-/// de l'élément concerné (l'élément fautif, ou le parent pour les règles de
-/// modèle de contenu).
+/// Checks the XML document and associates each diagnostic with the start tag
+/// of the relevant element (the faulty element, or the parent for content
+/// model rules).
 pub fn validate_document_located(source: &str, schema: &XsdSchema) -> Vec<LocatedXsdDiagnostic> {
     let mut reader = Reader::from_str(source);
     let mut stack: Vec<XmlFrame> = Vec::new();
@@ -1554,7 +1553,7 @@ pub fn validate_document_located(source: &str, schema: &XsdSchema) -> Vec<Locate
             if !is_allowed_child(schema, &parent.name, &name) {
                 element_diagnostics.push(XsdDiagnostic {
                     kind: XsdDiagnosticKind::UnexpectedElement,
-                    message: format!("élément <{name}> interdit dans <{}>", parent.name),
+                    message: format!("element <{name}> not allowed in <{}>", parent.name),
                 });
             }
             parent.children.push(name.clone());
@@ -1573,7 +1572,7 @@ pub fn validate_document_located(source: &str, schema: &XsdSchema) -> Vec<Locate
     if !root_checked {
         diagnostics.push(LocatedXsdDiagnostic {
             kind: XsdDiagnosticKind::MissingRoot,
-            message: "document XML sans élément racine".to_owned(),
+            message: "XML document without a root element".to_owned(),
             offset: 0,
             end: 0,
         });
@@ -1581,7 +1580,7 @@ pub fn validate_document_located(source: &str, schema: &XsdSchema) -> Vec<Locate
     diagnostics
 }
 
-/// Vérifie le document XML contre les éléments déclarés par le schéma.
+/// Checks the XML document against the elements declared by the schema.
 pub fn validate_document(source: &str, schema: &XsdSchema) -> Vec<XsdDiagnostic> {
     validate_document_located(source, schema)
         .into_iter()
@@ -1607,7 +1606,7 @@ fn validate_sequence_frame(frame: &XmlFrame, schema: &XsdSchema) -> Vec<XsdDiagn
             if !schema.alls.contains_key(&frame.name) && index < previous_index {
                 diagnostics.push(XsdDiagnostic {
                     kind: XsdDiagnosticKind::UnexpectedOrder,
-                    message: format!("ordre inattendu de <{child}> dans <{}>", frame.name),
+                    message: format!("unexpected order of <{child}> in <{}>", frame.name),
                 });
             }
             previous_index = index;
@@ -1633,7 +1632,7 @@ fn validate_sequence_frame(frame: &XmlFrame, schema: &XsdSchema) -> Vec<XsdDiagn
             if count < element.occurs.min {
                 diagnostics.push(XsdDiagnostic {
                     kind: XsdDiagnosticKind::MissingElement,
-                    message: format!("élément <{child}> requis dans <{}>", frame.name),
+                    message: format!("element <{child}> required in <{}>", frame.name),
                 });
             }
             if let Some(max) = element.occurs.max
@@ -1641,7 +1640,7 @@ fn validate_sequence_frame(frame: &XmlFrame, schema: &XsdSchema) -> Vec<XsdDiagn
             {
                 diagnostics.push(XsdDiagnostic {
                     kind: XsdDiagnosticKind::TooManyElements,
-                    message: format!("trop d’éléments <{child}> dans <{}>", frame.name),
+                    message: format!("too many <{child}> elements in <{}>", frame.name),
                 });
             }
         }
@@ -1669,7 +1668,7 @@ fn validate_text_content(frame: &XmlFrame, schema: &XsdSchema) -> Vec<XsdDiagnos
     {
         diagnostics.push(XsdDiagnostic {
             kind: XsdDiagnosticKind::FixedValue,
-            message: format!("contenu de <{}> différent de la valeur fixed", frame.name),
+            message: format!("content of <{}> differs from the fixed value", frame.name),
         });
     }
     diagnostics.extend(validate_list_union(&frame.name, &type_name, value, schema));
@@ -1693,7 +1692,7 @@ fn validate_text_content(frame: &XmlFrame, schema: &XsdSchema) -> Vec<XsdDiagnos
         diagnostics.push(XsdDiagnostic {
             kind: XsdDiagnosticKind::InvalidContent,
             message: format!(
-                "contenu de <{}> de longueur incorrecte (attendu {expected} caractères)",
+                "content of <{}> has an incorrect length (expected {expected} characters)",
                 frame.name
             ),
         });
@@ -1704,7 +1703,7 @@ fn validate_text_content(frame: &XmlFrame, schema: &XsdSchema) -> Vec<XsdDiagnos
         diagnostics.push(XsdDiagnostic {
             kind: XsdDiagnosticKind::InvalidContent,
             message: format!(
-                "contenu de <{}> trop court (minimum {min} caractères)",
+                "content of <{}> is too short (minimum {min} characters)",
                 frame.name
             ),
         });
@@ -1715,7 +1714,7 @@ fn validate_text_content(frame: &XmlFrame, schema: &XsdSchema) -> Vec<XsdDiagnos
         diagnostics.push(XsdDiagnostic {
             kind: XsdDiagnosticKind::InvalidContent,
             message: format!(
-                "contenu de <{}> trop long (maximum {max} caractères)",
+                "content of <{}> is too long (maximum {max} characters)",
                 frame.name
             ),
         });
@@ -1725,7 +1724,7 @@ fn validate_text_content(frame: &XmlFrame, schema: &XsdSchema) -> Vec<XsdDiagnos
     {
         diagnostics.push(XsdDiagnostic {
             kind: XsdDiagnosticKind::InvalidContent,
-            message: format!("contenu de <{}> ne respecte pas le motif XSD", frame.name),
+            message: format!("content of <{}> does not match the XSD pattern", frame.name),
         });
     }
     diagnostics
@@ -1758,22 +1757,22 @@ fn validate_numeric_facets(
         (
             restriction.min_inclusive.as_deref(),
             0u8,
-            "minimum inclusif",
+            "minimum inclusive",
         ),
         (
             restriction.max_inclusive.as_deref(),
             1u8,
-            "maximum inclusif",
+            "maximum inclusive",
         ),
         (
             restriction.min_exclusive.as_deref(),
             2u8,
-            "minimum exclusif",
+            "minimum exclusive",
         ),
         (
             restriction.max_exclusive.as_deref(),
             3u8,
-            "maximum exclusif",
+            "maximum exclusive",
         ),
     ];
     checks
@@ -1788,7 +1787,9 @@ fn validate_numeric_facets(
             };
             (!valid).then(|| XsdDiagnostic {
                 kind: XsdDiagnosticKind::InvalidContent,
-                message: format!("contenu de <{element_name}> hors {label} du type {type_name}"),
+                message: format!(
+                    "content of <{element_name}> outside the {label} of type {type_name}"
+                ),
             })
         })
         .into_iter()
@@ -1819,7 +1820,7 @@ fn validate_digit_facets(
     {
         diagnostics.push(XsdDiagnostic {
             kind: XsdDiagnosticKind::InvalidContent,
-            message: format!("contenu de <{element_name}> invalide (totalDigits={expected})"),
+            message: format!("content of <{element_name}> is invalid (totalDigits={expected})"),
         });
     }
     if let Some(expected) = restriction.fraction_digits
@@ -1827,7 +1828,7 @@ fn validate_digit_facets(
     {
         diagnostics.push(XsdDiagnostic {
             kind: XsdDiagnosticKind::InvalidContent,
-            message: format!("contenu de <{element_name}> invalide (fractionDigits={expected})"),
+            message: format!("content of <{element_name}> is invalid (fractionDigits={expected})"),
         });
     }
     diagnostics
@@ -1886,7 +1887,7 @@ fn validate_list_union(
     {
         return vec![XsdDiagnostic {
             kind: XsdDiagnosticKind::InvalidContent,
-            message: format!("contenu de <{element_name}> invalide pour l’union {type_name}"),
+            message: format!("content of <{element_name}> is invalid for the union {type_name}"),
         }];
     }
     Vec::new()
@@ -1904,7 +1905,7 @@ fn validate_builtin_type(element_name: &str, type_name: &str, value: &str) -> Ve
     } else {
         vec![XsdDiagnostic {
             kind: XsdDiagnosticKind::InvalidContent,
-            message: format!("contenu de <{element_name}> invalide pour le type {type_name}"),
+            message: format!("content of <{element_name}> is invalid for the type {type_name}"),
         }]
     }
 }
@@ -1933,7 +1934,7 @@ fn validate_nil(
     } else {
         vec![XsdDiagnostic {
             kind: XsdDiagnosticKind::NotNillable,
-            message: format!("élément <{element_name}> non nillable avec xsi:nil"),
+            message: format!("element <{element_name}> is not nillable but has xsi:nil"),
         }]
     }
 }
@@ -1966,7 +1967,7 @@ fn validate_attributes(
         if !allowed.iter().any(|item| item == &name) {
             diagnostics.push(XsdDiagnostic {
                 kind: XsdDiagnosticKind::UnexpectedAttribute,
-                message: format!("attribut @{name} interdit sur <{element_name}>"),
+                message: format!("attribute @{name} not allowed on <{element_name}>"),
             });
         }
         if let Some(fixed) = schema
@@ -1978,7 +1979,7 @@ fn validate_attributes(
         {
             diagnostics.push(XsdDiagnostic {
                 kind: XsdDiagnosticKind::FixedValue,
-                message: format!("attribut @{name} différent de la valeur fixed"),
+                message: format!("attribute @{name} differs from the fixed value"),
             });
         }
     }
@@ -1987,7 +1988,7 @@ fn validate_attributes(
             if !present.iter().any(|item| item == name) {
                 diagnostics.push(XsdDiagnostic {
                     kind: XsdDiagnosticKind::MissingAttribute,
-                    message: format!("attribut @{name} requis sur <{element_name}>"),
+                    message: format!("attribute @{name} required on <{element_name}>"),
                 });
             }
         }
@@ -2020,7 +2021,7 @@ fn is_allowed_child(schema: &XsdSchema, parent: &str, child: &str) -> bool {
         || all.is_some_and(|children| child_allowed_by_substitution(schema, children, child))
 }
 
-/// Vérifie que le nom de la racine XML est déclaré par le schéma.
+/// Checks that the name of the XML root is declared by the schema.
 pub fn validate_root(root_name: &str, schema: &XsdSchema) -> Vec<XsdDiagnostic> {
     if schema
         .elements
@@ -2031,7 +2032,7 @@ pub fn validate_root(root_name: &str, schema: &XsdSchema) -> Vec<XsdDiagnostic> 
     } else {
         vec![XsdDiagnostic {
             kind: XsdDiagnosticKind::UnknownRoot,
-            message: format!("élément racine <{root_name}> absent du schéma XSD"),
+            message: format!("root element <{root_name}> not declared in the XSD schema"),
         }]
     }
 }
@@ -2055,7 +2056,7 @@ fn parse_optional_usize(value: Option<String>) -> Result<Option<usize>, String> 
         .map(|value| {
             value
                 .parse()
-                .map_err(|_| "valeur numérique XSD invalide".to_owned())
+                .map_err(|_| "invalid XSD numeric value".to_owned())
         })
         .transpose()
 }
@@ -2067,7 +2068,7 @@ fn parse_max_occurs(value: Option<String>) -> Result<Option<usize>, String> {
         Some(value) => value
             .parse()
             .map(Some)
-            .map_err(|_| "maxOccurs invalide".to_owned()),
+            .map_err(|_| "invalid maxOccurs".to_owned()),
     }
 }
 
@@ -2143,7 +2144,7 @@ mod tests {
 
         assert_eq!(
             diagnostics[0].message,
-            "élément <magazine> interdit dans <root>"
+            "element <magazine> not allowed in <root>"
         );
         assert_eq!(diagnostics[0].offset, source.find("<magazine").unwrap());
         assert_eq!(diagnostics[0].end, source.find(" />").unwrap());
@@ -2186,7 +2187,7 @@ mod tests {
         assert!(validate_document("<root><child /></root>", &schema).is_empty());
         assert_eq!(
             validate_document("<root><other /></root>", &schema)[0].message,
-            "élément <other> interdit dans <root>"
+            "element <other> not allowed in <root>"
         );
     }
 
@@ -2203,7 +2204,7 @@ mod tests {
         assert!(
             validate_document("<item/>", &schema)[0]
                 .message
-                .contains("@id requis")
+                .contains("@id required")
         );
         assert!(validate_document("<item id=\"1\"/>", &schema).is_empty());
     }
@@ -2224,7 +2225,7 @@ mod tests {
         assert!(
             validate_document("<item other=\"1\"/>", &schema)[0]
                 .message
-                .contains("@other interdit")
+                .contains("@other not allowed")
         );
     }
 
@@ -2244,17 +2245,17 @@ mod tests {
         assert!(
             order
                 .iter()
-                .any(|diagnostic| diagnostic.message.contains("ordre inattendu"))
+                .any(|diagnostic| diagnostic.message.contains("unexpected order"))
         );
         assert!(
             validate_document("<root></root>", &schema)[0]
                 .message
-                .contains("<first> requis")
+                .contains("<first> required")
         );
         assert!(
             validate_document("<root><first/><second/><second/><second/></root>", &schema)
                 .iter()
-                .any(|diagnostic| diagnostic.message.contains("trop d’éléments <second>"))
+                .any(|diagnostic| diagnostic.message.contains("too many <second> elements"))
         );
     }
 
@@ -2274,7 +2275,7 @@ mod tests {
         assert!(
             validate_document("<code>A B C</code>", &schema)[0]
                 .message
-                .contains("longueur")
+                .contains("length")
         );
     }
 
@@ -2337,7 +2338,7 @@ mod tests {
             &schema
         )[0]
             .message
-            .contains("non nillable"));
+            .contains("not nillable"));
     }
 
     #[test]
@@ -2482,7 +2483,7 @@ mod tests {
         assert!(
             validate_document("<root></root>", &schema)[0]
                 .message
-                .contains("<first> requis")
+                .contains("<first> required")
         );
         assert_eq!(complete_elements("<root><", 8, &schema).len(), 2);
     }
@@ -2525,12 +2526,12 @@ mod tests {
         assert!(
             validate_document("<code>ok</code>", &schema)[0]
                 .message
-                .contains("trop court")
+                .contains("too short")
         );
         assert!(
             validate_document("<code>abcdef</code>", &schema)[0]
                 .message
-                .contains("trop long")
+                .contains("too long")
         );
         assert!(validate_document("<code>valid</code>", &schema).is_empty());
     }
@@ -2627,12 +2628,12 @@ mod tests {
         assert!(
             validate_document("<score>0</score>", &schema)[0]
                 .message
-                .contains("minimum inclusif")
+                .contains("minimum inclusive")
         );
         assert!(
             validate_document("<score>10</score>", &schema)[0]
                 .message
-                .contains("maximum exclusif")
+                .contains("maximum exclusive")
         );
         assert!(validate_document("<score>5</score>", &schema).is_empty());
     }
@@ -2653,7 +2654,7 @@ mod tests {
         assert!(
             validate_document("<code>AB</code>", &schema)[0]
                 .message
-                .contains("longueur incorrecte")
+                .contains("incorrect length")
         );
         assert!(validate_document("<code>ABC</code>", &schema).is_empty());
     }
@@ -2677,7 +2678,7 @@ mod tests {
         assert!(
             validate_document("<code>abc</code>", &schema)[0]
                 .message
-                .contains("motif")
+                .contains("pattern")
         );
         assert!(validate_document("<code>ABC</code>", &schema).is_empty());
     }
@@ -2696,7 +2697,7 @@ mod tests {
         assert!(
             validate_document("<code>x</code>", &schema)
                 .iter()
-                .any(|diagnostic| diagnostic.message.contains("trop court"))
+                .any(|diagnostic| diagnostic.message.contains("too short"))
         );
     }
 
@@ -2861,10 +2862,7 @@ mod tests {
     fn rejects_oversized_xsd_sources() {
         let source = "<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\">".to_owned()
             + &"x".repeat(16 * 1024 * 1024);
-        assert_eq!(
-            parse_xsd(&source),
-            Err("schéma XSD trop volumineux".to_owned())
-        );
+        assert_eq!(parse_xsd(&source), Err("XSD schema too large".to_owned()));
     }
 
     #[test]

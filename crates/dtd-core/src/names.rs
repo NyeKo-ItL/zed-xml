@@ -1,6 +1,6 @@
-//! Noms XML 1.0 (5e édition) : `Name`, `Nmtoken`.
+//! XML 1.0 (5th edition) names: `Name`, `Nmtoken`.
 
-/// `NameStartChar` de XML 1.0 5e édition.
+/// `NameStartChar` from XML 1.0 5th edition.
 pub(crate) fn is_name_start_char(character: char) -> bool {
     matches!(character,
         ':' | 'A'..='Z' | '_' | 'a'..='z'
@@ -10,25 +10,25 @@ pub(crate) fn is_name_start_char(character: char) -> bool {
         | '\u{F900}'..='\u{FDCF}' | '\u{FDF0}'..='\u{FFFD}' | '\u{10000}'..='\u{EFFFF}')
 }
 
-/// `NameChar` de XML 1.0 5e édition.
+/// `NameChar` from XML 1.0 5th edition.
 pub fn is_name_char(character: char) -> bool {
     is_name_start_char(character)
         || matches!(character,
             '-' | '.' | '0'..='9' | '\u{B7}' | '\u{300}'..='\u{36F}' | '\u{203F}'..='\u{2040}')
 }
 
-/// `Name` : premier caractère `NameStartChar`, suivants `NameChar`.
+/// `Name`: a `NameStartChar` first character followed by `NameChar`s.
 pub fn is_name(value: &str) -> bool {
     let mut characters = value.chars();
     characters.next().is_some_and(is_name_start_char) && characters.all(is_name_char)
 }
 
-/// `Nmtoken` : un ou plusieurs `NameChar`.
+/// `Nmtoken`: one or more `NameChar`s.
 pub fn is_nmtoken(value: &str) -> bool {
     !value.is_empty() && value.chars().all(is_name_char)
 }
 
-/// Fin de la suite de `NameChar` qui commence à `start` dans `text[..end]`.
+/// End of the run of `NameChar`s starting at `start` in `text[..end]`.
 pub(crate) fn scan_name_chars(text: &str, start: usize, end: usize) -> usize {
     let end = end.min(text.len());
     if start >= end {

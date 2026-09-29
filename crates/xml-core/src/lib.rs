@@ -1,4 +1,4 @@
-//! Modèle, analyse et formatage XML partagés par le serveur LSP.
+//! XML model, parsing and formatting shared by the LSP server.
 
 pub mod diff;
 mod format;
@@ -22,32 +22,32 @@ use wellformed::{XmlProblemKind, check_well_formedness};
 const MAX_XML_SOURCE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_XML_DEPTH: usize = 512;
 
-/// Document XML partiellement analysé.
+/// Partially parsed XML document.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct XmlDocument {
-    /// Nom de l'élément racine lorsqu'il a pu être identifié.
+    /// Name of the root element when it could be identified.
     pub root: Option<String>,
-    /// Nombre d'éléments rencontrés pendant l'analyse.
+    /// Number of elements encountered during parsing.
     pub element_count: usize,
 }
 
-/// Catégorie d'un diagnostic XML.
+/// Category of an XML diagnostic.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum XmlDiagnosticKind {
     Syntax,
     Structure,
 }
 
-/// Diagnostic d'analyse exprimé avec des offsets UTF-8 dans la source.
+/// Parse diagnostic expressed with UTF-8 offsets into the source.
 #[derive(Debug, PartialEq, Eq)]
 pub struct XmlDiagnostic {
     pub kind: XmlDiagnosticKind,
     pub message: String,
     pub offset: usize,
-    /// Fin de l'étendue signalée (`offset` pour un diagnostic ponctuel).
+    /// End of the reported range (`offset` for a point diagnostic).
     pub end: usize,
-    /// Identifiant stable du problème ([`wellformed::XmlProblemKind::id`]),
-    /// publié dans `data.kind` pour les correctifs rapides.
+    /// Stable identifier of the problem ([`wellformed::XmlProblemKind::id`]),
+    /// published in `data.kind` for quick fixes.
     pub rule: Option<&'static str>,
 }
 
@@ -72,28 +72,27 @@ impl XmlDiagnostic {
     }
 }
 
-/// Résultat d'analyse conservant le modèle partiel même si la source est invalide.
+/// Parse result keeping the partial model even when the source is invalid.
 #[derive(Debug, PartialEq, Eq)]
 pub struct XmlParseResult {
     pub document: XmlDocument,
     pub diagnostics: Vec<XmlDiagnostic>,
 }
 
-/// Analyse une source XML et retourne les diagnostics récupérables pendant l'édition.
+/// Parses an XML source and returns the diagnostics recoverable while editing.
 ///
-/// Les erreurs d'appariement des balises, de balise non terminée et de
-/// référence non fermée signalées par `quick-xml` (qui s'arrête à la première
-/// erreur) sont remplacées par les problèmes localisés de
-/// [`wellformed::check_well_formedness`] lorsque celui-ci en relève ; les
-/// attributs dupliqués, valeurs sans guillemets et caractères non échappés
-/// viennent toujours de ce dernier.
+/// Tag matching, unterminated tag and unclosed reference errors reported by
+/// `quick-xml` (which stops at the first error) are replaced by the located
+/// problems of [`wellformed::check_well_formedness`] when it finds any;
+/// duplicate attributes, unquoted values and unescaped characters always
+/// come from the latter.
 pub fn parse_xml(source: &str) -> XmlParseResult {
     if source.len() > MAX_XML_SOURCE_BYTES {
         return XmlParseResult {
             document: XmlDocument::default(),
             diagnostics: vec![XmlDiagnostic::at(
                 XmlDiagnosticKind::Syntax,
-                "document XML trop volumineux".to_owned(),
+                "XML document too large".to_owned(),
                 0,
             )],
         };
@@ -101,7 +100,7 @@ pub fn parse_xml(source: &str) -> XmlParseResult {
     let mut reader = Reader::from_str(source);
     let mut stack = Vec::new();
     let mut document = XmlDocument::default();
-    // Diagnostics `quick-xml` et indicateur « couvert par l'analyse tolérante ».
+    // `quick-xml` diagnostics and a "covered by the tolerant check" flag.
     let mut diagnostics: Vec<(XmlDiagnostic, bool)> = Vec::new();
 
     loop {
@@ -111,7 +110,7 @@ pub fn parse_xml(source: &str) -> XmlParseResult {
                     diagnostics.push((
                         XmlDiagnostic::at(
                             XmlDiagnosticKind::Structure,
-                            "profondeur XML maximale dépassée".to_owned(),
+                            "maximum XML depth exceeded".to_owned(),
                             reader.buffer_position() as usize,
                         ),
                         false,
@@ -124,7 +123,7 @@ pub fn parse_xml(source: &str) -> XmlParseResult {
                         diagnostics.push((
                             XmlDiagnostic::at(
                                 XmlDiagnosticKind::Structure,
-                                "XML doit contenir un seul élément racine".to_owned(),
+                                "XML must contain a single root element".to_owned(),
                                 reader.buffer_position() as usize,
                             ),
                             false,
@@ -143,7 +142,7 @@ pub fn parse_xml(source: &str) -> XmlParseResult {
                         diagnostics.push((
                             XmlDiagnostic::at(
                                 XmlDiagnosticKind::Structure,
-                                "XML doit contenir un seul élément racine".to_owned(),
+                                "XML must contain a single root element".to_owned(),
                                 reader.buffer_position() as usize,
                             ),
                             false,
@@ -158,8 +157,8 @@ pub fn parse_xml(source: &str) -> XmlParseResult {
                 let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
                 let message = match stack.pop() {
                     Some(open_name) if open_name == name => continue,
-                    Some(open_name) => format!("balise fermante </{name}> attend </{open_name}>"),
-                    None => format!("balise fermante inattendue </{name}>"),
+                    Some(open_name) => format!("end tag </{name}> does not match </{open_name}>"),
+                    None => format!("unexpected end tag </{name}>"),
                 };
                 diagnostics.push((
                     XmlDiagnostic::at(
@@ -184,7 +183,7 @@ pub fn parse_xml(source: &str) -> XmlParseResult {
                 diagnostics.push((
                     XmlDiagnostic::at(
                         XmlDiagnosticKind::Syntax,
-                        format!("erreur XML : {error}"),
+                        format!("XML error: {error}"),
                         reader.buffer_position() as usize,
                     ),
                     covered,
@@ -198,7 +197,7 @@ pub fn parse_xml(source: &str) -> XmlParseResult {
         diagnostics.push((
             XmlDiagnostic::at(
                 XmlDiagnosticKind::Structure,
-                format!("balise non fermée <{open_name}>"),
+                format!("unclosed element <{open_name}>"),
                 source.len(),
             ),
             true,
@@ -235,14 +234,14 @@ pub fn parse_xml(source: &str) -> XmlParseResult {
     }
 }
 
-/// Élément proposé par l'autocomplétion XML.
+/// Item proposed by XML completion.
 #[derive(Debug, PartialEq, Eq)]
 pub struct XmlCompletion {
     pub label: String,
     pub insert_text: String,
 }
 
-/// Retourne une balise fermante lorsque le curseur suit immédiatement une balise ouvrante.
+/// Returns an end tag when the cursor immediately follows a start tag.
 pub fn auto_close_tag(source: &str, offset: usize) -> Option<XmlCompletion> {
     let prefix = &source[..offset.min(source.len())];
     if !prefix.ends_with('>') {
@@ -292,7 +291,7 @@ pub fn auto_close_tag(source: &str, offset: usize) -> Option<XmlCompletion> {
     }
 }
 
-/// Retourne des propositions locales à partir du document et du contexte courant.
+/// Returns local suggestions based on the document and the current context.
 pub fn complete_xml(source: &str, offset: usize) -> Vec<XmlCompletion> {
     let offset = offset.min(source.len());
     let prefix = &source[..offset];
@@ -434,11 +433,11 @@ mod tests {
 
     #[test]
     fn reports_a_mismatched_closing_tag() {
-        // `</root>` ferme la racine : l'élément <child> reste non fermé.
+        // `</root>` closes the root: the <child> element stays unclosed.
         let result = parse_xml("<root><child></root>");
 
         assert_eq!(result.diagnostics.len(), 1);
-        assert_eq!(result.diagnostics[0].message, "balise non fermée <child>");
+        assert_eq!(result.diagnostics[0].message, "unclosed element <child>");
         assert_eq!(result.diagnostics[0].code(), "xml-structure");
         assert_eq!(result.diagnostics[0].rule, Some("unclosedElement"));
         assert_eq!(
@@ -450,7 +449,7 @@ mod tests {
         assert_eq!(result.diagnostics.len(), 1);
         assert_eq!(
             result.diagnostics[0].message,
-            "balise fermante </chidl> attend </child>"
+            "end tag </chidl> does not match </child>"
         );
         assert_eq!(result.diagnostics[0].rule, Some("mismatchedEndTag"));
     }
@@ -461,8 +460,16 @@ mod tests {
 
         assert_eq!(result.diagnostics.len(), 2);
         assert_eq!(result.diagnostics[1].offset, "<root><".len());
-        assert!(result.diagnostics[0].message.contains("non fermée <root>"));
-        assert!(result.diagnostics[1].message.contains("non fermée <child>"));
+        assert!(
+            result.diagnostics[0]
+                .message
+                .contains("unclosed element <root>")
+        );
+        assert!(
+            result.diagnostics[1]
+                .message
+                .contains("unclosed element <child>")
+        );
     }
 
     #[test]
@@ -473,10 +480,10 @@ mod tests {
         assert!(
             result.diagnostics[0]
                 .message
-                .contains("seul élément racine")
+                .contains("single root element")
         );
 
-        // Attributs dupliqués et caractères non échappés : diagnostics ajoutés.
+        // Duplicate attributes and unescaped characters: diagnostics added.
         let result = parse_xml("<a x=\"1\" x=\"2\">1 & 2</a>");
         let rules = result
             .diagnostics
@@ -496,10 +503,7 @@ mod tests {
     fn rejects_xml_sources_exceeding_safety_limits() {
         let source = "<root>".to_owned() + &"x".repeat(16 * 1024 * 1024);
         let result = parse_xml(&source);
-        assert_eq!(
-            result.diagnostics[0].message,
-            "document XML trop volumineux"
-        );
+        assert_eq!(result.diagnostics[0].message, "XML document too large");
 
         let nested = (0..513).fold(String::new(), |mut source, _| {
             source.push_str("<node>");
@@ -510,7 +514,7 @@ mod tests {
             result
                 .diagnostics
                 .iter()
-                .any(|diagnostic| diagnostic.message.contains("profondeur XML"))
+                .any(|diagnostic| diagnostic.message.contains("maximum XML depth"))
         );
     }
 

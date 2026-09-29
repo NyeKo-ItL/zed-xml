@@ -1,35 +1,35 @@
-//! `textDocument/codeAction` : correctifs rapides et réécritures, comme
+//! `textDocument/codeAction`: quick fixes and rewrites, like
 //! LemMinX.
 //!
-//! Correctifs rapides (`quickfix`), calculés à partir de la source et
-//! proposés lorsque le problème touche l'étendue demandée ; les diagnostics
-//! correspondants du contexte (même `code`, même `data.kind`/`data.rule`,
-//! étendues qui se touchent) sont rattachés à l'action :
+//! Quick fixes (`quickfix`), computed from the source and offered when the
+//! problem touches the requested range; the matching diagnostics of the
+//! context (same `code`, same `data.kind`/`data.rule`, touching ranges) are
+//! attached to the action:
 //!
-//! - bonne formation ([`xml_core::wellformed`]) : balise fermante à renommer
-//!   (ou balise ouvrante à renommer), balise fermante en trop à supprimer,
-//!   élément à fermer (ou à rendre auto-fermant), `>`/`/>` manquant, attribut
-//!   dupliqué à supprimer, valeur à entourer de guillemets, `&`/`<` à
-//!   échapper ;
-//! - schéma XSD ([`xsd_core::model`]) : attributs requis manquants ajoutés
-//!   avec une valeur (fixe, par défaut, première valeur énumérée ou vide),
-//!   valeur hors énumération remplacée par chacune des valeurs permises,
-//!   élément inconnu renommé vers le nom attendu le plus proche
-//!   (« Vous vouliez dire... ? », distance d'édition).
+//! - well-formedness ([`xml_core::wellformed`]): end tag to rename (or
+//!   start tag to rename), extra end tag to remove, element to close (or to
+//!   make self-closing), missing `>`/`/>`, duplicate attribute to remove,
+//!   value to quote, `&`/`<` to
+//!   escape;
+//! - XSD schema ([`xsd_core::model`]): missing required attributes added
+//!   with a value (fixed, default, first enumerated value or empty), value
+//!   outside the enumeration replaced by each of the allowed values, unknown
+//!   element renamed to the closest expected name ("Did you mean...?", edit
+//!   distance).
 //!
-//! Réécritures (`refactor.rewrite`) : `<a></a>` vide en `<a/>` et l'inverse.
+//! Rewrites (`refactor.rewrite`): empty `<a></a>` to `<a/>` and back.
 //!
-//! Actions de source (`source`) : lier le document à un schéma XSD
-//! (`xmlns:xsi` + `xsi:noNamespaceSchemaLocation`, ou `xsi:schemaLocation`
-//! pour une racine dans un espace de noms), vers les `.xsd` du même dossier
-//! ou un emplacement à compléter.
+//! Source actions (`source`): bind the document to an XSD schema
+//! (`xmlns:xsi` + `xsi:noNamespaceSchemaLocation`, or `xsi:schemaLocation`
+//! for a root in a namespace), to the `.xsd` files of the same directory or
+//! a placeholder location.
 //!
-//! Le filtre `context.only` est respecté (préfixes de genres). Chaque action
-//! porte un `WorkspaceEdit` (`changes`) : aucune résolution différée.
+//! The `context.only` filter is honoured (kind prefixes). Each action
+//! carries a `WorkspaceEdit` (`changes`): no deferred resolution.
 //!
-//! Le module publie aussi les diagnostics de valeurs hors énumération
-//! ([`enumeration_diagnostics`]), que la validation XSD simplifiée ne
-//! vérifie pas.
+//! The module also publishes diagnostics for values outside an enumeration
+//! ([`enumeration_diagnostics`]), which the simplified XSD validation does
+//! not check.
 
 use std::{fs, ops::Range, path::Path};
 
@@ -49,24 +49,24 @@ use crate::{
     uri_to_path,
 };
 
-/// Genres d'actions annoncés dans `codeActionProvider.codeActionKinds`.
+/// Action kinds announced in `codeActionProvider.codeActionKinds`.
 pub(crate) const CODE_ACTION_KINDS: [&str; 3] = ["quickfix", "refactor", "source"];
 pub(crate) const QUICK_FIX: &str = "quickfix";
 const REWRITE: &str = "refactor.rewrite";
 const SOURCE: &str = "source";
-/// Code des diagnostics de validation XSD.
+/// Code of the XSD validation diagnostics.
 const XSD_CODE: &str = "xsd-validation";
-/// Nombre maximal de valeurs d'énumération proposées en remplacement.
+/// Maximum number of enumeration values offered as replacements.
 const MAX_ENUMERATION_ACTIONS: usize = 20;
-/// Nombre maximal de noms proposés pour un élément inconnu.
+/// Maximum number of names offered for an unknown element.
 const MAX_SUGGESTIONS: usize = 3;
-/// Nombre maximal de schémas voisins proposés pour la liaison.
+/// Maximum number of neighbouring schemas offered for binding.
 const MAX_BOUND_SCHEMAS: usize = 5;
-/// Emplacement proposé lorsqu'aucun schéma voisin n'existe.
+/// Location offered when no neighbouring schema exists.
 const PLACEHOLDER_SCHEMA: &str = "schema.xsd";
 
-/// Répond à `textDocument/codeAction` pour l'étendue `range` (offsets UTF-8)
-/// du document `uri` ; `request_context` est le `CodeActionContext`.
+/// Answers `textDocument/codeAction` for the range `range` (UTF-8 offsets)
+/// of the document `uri`; `request_context` is the `CodeActionContext`.
 pub(crate) fn code_actions(
     context: &mut HoverContext<'_>,
     uri: &str,
@@ -92,8 +92,8 @@ pub(crate) fn code_actions(
     actions.actions
 }
 
-/// Diagnostics `xsd-validation` (`data.rule` = `invalidEnumeration`) des
-/// valeurs d'attribut et contenus texte hors de l'énumération de leur type.
+/// `xsd-validation` diagnostics (`data.rule` = `invalidEnumeration`) for
+/// attribute values and text contents outside the enumeration of their type.
 pub(crate) fn enumeration_diagnostics(
     context: &mut HoverContext<'_>,
     uri: &str,
@@ -130,7 +130,7 @@ pub(crate) fn enumeration_diagnostics(
                 "code": XSD_CODE,
                 "data": {"category": "xsd", "kind": "validation", "rule": problem.rule},
                 "message": format!(
-                    "valeur `{}` hors énumération pour {target} (attendu : {listed})",
+                    "value `{}` is not in the enumeration of {target} (expected: {listed})",
                     &source[problem.range.clone()]
                 ),
             }))
@@ -139,10 +139,10 @@ pub(crate) fn enumeration_diagnostics(
 }
 
 // ---------------------------------------------------------------------------
-// Construction des actions
+// Action construction
 // ---------------------------------------------------------------------------
 
-/// Actions en construction pour une requête (partagé avec [`crate::dtd`]).
+/// Actions being built for a request (shared with [`crate::dtd`]).
 pub(crate) struct Actions<'a> {
     uri: &'a str,
     pub(crate) source: &'a str,
@@ -187,7 +187,7 @@ impl<'a> Actions<'a> {
         }
     }
 
-    /// Indique si le genre `kind` passe le filtre `context.only`.
+    /// Whether the kind `kind` passes the `context.only` filter.
     pub(crate) fn wants(&self, kind: &str) -> bool {
         self.only.as_ref().is_none_or(|only| {
             only.iter().any(|requested| {
@@ -199,13 +199,13 @@ impl<'a> Actions<'a> {
         })
     }
 
-    /// Indique si un problème situé en `range` concerne l'étendue demandée.
+    /// Whether a problem located at `range` concerns the requested range.
     pub(crate) fn requested(&self, range: &Range<usize>) -> bool {
         touches(&self.range, range)
     }
 
-    /// Diagnostics du contexte correspondant au problème : même `code`,
-    /// `data.<key>` égal à `id` (ou absent) et étendues qui se touchent.
+    /// Context diagnostics matching the problem: same `code`, `data.<key>`
+    /// equal to `id` (or missing) and touching ranges.
     pub(crate) fn matching(
         &self,
         code: &str,
@@ -265,7 +265,7 @@ impl<'a> Actions<'a> {
     }
 }
 
-/// Étendues fermées qui se chevauchent ou se touchent.
+/// Closed ranges that overlap or touch.
 fn touches(left: &Range<usize>, right: &Range<usize>) -> bool {
     left.start <= right.end && right.start <= left.end
 }
@@ -282,7 +282,7 @@ fn lsp_range(source: &str, range: &Value) -> Option<Range<usize>> {
 }
 
 // ---------------------------------------------------------------------------
-// Bonne formation
+// Well-formedness
 // ---------------------------------------------------------------------------
 
 fn well_formedness_fixes(actions: &mut Actions<'_>) {
@@ -305,14 +305,14 @@ fn well_formedness_fixes(actions: &mut Actions<'_>) {
                 start_name,
             } => {
                 actions.push(
-                    format!("Remplacer </{text}> par </{expected}>"),
+                    format!("Replace </{text}> with </{expected}>"),
                     QUICK_FIX,
                     vec![(range, expected.clone())],
                     diagnostics.clone(),
                     true,
                 );
                 actions.push(
-                    format!("Renommer <{expected}> en <{text}>"),
+                    format!("Rename <{expected}> to <{text}>"),
                     QUICK_FIX,
                     vec![(start_name.clone(), text.to_owned())],
                     diagnostics,
@@ -320,7 +320,7 @@ fn well_formedness_fixes(actions: &mut Actions<'_>) {
                 );
             }
             XmlProblemKind::UnmatchedEndTag { tag } => actions.push(
-                format!("Supprimer la balise fermante </{text}>"),
+                format!("Remove end tag </{text}>"),
                 QUICK_FIX,
                 vec![(tag.clone(), String::new())],
                 diagnostics,
@@ -328,14 +328,14 @@ fn well_formedness_fixes(actions: &mut Actions<'_>) {
             ),
             XmlProblemKind::UnclosedElement { insert_at, tag_end } => {
                 actions.push(
-                    format!("Fermer <{text}> avec </{text}>"),
+                    format!("Close <{text}> with </{text}>"),
                     QUICK_FIX,
                     vec![(*insert_at..*insert_at, format!("</{text}>"))],
                     diagnostics.clone(),
                     true,
                 );
                 actions.push(
-                    format!("Transformer <{text}> en élément auto-fermant"),
+                    format!("Make <{text}> self-closing"),
                     QUICK_FIX,
                     vec![(*tag_end..*tag_end + 1, "/>".to_owned())],
                     diagnostics,
@@ -347,7 +347,7 @@ fn well_formedness_fixes(actions: &mut Actions<'_>) {
                 start_tag,
             } => {
                 actions.push(
-                    "Terminer la balise par `>`".to_owned(),
+                    "End the tag with `>`".to_owned(),
                     QUICK_FIX,
                     vec![(*insert_at..*insert_at, ">".to_owned())],
                     diagnostics.clone(),
@@ -355,7 +355,7 @@ fn well_formedness_fixes(actions: &mut Actions<'_>) {
                 );
                 if *start_tag {
                     actions.push(
-                        "Terminer la balise par `/>`".to_owned(),
+                        "End the tag with `/>`".to_owned(),
                         QUICK_FIX,
                         vec![(*insert_at..*insert_at, "/>".to_owned())],
                         diagnostics,
@@ -364,7 +364,7 @@ fn well_formedness_fixes(actions: &mut Actions<'_>) {
                 }
             }
             XmlProblemKind::DuplicateAttribute { removal } => actions.push(
-                format!("Supprimer l'attribut dupliqué {text}"),
+                format!("Remove duplicate attribute {text}"),
                 QUICK_FIX,
                 vec![(removal.clone(), String::new())],
                 diagnostics,
@@ -373,7 +373,7 @@ fn well_formedness_fixes(actions: &mut Actions<'_>) {
             XmlProblemKind::UnquotedAttributeValue => {
                 let quote = if text.contains('"') { '\'' } else { '"' };
                 actions.push(
-                    "Entourer la valeur de guillemets".to_owned(),
+                    "Quote the value".to_owned(),
                     QUICK_FIX,
                     vec![(range, format!("{quote}{text}{quote}"))],
                     diagnostics,
@@ -383,7 +383,7 @@ fn well_formedness_fixes(actions: &mut Actions<'_>) {
             XmlProblemKind::UnescapedCharacter { character } => {
                 let entity = if *character == '<' { "&lt;" } else { "&amp;" };
                 actions.push(
-                    format!("Remplacer `{character}` par `{entity}`"),
+                    format!("Replace `{character}` with `{entity}`"),
                     QUICK_FIX,
                     vec![(range, entity.to_owned())],
                     diagnostics,
@@ -395,33 +395,33 @@ fn well_formedness_fixes(actions: &mut Actions<'_>) {
 }
 
 // ---------------------------------------------------------------------------
-// Schéma XSD
+// XSD schema
 // ---------------------------------------------------------------------------
 
-/// Problème de validation XSD localisé, avec les données de correction.
+/// Located XSD validation problem, with the data needed to fix it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SchemaProblem {
     kind: SchemaProblemKind,
-    /// Étendue concernée : balise ouvrante (attributs manquants), valeur
-    /// (énumération) ou nom de la balise ouvrante (élément inconnu).
+    /// Relevant range: start tag (missing attributes), value (enumeration)
+    /// or start tag name (unknown element).
     range: Range<usize>,
-    /// Règle (`data.rule`) des diagnostics correspondants.
+    /// Rule (`data.rule`) of the matching diagnostics.
     rule: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SchemaProblemKind {
-    /// Attributs requis absents : `(nom qualifié, valeur proposée)`, à
-    /// insérer en `insert_at` (après le dernier attribut).
+    /// Missing required attributes: `(qualified name, proposed value)`, to
+    /// insert at `insert_at` (after the last attribute).
     MissingAttributes {
         insert_at: usize,
         attributes: Vec<(String, String)>,
     },
-    /// Valeur hors de l'énumération `values` ; `target` décrit l'attribut ou
-    /// l'élément pour le message.
+    /// Value outside the enumeration `values`; `target` describes the
+    /// attribute or element for the message.
     InvalidEnumeration { values: Vec<String>, target: String },
-    /// Élément absent du modèle de contenu : noms locaux à remplacer
-    /// (balises ouvrante et fermante) et noms proches proposés.
+    /// Element missing from the content model: local names to replace
+    /// (start and end tags) and proposed close names.
     UnknownElement {
         names: Vec<Range<usize>>,
         suggestions: Vec<String>,
@@ -447,9 +447,9 @@ fn schema_fixes(actions: &mut Actions<'_>, document: &Document<'_>, set: &XsdMod
                     .collect::<Vec<_>>()
                     .join(", ");
                 let title = if attributes.len() == 1 {
-                    format!("Ajouter l'attribut requis {names}")
+                    format!("Add required attribute {names}")
                 } else {
-                    format!("Ajouter les attributs requis {names}")
+                    format!("Add required attributes {names}")
                 };
                 let text = attributes
                     .iter()
@@ -470,7 +470,7 @@ fn schema_fixes(actions: &mut Actions<'_>, document: &Document<'_>, set: &XsdMod
                     .map(|(value, _)| *value);
                 for value in values.iter().take(MAX_ENUMERATION_ACTIONS) {
                     actions.push(
-                        format!("Remplacer par `{value}`"),
+                        format!("Replace with `{value}`"),
                         QUICK_FIX,
                         vec![(problem.range.clone(), escape(value))],
                         diagnostics.clone(),
@@ -481,7 +481,7 @@ fn schema_fixes(actions: &mut Actions<'_>, document: &Document<'_>, set: &XsdMod
             SchemaProblemKind::UnknownElement { names, suggestions } => {
                 for (index, suggestion) in suggestions.iter().enumerate() {
                     actions.push(
-                        format!("Vous vouliez dire <{suggestion}> ?"),
+                        format!("Did you mean <{suggestion}>?"),
                         QUICK_FIX,
                         names
                             .iter()
@@ -496,10 +496,10 @@ fn schema_fixes(actions: &mut Actions<'_>, document: &Document<'_>, set: &XsdMod
     }
 }
 
-/// Relève, pour chaque élément du document (ou seulement ceux qui touchent
-/// `within`, les requêtes de code étant envoyées à chaque déplacement du
-/// curseur), les attributs requis absents, les valeurs hors énumération et
-/// les éléments inconnus du modèle.
+/// Collects, for each element of the document (or only those touching
+/// `within`, since code action requests are sent on every cursor
+/// move), the missing required attributes, the values outside an
+/// enumeration and the elements unknown to the model.
 fn schema_problems(
     document: &Document<'_>,
     set: &XsdModelSet,
@@ -557,7 +557,7 @@ fn schema_problems(
                 problems.push(SchemaProblem {
                     kind: SchemaProblemKind::InvalidEnumeration {
                         values,
-                        target: format!("@{attribute_name} sur <{name}>"),
+                        target: format!("@{attribute_name} on <{name}>"),
                     },
                     range: value,
                     rule: "invalidEnumeration",
@@ -661,7 +661,7 @@ fn missing_attributes(
             None => local.to_owned(),
             Some(namespace) => match prefix_for(document, index, namespace) {
                 Some(prefix) => format!("{prefix}:{local}"),
-                // Pas de préfixe déclaré pour l'espace de noms : insertion impossible.
+                // No prefix declared for the namespace: insertion impossible.
                 None => continue,
             },
         };
@@ -719,7 +719,7 @@ fn text_enumeration(
     }
     let content = element.content_range()?;
     let text = &source[content.clone()];
-    // Contenu mixte, CDATA ou commentaires : pas de contrôle.
+    // Mixed content, CDATA or comments: not checked.
     if text.contains('<') || is_nil(document, index) {
         return None;
     }
@@ -750,8 +750,8 @@ fn is_nil(document: &Document<'_>, index: usize) -> bool {
     })
 }
 
-/// Valeurs énumérées d'un type simple (facettes cumulées le long des
-/// restrictions) ; `None` sans énumération ou pour une liste.
+/// Enumerated values of a simple type (facets accumulated along the
+/// restrictions); `None` without an enumeration or for a list.
 fn enumeration_values(set: &XsdModelSet, value_type: XsdTypeRef<'_>) -> Option<Vec<String>> {
     let info = set.simple_type_info(value_type);
     if info.item_type.is_some() || info.facets.enumerations.is_empty() {
@@ -766,8 +766,8 @@ fn enumeration_values(set: &XsdModelSet, value_type: XsdTypeRef<'_>) -> Option<V
     )
 }
 
-/// Compare une valeur brute (entités prédéfinies décodées, espaces réduits
-/// en repli) aux valeurs énumérées.
+/// Compares a raw value (predefined entities decoded, whitespace collapsed
+/// as a fallback) with the enumerated values.
 fn is_enumerated(raw: &str, values: &[String]) -> bool {
     let value = raw
         .replace("&lt;", "<")
@@ -788,8 +788,8 @@ fn escape(value: &str) -> String {
         .replace('"', "&quot;")
 }
 
-/// Préfixe déclaré (`xmlns:prefix`) pour `namespace` dans la portée de
-/// l'élément.
+/// Prefix declared (`xmlns:prefix`) for `namespace` in the scope of the
+/// element.
 fn prefix_for<'a>(document: &Document<'a>, index: usize, namespace: &str) -> Option<&'a str> {
     let source = document.source;
     std::iter::once(index)
@@ -802,8 +802,8 @@ fn prefix_for<'a>(document: &Document<'a>, index: usize, namespace: &str) -> Opt
         })
 }
 
-/// Candidats proches de `name` (distance d'édition avec transpositions, sans
-/// tenir compte de la casse), triés du plus proche au plus lointain.
+/// Candidates close to `name` (edit distance with transpositions, case
+/// insensitive), sorted from closest to farthest.
 fn closest<'c>(name: &str, candidates: impl Iterator<Item = &'c str>) -> Vec<(&'c str, usize)> {
     let mut found = candidates
         .filter(|candidate| *candidate != name)
@@ -818,8 +818,8 @@ fn closest<'c>(name: &str, candidates: impl Iterator<Item = &'c str>) -> Vec<(&'
     found
 }
 
-/// Distance d'édition « optimal string alignment » (insertion, suppression,
-/// substitution, transposition de caractères adjacents).
+/// "Optimal string alignment" edit distance (insertion, deletion,
+/// substitution, transposition of adjacent characters).
 pub(crate) fn edit_distance(left: &str, right: &str) -> usize {
     let left = left.chars().collect::<Vec<_>>();
     let right = right.chars().collect::<Vec<_>>();
@@ -847,11 +847,11 @@ pub(crate) fn edit_distance(left: &str, right: &str) -> usize {
 }
 
 // ---------------------------------------------------------------------------
-// Réécritures
+// Rewrites
 // ---------------------------------------------------------------------------
 
-/// `<a ...></a>` (contenu vide ou blanc) <-> `<a .../>` pour l'élément dont
-/// une balise touche le début de l'étendue demandée.
+/// `<a ...></a>` (empty or blank content) <-> `<a .../>` for the element one
+/// of whose tags touches the start of the requested range.
 fn element_rewrites(actions: &mut Actions<'_>, document: &Document<'_>) {
     let source = actions.source;
     let Some(index) = document.tree.innermost_element_at(actions.range.start) else {
@@ -873,7 +873,7 @@ fn element_rewrites(actions: &mut Actions<'_>, document: &Document<'_>) {
             let slash = start_tag.range.end - 2;
             let from = source[..slash].trim_end().len().max(start_tag.name.end);
             actions.push(
-                format!("Développer <{name}/> en <{name}></{name}>"),
+                format!("Expand <{name}/> to <{name}></{name}>"),
                 REWRITE,
                 vec![(from..start_tag.range.end, format!("></{name}>"))],
                 Vec::new(),
@@ -887,7 +887,7 @@ fn element_rewrites(actions: &mut Actions<'_>, document: &Document<'_>) {
                     .is_empty() =>
         {
             actions.push(
-                format!("Convertir <{name}></{name}> en élément auto-fermant <{name}/>"),
+                format!("Convert <{name}></{name}> to self-closing <{name}/>"),
                 REWRITE,
                 vec![(start_tag.range.end - 1..end_tag.range.end, "/>".to_owned())],
                 Vec::new(),
@@ -899,11 +899,11 @@ fn element_rewrites(actions: &mut Actions<'_>, document: &Document<'_>) {
 }
 
 // ---------------------------------------------------------------------------
-// Liaison à un schéma
+// Schema binding
 // ---------------------------------------------------------------------------
 
-/// Propose de lier un document non lié à un schéma XSD voisin (ou à un
-/// emplacement à compléter).
+/// Offers to bind an unbound document to a neighbouring XSD schema (or to a
+/// placeholder location).
 fn bind_schema_actions(actions: &mut Actions<'_>, document: &Document<'_>) {
     let source = actions.source;
     let Some(root) = document
@@ -967,9 +967,9 @@ fn bind_schema_actions(actions: &mut Actions<'_>, document: &Document<'_>) {
             )),
         }
         let title = if placeholder {
-            format!("Lier le document à un schéma XSD ({file} à compléter)")
+            format!("Bind the document to an XSD schema (placeholder {file})")
         } else {
-            format!("Lier le document au schéma XSD {file}")
+            format!("Bind the document to the XSD schema {file}")
         };
         actions.push(
             title,
@@ -981,8 +981,8 @@ fn bind_schema_actions(actions: &mut Actions<'_>, document: &Document<'_>) {
     }
 }
 
-/// Fichiers `.xsd` du dossier du document : celui qui porte le même nom en
-/// premier, puis par ordre alphabétique.
+/// `.xsd` files of the document's directory: the one with the same name
+/// first, then in alphabetical order.
 fn sibling_schemas(document_path: &Path) -> Vec<String> {
     let Some(directory) = document_path.parent() else {
         return Vec::new();
@@ -1102,7 +1102,7 @@ mod tests {
             enumeration_diagnostics(&mut hover, &uri, source)
         }
 
-        /// Applique l'action intitulée `title`.
+        /// Applies the action titled `title`.
         fn apply(&self, source: &str, actions: &[Value], title: &str) -> String {
             let action = actions
                 .iter()
@@ -1144,27 +1144,27 @@ mod tests {
         assert_eq!(
             titles(&actions),
             vec![
-                "Remplacer </chidl> par </child>",
-                "Renommer <child> en <chidl>"
+                "Replace </chidl> with </child>",
+                "Rename <child> to <chidl>"
             ]
         );
         assert_eq!(actions[0]["isPreferred"], true);
         assert_eq!(actions[0]["kind"], "quickfix");
         assert_eq!(
-            fixture.apply(source, &actions, "Remplacer </chidl> par </child>"),
+            fixture.apply(source, &actions, "Replace </chidl> with </child>"),
             "<root>\n  <child></child>\n</root>"
         );
         assert_eq!(
-            fixture.apply(source, &actions, "Renommer <child> en <chidl>"),
+            fixture.apply(source, &actions, "Rename <child> to <chidl>"),
             "<root>\n  <chidl></chidl>\n</root>"
         );
-        // Hors de la balise fautive : aucun correctif.
+        // Outside the faulty tag: no fix.
         assert!(fixture.actions(source, 0..0, quick_fixes()).is_empty());
 
         let source = "<root></extra></root>";
         let actions = fixture.actions(source, at(source, "extra"), quick_fixes());
         assert_eq!(
-            fixture.apply(source, &actions, "Supprimer la balise fermante </extra>"),
+            fixture.apply(source, &actions, "Remove end tag </extra>"),
             "<root></root>"
         );
     }
@@ -1175,26 +1175,22 @@ mod tests {
         let source = "<root>\n  <item>\n  <other/>\n</root>";
         let actions = fixture.actions(source, at(source, "item"), quick_fixes());
         assert_eq!(
-            fixture.apply(source, &actions, "Fermer <item> avec </item>"),
+            fixture.apply(source, &actions, "Close <item> with </item>"),
             "<root>\n  <item>\n  <other/>\n</item></root>"
         );
         assert_eq!(
-            fixture.apply(
-                source,
-                &actions,
-                "Transformer <item> en élément auto-fermant"
-            ),
+            fixture.apply(source, &actions, "Make <item> self-closing"),
             "<root>\n  <item/>\n  <other/>\n</root>"
         );
 
         let source = "<root><a x=\"1\" \n</root>";
         let actions = fixture.actions(source, at(source, "a x"), quick_fixes());
         assert_eq!(
-            fixture.apply(source, &actions, "Terminer la balise par `/>`"),
+            fixture.apply(source, &actions, "End the tag with `/>`"),
             "<root><a x=\"1\"/> \n</root>"
         );
         assert_eq!(
-            fixture.apply(source, &actions, "Terminer la balise par `>`"),
+            fixture.apply(source, &actions, "End the tag with `>`"),
             "<root><a x=\"1\"> \n</root>"
         );
     }
@@ -1207,10 +1203,10 @@ mod tests {
         assert_eq!(
             titles(&actions),
             vec![
-                "Entourer la valeur de guillemets",
-                "Supprimer l'attribut dupliqué x",
-                "Remplacer `<` par `&lt;`",
-                "Remplacer `&` par `&amp;`",
+                "Quote the value",
+                "Remove duplicate attribute x",
+                "Replace `<` with `&lt;`",
+                "Replace `&` with `&amp;`",
             ]
         );
         let mut fixed = source.to_owned();
@@ -1231,10 +1227,10 @@ mod tests {
             "range": range(5, 6),
             "code": "xml-syntax",
             "data": {"category": "xml", "kind": "unescapedCharacter"},
-            "message": "caractère `&` non échappé",
+            "message": "unescaped `&` character",
         });
-        let other = json!({"range": range(5, 6), "code": "xsd-validation", "message": "autre"});
-        // `&` : colonne UTF-16 5, octet 6 (é occupe deux octets).
+        let other = json!({"range": range(5, 6), "code": "xsd-validation", "message": "other"});
+        // `&`: UTF-16 column 5, byte 6 (é takes two bytes).
         let actions = fixture.actions(
             source,
             6..6,
@@ -1282,21 +1278,21 @@ mod tests {
         let converted = fixture.apply(
             source,
             &actions,
-            "Convertir <item></item> en élément auto-fermant <item/>",
+            "Convert <item></item> to self-closing <item/>",
         );
         assert_eq!(converted, "<root>\n  <item id=\"1\"/>\n</root>");
         let actions = fixture.actions(&converted, at(&converted, "item"), rewrite.clone());
         assert_eq!(
-            fixture.apply(&converted, &actions, "Développer <item/> en <item></item>"),
+            fixture.apply(&converted, &actions, "Expand <item/> to <item></item>"),
             "<root>\n  <item id=\"1\"></item>\n</root>"
         );
         let source = "<p:a xmlns:p=\"urn:p\" />";
         let actions = fixture.actions(source, 1..1, rewrite.clone());
         assert_eq!(
-            fixture.apply(source, &actions, "Développer <p:a/> en <p:a></p:a>"),
+            fixture.apply(source, &actions, "Expand <p:a/> to <p:a></p:a>"),
             "<p:a xmlns:p=\"urn:p\"></p:a>"
         );
-        // Élément non vide ou curseur dans le contenu : pas de réécriture.
+        // Non-empty element or cursor in the content: no rewrite.
         let source = "<a>text</a>";
         assert!(fixture.actions(source, 1..1, rewrite.clone()).is_empty());
         assert!(fixture.actions(source, 5..5, rewrite).is_empty());
@@ -1311,13 +1307,9 @@ mod tests {
         let actions = fixture.actions(&source, first + 3..first + 3, quick_fixes());
         assert_eq!(
             titles(&actions),
-            vec!["Ajouter les attributs requis lang, status"]
+            vec!["Add required attributes lang, status"]
         );
-        let fixed = fixture.apply(
-            &source,
-            &actions,
-            "Ajouter les attributs requis lang, status",
-        );
+        let fixed = fixture.apply(&source, &actions, "Add required attributes lang, status");
         assert!(fixed.contains("<book isbn=\"1\" lang=\"fr\" status=\"draft\">"));
 
         let second = source.rfind("<book").unwrap();
@@ -1325,7 +1317,7 @@ mod tests {
         let fixed = fixture.apply(
             &source,
             &actions,
-            "Ajouter les attributs requis isbn, lang, status",
+            "Add required attributes isbn, lang, status",
         );
         assert!(fixed.contains("<book isbn=\"\" lang=\"fr\" status=\"draft\" />"));
     }
@@ -1342,11 +1334,11 @@ mod tests {
         assert_eq!(diagnostics[0]["data"]["rule"], "invalidEnumeration");
         assert_eq!(
             diagnostics[0]["message"],
-            "valeur `gren` hors énumération pour @color sur <book> (attendu : `red`, `green`, `blue`)"
+            "value `gren` is not in the enumeration of @color on <book> (expected: `red`, `green`, `blue`)"
         );
         assert_eq!(
             diagnostics[1]["message"],
-            "valeur `hardcovers` hors énumération pour <format> (attendu : `hardcover`, `paperback`)"
+            "value `hardcovers` is not in the enumeration of <format> (expected: `hardcover`, `paperback`)"
         );
 
         let color = source.find("gren").unwrap();
@@ -1358,20 +1350,20 @@ mod tests {
         assert_eq!(
             titles(&actions),
             vec![
-                "Remplacer par `red`",
-                "Remplacer par `green`",
-                "Remplacer par `blue`"
+                "Replace with `red`",
+                "Replace with `green`",
+                "Replace with `blue`"
             ]
         );
         assert_eq!(actions[1]["isPreferred"], true);
         assert!(actions[0].get("isPreferred").is_none());
         assert_eq!(actions[1]["diagnostics"], json!([diagnostics[0]]));
-        let fixed = fixture.apply(&source, &actions, "Remplacer par `green`");
+        let fixed = fixture.apply(&source, &actions, "Replace with `green`");
         assert!(fixed.contains("color=\"green\""));
 
         let format = source.find("hardcovers").unwrap();
         let actions = fixture.actions(&source, format + 2..format + 2, quick_fixes());
-        let fixed = fixture.apply(&source, &actions, "Remplacer par `hardcover`");
+        let fixed = fixture.apply(&source, &actions, "Replace with `hardcover`");
         assert!(fixed.contains("<format> hardcover </format>"));
         assert!(fixture.diagnostics(&fixed).len() == 1);
     }
@@ -1384,17 +1376,17 @@ mod tests {
         );
         let unknown = source.find("titel").unwrap();
         let actions = fixture.actions(&source, unknown..unknown, quick_fixes());
-        assert_eq!(titles(&actions), vec!["Vous vouliez dire <title> ?"]);
+        assert_eq!(titles(&actions), vec!["Did you mean <title>?"]);
         assert_eq!(actions[0]["isPreferred"], true);
-        let fixed = fixture.apply(&source, &actions, "Vous vouliez dire <title> ?");
+        let fixed = fixture.apply(&source, &actions, "Did you mean <title>?");
         assert!(fixed.contains("<title>T</title>"));
 
         let source = source
             .replace("<catalog xmlns", "<catalgo xmlns")
             .replace("</catalog>", "</catalgo>");
         let actions = fixture.actions(&source, 3..3, quick_fixes());
-        assert_eq!(titles(&actions), vec!["Vous vouliez dire <catalog> ?"]);
-        // Aucun nom proche : pas de suggestion.
+        assert_eq!(titles(&actions), vec!["Did you mean <catalog>?"]);
+        // No close name: no suggestion.
         let source = source.replace("catalgo", "zzz");
         assert!(fixture.actions(&source, 2..2, quick_fixes()).is_empty());
     }
@@ -1409,8 +1401,8 @@ mod tests {
         assert_eq!(
             titles(&actions),
             vec![
-                "Lier le document au schéma XSD catalog.xsd",
-                "Lier le document au schéma XSD a other.xsd",
+                "Bind the document to the XSD schema catalog.xsd",
+                "Bind the document to the XSD schema a other.xsd",
             ]
         );
         assert_eq!(actions[0]["kind"], "source");
@@ -1418,11 +1410,11 @@ mod tests {
             fixture.apply(
                 source,
                 &actions,
-                "Lier le document au schéma XSD a other.xsd"
+                "Bind the document to the XSD schema a other.xsd"
             ),
             "<?xml version=\"1.0\"?>\n<catalog xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:noNamespaceSchemaLocation=\"a%20other.xsd\">\n  <book/>\n</catalog>"
         );
-        // Déjà lié : rien à proposer.
+        // Already bound: nothing to offer.
         assert!(
             fixture
                 .actions(&format!("{BOUND}</catalog>"), 0..0, source_actions.clone())
@@ -1435,13 +1427,13 @@ mod tests {
         let actions = empty.actions(source, 0..0, source_actions);
         assert_eq!(
             titles(&actions),
-            vec!["Lier le document à un schéma XSD (schema.xsd à compléter)"]
+            vec!["Bind the document to an XSD schema (placeholder schema.xsd)"]
         );
         assert_eq!(
             empty.apply(
                 source,
                 &actions,
-                "Lier le document à un schéma XSD (schema.xsd à compléter)"
+                "Bind the document to an XSD schema (placeholder schema.xsd)"
             ),
             "<t:root xmlns:t=\"urn:t\" xmlns:i=\"http://www.w3.org/2001/XMLSchema-instance\" i:schemaLocation=\"urn:t schema.xsd\"/>"
         );

@@ -1,17 +1,17 @@
-//! `textDocument/prepareRename` et `textDocument/rename`, comme LemMinX et
-//! IntelliJ :
+//! `textDocument/prepareRename` and `textDocument/rename`, like LemMinX and
+//! IntelliJ:
 //!
-//! - nom d'élément : la balise ouvrante et la balise fermante de la paire ;
-//! - préfixe d'espace de noms (`ns` dans `<ns:a>`, `ns:attr`, `type="ns:T"`
-//!   ou `xmlns:ns`) : la déclaration et toutes les utilisations qui lui sont
-//!   liées, en respectant le masquage par une redéclaration imbriquée ;
-//! - composant XSD global nommé (`xs:element`, `xs:attribute`,
-//!   `xs:complexType`, `xs:simpleType`, `xs:group`, `xs:attributeGroup`) :
-//!   l'attribut `name` et les références `ref`, `type`, `base`, `itemType`,
-//!   `memberTypes` et `substitutionGroup` du schéma. Les documents d'instance
-//!   ouverts sont mis à jour par [`instance_ranges`].
+//! - element name: the start tag and the end tag of the pair;
+//! - namespace prefix (`ns` in `<ns:a>`, `ns:attr`, `type="ns:T"` or
+//!   `xmlns:ns`): the declaration and all the uses bound to it, honouring
+//!   shadowing by a nested redeclaration;
+//! - named global XSD component (`xs:element`, `xs:attribute`,
+//!   `xs:complexType`, `xs:simpleType`, `xs:group`, `xs:attributeGroup`):
+//!   the `name` attribute and the `ref`, `type`, `base`, `itemType`,
+//!   `memberTypes` and `substitutionGroup` references of the schema. Open
+//!   instance documents are updated by [`instance_ranges`].
 //!
-//! Tous les offsets sont des offsets d'octets UTF-8.
+//! All offsets are UTF-8 byte offsets.
 
 use std::ops::Range;
 
@@ -26,12 +26,12 @@ use crate::position_at;
 const XSD_NAMESPACE: &str = "http://www.w3.org/2001/XMLSchema";
 const XSI_NAMESPACE: &str = "http://www.w3.org/2001/XMLSchema-instance";
 
-/// Code d'erreur JSON-RPC `InvalidParams`.
+/// JSON-RPC `InvalidParams` error code.
 pub const INVALID_PARAMS: i32 = -32602;
-/// Code d'erreur LSP `RequestFailed`.
+/// LSP `RequestFailed` error code.
 pub const REQUEST_FAILED: i32 = -32803;
 
-/// Erreur de renommage renvoyée au client.
+/// Rename error sent back to the client.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenameError {
     pub code: i32,
@@ -47,37 +47,37 @@ impl RenameError {
     }
 }
 
-/// Espace de symboles d'un composant XSD nommé.
+/// Symbol space of a named XSD component.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComponentKind {
     Element,
     Attribute,
-    /// `xs:complexType` et `xs:simpleType` partagent le même espace.
+    /// `xs:complexType` and `xs:simpleType` share the same space.
     Type,
     Group,
     AttributeGroup,
 }
 
-/// Composant XSD global renommé, à propager aux documents d'instance.
+/// Renamed global XSD component, to propagate to instance documents.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenamedComponent {
     pub kind: ComponentKind,
-    /// `targetNamespace` du schéma (`None` sans espace de noms cible).
+    /// `targetNamespace` of the schema (`None` without a target namespace).
     pub namespace: Option<String>,
     pub old_name: String,
 }
 
-/// Résultat d'un renommage dans le document courant.
+/// Result of a rename in the current document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenamePlan {
-    /// Étendues à remplacer par le nouveau nom, triées et sans doublon.
+    /// Ranges to replace with the new name, sorted and without duplicates.
     pub ranges: Vec<Range<usize>>,
-    /// Composant XSD global renommé, le cas échéant.
+    /// Renamed global XSD component, if any.
     pub component: Option<RenamedComponent>,
 }
 
-/// Retourne `{range, placeholder}` pour le symbole sous le curseur, ou `None`
-/// si aucun renommage n'est possible à cet endroit.
+/// Returns `{range, placeholder}` for the symbol under the cursor, or `None`
+/// if no rename is possible there.
 pub fn prepare_rename(source: &str, offset: usize) -> Option<Value> {
     let document = Document::parse(source);
     let target = document.target_at(offset)?;
@@ -91,10 +91,10 @@ pub fn prepare_rename(source: &str, offset: usize) -> Option<Value> {
     }))
 }
 
-/// Calcule les étendues à renommer pour le symbole sous le curseur.
+/// Computes the ranges to rename for the symbol under the cursor.
 ///
-/// Retourne `Ok(None)` si aucun renommage n'est possible à cet endroit, et
-/// une erreur si `new_name` n'est pas valide pour ce symbole.
+/// Returns `Ok(None)` if no rename is possible there, and an error if
+/// `new_name` is not valid for this symbol.
 pub fn rename(
     source: &str,
     offset: usize,
@@ -108,7 +108,7 @@ pub fn rename(
         Target::Element { names, .. } => {
             if !is_qname(new_name) {
                 return Err(RenameError::invalid(format!(
-                    "« {new_name} » n'est pas un nom d'élément XML valide."
+                    "'{new_name}' is not a valid XML element name."
                 )));
             }
             RenamePlan {
@@ -126,7 +126,7 @@ pub fn rename(
         Target::Component(component) => {
             if !is_ncname(new_name) {
                 return Err(RenameError::invalid(format!(
-                    "« {new_name} » n'est pas un nom de composant XSD valide (NCName attendu)."
+                    "'{new_name}' is not a valid XSD component name (NCName expected)."
                 )));
             }
             document.component_plan(&component)
@@ -135,9 +135,9 @@ pub fn rename(
     Ok(Some(normalize(plan)))
 }
 
-/// Étendues à renommer dans un document d'instance ouvert qui référence le
-/// schéma où `component` a été renommé : noms locaux des éléments et des
-/// attributs globaux qualifiés, et valeurs `xsi:type`.
+/// Ranges to rename in an open instance document referencing the schema
+/// where `component` was renamed: local names of elements and qualified
+/// global attributes, and `xsi:type` values.
 pub fn instance_ranges(source: &str, component: &RenamedComponent) -> Vec<Range<usize>> {
     let document = Document::parse(source);
     let namespace = component.namespace.as_deref();
@@ -185,7 +185,7 @@ pub fn instance_ranges(source: &str, component: &RenamedComponent) -> Vec<Range<
     ranges
 }
 
-/// Convertit des étendues en `TextEdit` LSP remplacés par `new_text`.
+/// Converts ranges into LSP `TextEdit`s replaced by `new_text`.
 pub fn text_edits(source: &str, ranges: &[Range<usize>], new_text: &str) -> Vec<Value> {
     ranges
         .iter()
@@ -207,22 +207,22 @@ fn normalize(mut plan: RenamePlan) -> RenamePlan {
     plan
 }
 
-/// Symbole renommable sous le curseur.
+/// Renameable symbol under the cursor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Target {
-    /// Noms qualifiés complets des balises de la paire (ouvrante en premier).
+    /// Full qualified names of the tags of the pair (start tag first).
     Element {
         names: Vec<Range<usize>>,
         cursor: Range<usize>,
     },
-    /// Préfixe lié à la déclaration `xmlns:prefix` de l'élément `binding`.
+    /// Prefix bound to the `xmlns:prefix` declaration of the `binding` element.
     Prefix { binding: usize, range: Range<usize> },
-    /// Composant XSD nommé.
+    /// Named XSD component.
     Component(Component),
 }
 
 impl Target {
-    /// Étendue présentée au client (contient toujours le curseur).
+    /// Range presented to the client (always contains the cursor).
     fn range(&self) -> Range<usize> {
         match self {
             Self::Element { cursor, .. } => cursor.clone(),
@@ -235,40 +235,40 @@ impl Target {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Component {
     kind: ComponentKind,
-    /// Élément de déclaration (`xs:element`, `xs:complexType`...).
+    /// Declaration element (`xs:element`, `xs:complexType`...).
     declaration: usize,
-    /// Valeur de l'attribut `name` de la déclaration.
+    /// Value of the `name` attribute of the declaration.
     name: Range<usize>,
-    /// Déclaration globale (enfant direct de `xs:schema`).
+    /// Global declaration (direct child of `xs:schema`).
     global: bool,
-    /// Étendue sous le curseur (le nom déclaré ou le nom local référencé).
+    /// Range under the cursor (the declared name or the referenced local name).
     cursor: Range<usize>,
 }
 
-/// Préfixe utilisé dans le document.
+/// Prefix used in the document.
 #[derive(Debug, Clone)]
 struct PrefixUse {
-    /// Élément dans le contexte duquel le préfixe est résolu.
+    /// Element in whose context the prefix is resolved.
     element: usize,
-    /// Étendue du préfixe (sans `:`).
+    /// Range of the prefix (without `:`).
     range: Range<usize>,
-    /// `true` pour le nom local d'une déclaration `xmlns:prefix`.
+    /// `true` for the local name of an `xmlns:prefix` declaration.
     declaration: bool,
 }
 
-/// Nom qualifié présent dans la valeur d'un attribut de type `QName`.
+/// Qualified name found in the value of a `QName`-typed attribute.
 #[derive(Debug, Clone)]
 struct QNameToken {
     prefix: Option<Range<usize>>,
     local: Range<usize>,
-    /// Espace de symboles référencé (`None` pour `xs:keyref/@refer`).
+    /// Referenced symbol space (`None` for `xs:keyref/@refer`).
     kind: Option<ComponentKind>,
 }
 
 struct Document<'a> {
     source: &'a str,
     tree: XmlTagTree,
-    /// Attributs de la balise ouvrante de chaque élément.
+    /// Attributes of the start tag of each element.
     attributes: Vec<Vec<XmlAttribute>>,
 }
 
@@ -297,14 +297,14 @@ impl<'a> Document<'a> {
         &self.source[local]
     }
 
-    /// Élément le plus proche (lui-même inclus) qui déclare `prefix`
-    /// (`None` : espace de noms par défaut).
+    /// Nearest element (itself included) declaring `prefix`
+    /// (`None`: default namespace).
     fn declaration(&self, element: usize, prefix: Option<&str>) -> Option<(usize, &XmlAttribute)> {
         namespace_declaration(self.source, &self.tree, &self.attributes, element, prefix)
     }
 
-    /// Espace de noms de `prefix` dans le contexte de `element`. Retourne
-    /// `None` pour un préfixe non déclaré et `Some(None)` sans espace de noms.
+    /// Namespace of `prefix` in the context of `element`. Returns `None`
+    /// for an undeclared prefix and `Some(None)` for no namespace.
     fn namespace(&self, element: usize, prefix: Option<&str>) -> Option<Option<&'a str>> {
         resolve_namespace(self.source, &self.tree, &self.attributes, element, prefix)
     }
@@ -314,15 +314,15 @@ impl<'a> Document<'a> {
         &self.source[name] == local && self.namespace(element, prefix) == Some(Some(XSD_NAMESPACE))
     }
 
-    /// Attribut non préfixé `name` de l'élément.
+    /// Unprefixed attribute `name` of the element.
     fn attribute(&self, element: usize, name: &str) -> Option<&XmlAttribute> {
         self.attributes[element]
             .iter()
             .find(|attribute| attribute.name(self.source) == name)
     }
 
-    /// Noms qualifiés contenus dans les attributs de type `QName` de
-    /// l'élément : références XSD et `xsi:type`.
+    /// Qualified names contained in the `QName`-typed attributes of the
+    /// element: XSD references and `xsi:type`.
     fn qname_tokens(&self, element: usize) -> Vec<QNameToken> {
         let mut tokens = Vec::new();
         let xsd_local = self
@@ -374,7 +374,7 @@ impl<'a> Document<'a> {
         tokens
     }
 
-    /// Indique si `token` désigne `name` dans l'espace de noms `namespace`.
+    /// Whether `token` designates `name` in the namespace `namespace`.
     fn token_matches(
         &self,
         element: usize,
@@ -387,7 +387,7 @@ impl<'a> Document<'a> {
             && self.namespace(element, prefix) == Some(namespace)
     }
 
-    /// Toutes les utilisations de préfixes du document.
+    /// All prefix uses of the document.
     fn prefix_uses(&self) -> Vec<PrefixUse> {
         let mut uses = Vec::new();
         let mut push = |element: usize, range: Option<Range<usize>>, declaration: bool| {
@@ -438,7 +438,7 @@ impl<'a> Document<'a> {
         uses
     }
 
-    /// Élément dont la déclaration `xmlns:prefix` lie l'utilisation `use_`.
+    /// Element whose `xmlns:prefix` declaration binds the use `use_`.
     fn binding(&self, use_: &PrefixUse) -> Option<usize> {
         if use_.declaration {
             return Some(use_.element);
@@ -461,12 +461,12 @@ impl<'a> Document<'a> {
     fn validate_prefix(&self, binding: usize, old: &str, new: &str) -> Result<(), RenameError> {
         if !is_ncname(new) {
             return Err(RenameError::invalid(format!(
-                "« {new} » n'est pas un préfixe d'espace de noms valide."
+                "'{new}' is not a valid namespace prefix."
             )));
         }
         if new.eq_ignore_ascii_case("xml") || new.eq_ignore_ascii_case("xmlns") {
             return Err(RenameError::invalid(format!(
-                "Le préfixe « {new} » est réservé."
+                "The prefix '{new}' is reserved."
             )));
         }
         let declared = self.attributes[binding]
@@ -476,7 +476,7 @@ impl<'a> Document<'a> {
             return Err(RenameError {
                 code: REQUEST_FAILED,
                 message: format!(
-                    "Le préfixe « {new} » est déjà déclaré sur l'élément <{}>.",
+                    "The prefix '{new}' is already declared on the element <{}>.",
                     self.tree.elements()[binding].name(self.source)
                 ),
             });
@@ -557,7 +557,7 @@ impl<'a> Document<'a> {
         None
     }
 
-    /// Déclaration de composant XSD nommé portée par l'élément `index`.
+    /// Named XSD component declaration carried by the element `index`.
     fn component_declaration(&self, index: usize) -> Option<Component> {
         let local = self.local_name(index);
         let kind = match local {
@@ -584,7 +584,7 @@ impl<'a> Document<'a> {
         })
     }
 
-    /// `targetNamespace` du `xs:schema` englobant.
+    /// `targetNamespace` of the enclosing `xs:schema`.
     fn target_namespace(&self, element: usize) -> Option<&'a str> {
         let schema = std::iter::once(element)
             .chain(self.tree.ancestors(element))
@@ -626,7 +626,7 @@ impl<'a> Document<'a> {
     }
 }
 
-/// `NameStartChar` de XML 1.0 5e édition.
+/// `NameStartChar` from XML 1.0 5th edition.
 fn is_name_start_char(character: char) -> bool {
     matches!(character,
         ':' | 'A'..='Z' | '_' | 'a'..='z'
@@ -636,14 +636,14 @@ fn is_name_start_char(character: char) -> bool {
         | '\u{F900}'..='\u{FDCF}' | '\u{FDF0}'..='\u{FFFD}' | '\u{10000}'..='\u{EFFFF}')
 }
 
-/// `NameChar` de XML 1.0 5e édition.
+/// `NameChar` from XML 1.0 5th edition.
 fn is_name_char(character: char) -> bool {
     is_name_start_char(character)
         || matches!(character,
             '-' | '.' | '0'..='9' | '\u{B7}' | '\u{300}'..='\u{36F}' | '\u{203F}'..='\u{2040}')
 }
 
-/// Nom sans deux-points (`NCName` de « Namespaces in XML »).
+/// Name without a colon (`NCName` from "Namespaces in XML").
 pub fn is_ncname(name: &str) -> bool {
     let mut characters = name.chars();
     characters
@@ -652,7 +652,7 @@ pub fn is_ncname(name: &str) -> bool {
         && characters.all(|character| character != ':' && is_name_char(character))
 }
 
-/// Nom qualifié `prefix:local` ou `local`.
+/// Qualified name `prefix:local` or `local`.
 pub fn is_qname(name: &str) -> bool {
     match name.split_once(':') {
         Some((prefix, local)) => is_ncname(prefix) && is_ncname(local),
@@ -664,7 +664,7 @@ pub fn is_qname(name: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// Applique le renommage et retourne le document obtenu.
+    /// Applies the rename and returns the resulting document.
     fn renamed(source: &str, offset: usize, new_name: &str) -> Option<String> {
         let plan = rename(source, offset, new_name).expect("rename should succeed")?;
         Some(apply(source, &plan.ranges, new_name))
@@ -702,7 +702,7 @@ mod tests {
             );
         }
         assert_eq!(placeholder(source, 9).as_deref(), Some("item"));
-        // La plage retournée est celle du nom sous le curseur.
+        // The returned range is the one of the name under the cursor.
         let result = prepare_rename(source, 21).unwrap();
         assert_eq!(result["range"]["start"]["character"], 21);
         assert_eq!(result["range"]["end"]["character"], 25);
@@ -752,7 +752,7 @@ mod tests {
         for name in ["", "1a", "a b", "a>", ":a", "a:", "a:b:c", "-a", "a/"] {
             let error = rename(source, 1, name).expect_err(name);
             assert_eq!(error.code, INVALID_PARAMS);
-            assert!(error.message.contains("nom d'élément XML valide"), "{name}");
+            assert!(error.message.contains("valid XML element name"), "{name}");
         }
         for name in ["a", "_a", "a-b.c", "p:a", "élément", "😀"] {
             assert!(rename(source, 1, name).is_ok(), "{name}");
@@ -807,7 +807,7 @@ mod tests {
                 Some(expected),
                 "{needle}"
             );
-            // Juste avant `:`.
+            // Right before `:`.
             assert_eq!(
                 renamed(source, offset + 2, "p").as_deref(),
                 Some(expected),
@@ -857,7 +857,7 @@ mod tests {
             renamed(source, offset, "q").as_deref(),
             Some("<root xmlns=\"urn:d\" xmlns:q=\"urn:p\"><child q:a=\"\"/><q:child/></root>")
         );
-        // Élément sans préfixe : renommage d'élément.
+        // Unprefixed element: element rename.
         assert_eq!(
             placeholder(source, at(source, "child", 0)).as_deref(),
             Some("child")
@@ -872,7 +872,7 @@ mod tests {
             renamed(source, 1, "v:item").as_deref(),
             Some("<v:item></v:item>")
         );
-        // Attribut à préfixe non déclaré : rien à renommer.
+        // Attribute with an undeclared prefix: nothing to rename.
         assert_eq!(prepare_rename("<a u:b=\"\"/>", 3), None);
     }
 
@@ -888,7 +888,7 @@ mod tests {
         }
         let conflict = rename(source, 1, "q").unwrap_err();
         assert_eq!(conflict.code, REQUEST_FAILED);
-        assert!(conflict.message.contains("déjà déclaré"));
+        assert!(conflict.message.contains("already declared"));
         assert!(rename(source, 1, "p").is_ok());
     }
 
@@ -942,8 +942,8 @@ mod tests {
         assert!(result.contains("type=\"t:Entry\""));
         assert!(result.contains("complexType name=\"Entry\""));
         assert!(result.contains("base=\"t:Entry\""));
-        // Sans espace de noms par défaut, `ItemType` non préfixé n'est pas
-        // dans `urn:t`.
+        // Without a default namespace, the unprefixed `ItemType` is not in
+        // `urn:t`.
         assert!(result.contains("itemType=\"ItemType\""));
         assert_eq!(
             plan.component,
@@ -953,7 +953,7 @@ mod tests {
                 old_name: "ItemType".into(),
             })
         );
-        // Depuis une référence.
+        // From a reference.
         let from_reference = rename(SCHEMA, at(SCHEMA, "t:ItemType", 1) + 4, "Entry")
             .unwrap()
             .unwrap();
@@ -968,18 +968,18 @@ mod tests {
         assert!(result.contains("<xs:element name=\"entry\" type=\"t:ItemType\""));
         assert!(result.contains("ref=\"t:entry\""));
         assert!(result.contains("<xs:element name=\"item\" type=\"xs:string\""));
-        // Déclaration locale : seul son nom est renommé.
+        // Local declaration: only its name is renamed.
         let local = at(SCHEMA, "\"item\"", 1) + 1;
         let plan = rename(SCHEMA, local, "x").unwrap().unwrap();
         assert_eq!(plan.ranges.len(), 1);
         assert_eq!(plan.component, None);
-        // `substitutionGroup` référence un élément global.
+        // `substitutionGroup` references a global element.
         let base = rename(SCHEMA, at(SCHEMA, "t:base", 0) + 3, "root")
             .unwrap()
             .unwrap();
         assert!(apply(SCHEMA, &base.ranges, "root").contains("name=\"root\"/>"));
         assert_eq!(base.ranges.len(), 2);
-        // Types prédéfinis et noms invalides.
+        // Built-in types and invalid names.
         assert_eq!(prepare_rename(SCHEMA, at(SCHEMA, "xs:string", 0) + 4), None);
         assert_eq!(
             rename(SCHEMA, offset, "a:b").unwrap_err().code,
@@ -1055,7 +1055,7 @@ mod tests {
                 let _ = rename(source, offset, "n");
             }
         }
-        // Balise fermante orpheline dans la portée d'une déclaration.
+        // Orphan end tag in the scope of a declaration.
         let source = "<a xmlns:p=\"u\"><p:b/></p:c></a>";
         assert_eq!(
             renamed(source, at(source, "p:c", 0), "q").as_deref(),
