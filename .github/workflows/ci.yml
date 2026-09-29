@@ -2,6 +2,7 @@ name: CI
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, closed]
   push:
     tags:
       - "v*"
@@ -9,7 +10,7 @@ on:
 jobs:
   checks:
     name: Format and tests
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && github.event.action != 'closed'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,64 +24,55 @@ jobs:
         run: |
           test -z "$(git ls-files -- 'grammars/**' '*.wasm' 'target/**')"
 
-  synchronize_release_version:
-    name: Synchronize release version
+  prepare_release_pr:
+    name: Prepare release version PR
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    outputs:
-      commit_sha: ${{ steps.sync.outputs.commit_sha }}
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ github.ref_name }}
       - uses: dtolnay/rust-toolchain@stable
-      - id: sync
-        name: Commit versions and move tag
+      - name: Commit synchronized versions and open PR
         shell: bash
         env:
-          RELEASE_VERSION: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ github.ref_name }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          VERSION="${RELEASE_VERSION#v}"
+          VERSION="${RELEASE_TAG#v}"
           if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Invalid release tag: $RELEASE_VERSION"
+            echo "Invalid release tag: $RELEASE_TAG"
             exit 1
           fi
 
+          BRANCH="release/version-sync-$RELEASE_TAG"
+          git switch -c "$BRANCH"
           VERSION="$VERSION" python - <<'PY'
           import os
           import pathlib
           import re
 
           version = os.environ["VERSION"]
-          files = [
+          package_pattern = re.compile(r'(?m)^(version\s*=\s*")[^"]+("\s*)$')
+          for path in [
               pathlib.Path("Cargo.toml"),
               pathlib.Path("crates/xml-core/Cargo.toml"),
               pathlib.Path("crates/xsd-core/Cargo.toml"),
               pathlib.Path("crates/xml-lsp/Cargo.toml"),
-          ]
-          package_pattern = re.compile(r'(?m)^(version\s*=\s*")[^"]+("\s*)$')
-          for path in files:
+              pathlib.Path("extension.toml"),
+          ]:
               content = path.read_text(encoding="utf-8")
-              updated, count = package_pattern.subn(rf'\g<1>{version}\g<2>', content, count=1)
+              updated, count = package_pattern.subn(
+                  rf'\g<1>{version}\g<2>', content, count=1
+              )
               if count != 1:
-                  raise SystemExit(f"Could not update package version in {path}")
+                  raise SystemExit(f"Could not update version in {path}")
               path.write_text(updated, encoding="utf-8", newline="\n")
-
-          extension = pathlib.Path("extension.toml")
-          content = extension.read_text(encoding="utf-8")
-          updated, count = re.subn(
-              r'(?m)^(version\s*=\s*")[^"]+("\s*)$',
-              rf'\g<1>{version}\g<2>',
-              content,
-              count=1,
-          )
-          if count != 1:
-              raise SystemExit("Could not update extension.toml")
-          extension.write_text(updated, encoding="utf-8", newline="\n")
           PY
 
           cargo check --workspace
@@ -88,18 +80,30 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add Cargo.toml crates/*/Cargo.toml Cargo.lock extension.toml
           if git diff --cached --quiet; then
-            echo "commit_sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+            echo "Versions are already synchronized."
             exit 0
           fi
-          git commit -m "chore: synchronize release version $RELEASE_VERSION"
-          git push origin "HEAD:$DEFAULT_BRANCH"
-          git push --force origin "HEAD:refs/tags/$RELEASE_VERSION"
-          echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git commit -m "chore: synchronize release version $RELEASE_TAG"
+          git push --force origin "HEAD:refs/heads/$BRANCH"
+
+          PR_NUMBER=$(gh pr list --head "$BRANCH" --base "$DEFAULT_BRANCH" --state open --json number --jq '.[0].number')
+          if [[ -z "$PR_NUMBER" ]]; then
+            PR_URL=$(gh pr create \
+              --base "$DEFAULT_BRANCH" \
+              --head "$BRANCH" \
+              --title "chore: synchronize release version $RELEASE_TAG" \
+              --body "Synchronize Cargo, Cargo.lock, and extension.toml versions with release tag $RELEASE_TAG.\n\nMerge this PR to build and publish the release.")
+            PR_NUMBER="${PR_URL##*/}"
+          fi
+          gh pr review "$PR_NUMBER" --approve || true
 
   native:
     name: Build ${{ matrix.target }}
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: synchronize_release_version
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.action == 'closed' &&
+      github.event.pull_request.merged == true &&
+      startsWith(github.event.pull_request.head.ref, 'release/version-sync-v')
     strategy:
       fail-fast: false
       matrix:
@@ -120,7 +124,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.synchronize_release_version.outputs.commit_sha }}
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -138,7 +142,11 @@ jobs:
 
   release:
     name: Publish native LSP release assets
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.action == 'closed' &&
+      github.event.pull_request.merged == true &&
+      startsWith(github.event.pull_request.head.ref, 'release/version-sync-v')
     needs: native
     runs-on: ubuntu-latest
     permissions:
@@ -149,7 +157,16 @@ jobs:
           pattern: xml-lsp-*
           path: dist
           merge-multiple: true
+      - name: Move release tag to merged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.pull_request.head.ref }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          git fetch origin "$RELEASE_TAG"
+          git push --force origin "$MERGE_SHA:refs/tags/$RELEASE_TAG"
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event.pull_request.head.ref }}
           files: dist/*
           generate_release_notes: true
