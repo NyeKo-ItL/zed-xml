@@ -1,5 +1,7 @@
 //! Modèle et parsing XSD partagés par le serveur LSP.
 
+pub mod model;
+
 use std::{
     collections::HashMap,
     path::{Component, Path, PathBuf},
@@ -1012,7 +1014,9 @@ fn apply_attribute_group_references(source: &str, schema: &mut XsdSchema) -> Res
     Ok(())
 }
 
-fn resolve_path(base_directory: &Path, value: &str) -> PathBuf {
+/// Résout un chemin de schéma (`schemaLocation`) relatif à `base_directory`
+/// et normalise les composants `.` et `..`.
+pub fn resolve_path(base_directory: &Path, value: &str) -> PathBuf {
     let path = Path::new(value);
     if path.is_absolute() {
         path.to_owned()

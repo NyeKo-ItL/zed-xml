@@ -284,6 +284,64 @@ pub fn qualified_name_parts(
     }
 }
 
+/// Espace de noms réservé du préfixe `xml`.
+pub const XML_NAMESPACE: &str = "http://www.w3.org/XML/1998/namespace";
+
+/// Élément le plus proche (`element` lui-même inclus) qui déclare `prefix`
+/// (`None` : espace de noms par défaut `xmlns`), avec l'attribut déclarant.
+/// `attributes[i]` sont les attributs de la balise ouvrante de l'élément `i`
+/// de `tree` (voir [`scan_attributes`]).
+pub fn namespace_declaration<'t>(
+    source: &str,
+    tree: &XmlTagTree,
+    attributes: &'t [Vec<XmlAttribute>],
+    element: usize,
+    prefix: Option<&str>,
+) -> Option<(usize, &'t XmlAttribute)> {
+    std::iter::once(element)
+        .chain(tree.ancestors(element))
+        .find_map(|index| {
+            attributes
+                .get(index)?
+                .iter()
+                .find(|attribute| {
+                    let name = attribute.name(source);
+                    match prefix {
+                        Some(prefix) => name.strip_prefix("xmlns:") == Some(prefix),
+                        None => name == "xmlns",
+                    }
+                })
+                .map(|attribute| (index, attribute))
+        })
+}
+
+/// Espace de noms de `prefix` dans le contexte de l'élément `element`, en
+/// remontant les déclarations `xmlns` des ancêtres. Retourne `None` pour un
+/// préfixe non déclaré et `Some(None)` sans espace de noms (préfixe absent
+/// sans `xmlns` par défaut, ou `xmlns=""`). Le préfixe `xml` est prédéfini.
+pub fn resolve_namespace<'s>(
+    source: &'s str,
+    tree: &XmlTagTree,
+    attributes: &[Vec<XmlAttribute>],
+    element: usize,
+    prefix: Option<&str>,
+) -> Option<Option<&'s str>> {
+    if prefix == Some("xml") {
+        return Some(Some(XML_NAMESPACE));
+    }
+    match namespace_declaration(source, tree, attributes, element, prefix) {
+        Some((_, attribute)) => Some(
+            attribute
+                .value
+                .clone()
+                .map(|range| &source[range])
+                .filter(|value| !value.is_empty()),
+        ),
+        None if prefix.is_none() => Some(None),
+        None => None,
+    }
+}
+
 /// Attribut repéré lexicalement dans une balise ouvrante ou auto-fermante.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XmlAttribute {
