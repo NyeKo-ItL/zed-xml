@@ -1,6 +1,10 @@
 # XML for Zed
 
-XML language support for Zed, including XML, XSD, XSLT, SVG, WSDL, plist, XJB and Android XML files.
+XML language support for Zed, including XML, XSD, XSLT, SVG, WSDL, plist, XJB, Android XML and DTD files, powered by a native Rust language server (`xml-lsp`) with XSD, DTD and XML catalog support.
+
+## Installation
+
+Install the extension from Zed's extensions page (`zed: extensions`), or from a clone of this repository with `zed: install dev extension` (see [CONTRIBUTING.md](CONTRIBUTING.md#development-extension)). The first time an XML file is opened, the extension downloads the `xml-lsp` binary matching its version from the [GitHub releases](https://github.com/NyeKo-ItL/zed-xml/releases) (Windows x86_64, Linux x86_64 and macOS arm64). On other platforms, build the server yourself and point `XML_LSP_PATH` at it (see [Language server](#language-server)).
 
 ## Features
 
@@ -29,28 +33,21 @@ XML language support for Zed, including XML, XSD, XSLT, SVG, WSDL, plist, XJB an
 - Workspace-aware revalidation when an open XSD changes.
 - LemMinX-style `xml.*` settings (formatting, validation, file associations, completion, symbols, colors) from Zed `lsp.xml-lsp.settings`, applied live (see [Configuration](#configuration)).
 
-## Native Rust language server
+## Language server
 
-The extension uses the `xml-lsp` server from `crates/xml-lsp`. The server is deliberately kept as a native executable; the Zed extension itself remains a `wasm32-wasip2` module.
+The extension runs the `xml-lsp` server from `crates/xml-lsp`. The server is a native executable; the Zed extension itself is a `wasm32-wasip2` module.
 
-The extension searches for the server in this order:
+The extension looks for the server in this order:
 
 1. `XML_LSP_PATH`, containing the path to a local `xml-lsp` executable;
 2. the cached native binary, when its `--version` output matches the extension version;
 3. a native binary downloaded from the matching GitHub release.
 
-Set `XML_LSP_DOWNLOAD_URL` to use a custom download URL. Downloaded binaries are always checked with `--version` before they are started. The cache and release download are independent of the directory containing the XML file; this is the mode used for normal installations.
+Set `XML_LSP_DOWNLOAD_URL` to use a custom download URL. Downloaded binaries are always checked with `--version` before they are started. The cache and release download are independent of the directory containing the XML file.
 
-From this repository on Windows, build the server with:
+The server never downloads schemas, DTDs or entities: remote locations must be mapped to local files through [XML catalogs](docs/configuration.md#xml-catalogs). Full XSD conformance is still a work in progress.
 
-```powershell
-cargo build -p xml-lsp
-$env:XML_LSP_PATH = "$PWD\target\debug\xml-lsp.exe"
-```
-
-Then install the repository as a development extension in Zed. The **Rebuild** button recompiles the WASI extension. Restart the XML language server after changing the native Rust server or rebuild it with Cargo. When opening XML files outside this repository, keep `XML_LSP_PATH` configured or use a released native binary.
-
-The native server is still an evolving subset of XML/XSD support. Full XSD conformance, downloading remote schemas and release-time native binary distribution remain separate tasks.
+## Editor settings
 
 If Zed has a user or project formatter override, force XML formatting through the LSP with this setting:
 
@@ -131,26 +128,19 @@ The server reads LemMinX-style settings from an `xml` section. In Zed, put them 
 
 See [docs/configuration.md](docs/configuration.md) for the full reference.
 
-## Development extension
+## Troubleshooting
 
-1. Open the repository in Zed.
-2. Run **Extensions: Install Dev Extension**.
-3. Select this repository.
-4. Use **Rebuild** from the development extensions list after changing `src/lib.rs` or `extension.toml`.
-5. Open an XML document and inspect `zed: open log` if the server does not start.
+- **The server does not start**: run `zed: open log` and look for `xml-lsp` messages. A failed download mentions the release asset name; set `XML_LSP_PATH` to a locally built binary (`cargo build -p xml-lsp --release`) to work around it. Restart the server with `editor: restart language server`.
+- **Wrong or outdated binary**: `XML_LSP_PATH` always wins, so make sure it points at an up-to-date build or unset it. Without it, a cached binary whose `xml-lsp --version` differs from the extension version is replaced by the matching release. `XML_LSP_PATH` and `XML_LSP_DOWNLOAD_URL` are read from the shell environment of the project, so set them in the shell Zed is launched from.
+- **No XSD validation or completion**: check that the document declares `xsi:schemaLocation`/`xsi:noNamespaceSchemaLocation`, or add an `xml.fileAssociations` entry. Remote (`http(s)://`) schemas are not downloaded: map them with `xml.catalogs` (a warning diagnostic points at unmapped locations).
+- **Formatting does nothing**: make sure `formatter` is `language_server` for XML (see [Editor settings](#editor-settings)) and that `xml.format.enabled` is not `false`. Regions that are not well-formed are left untouched by range formatting.
+- **Folding ranges from the server are not used**: set `document_folding_ranges` to `"on"` for XML.
+- **Detailed traces**: `dev: open language server logs` shows the LSP messages exchanged with `xml-lsp`; the server logs errors (unreadable catalogs, schema loading failures) to its stderr, visible there too.
 
-## Build
+## Contributing
 
-The extension is a Zed WASI extension, not a console binary:
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup, building the server and the extension, tests and the release process, and [AGENTS.md](AGENTS.md) for the architecture and coding conventions. Notable changes are listed in [CHANGELOG.md](CHANGELOG.md).
 
-```powershell
-rustup target add wasm32-wasip2
-cargo build --target wasm32-wasip2
-```
+## License
 
-The native language server is built separately:
-
-```powershell
-cargo build -p xml-lsp
-cargo run -p xml-lsp -- --stdio
-```
+[MIT](LICENSE)

@@ -27,7 +27,5 @@ extension.wasm
 
 /target
 
-docs/
-
 # Generated Tree-sitter grammar sources
 /grammars/
