@@ -17,11 +17,10 @@ The extension uses the `xml-lsp` server from `crates/xml-lsp`. The server is del
 The extension searches for the server in this order:
 
 1. `XML_LSP_PATH`, containing the path to a local `xml-lsp` executable;
-2. an `xml-lsp` executable available on `PATH`;
-3. `cargo run --quiet -p xml-lsp -- --stdio`, but only when the opened worktree itself contains the Cargo workspace;
-4. the matching native binary downloaded from the latest GitHub release.
+2. the cached native binary, when its `--version` output matches the extension version;
+3. a native binary downloaded from the matching GitHub release.
 
-The last mode is independent of the directory containing the XML file. It is the mode used for normal installations.
+Set `XML_LSP_DOWNLOAD_URL` to use a custom download URL. Downloaded binaries are always checked with `--version` before they are started. The cache and release download are independent of the directory containing the XML file; this is the mode used for normal installations.
 
 From this repository on Windows, build the server with:
 
