@@ -805,14 +805,14 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "xml-core"
-version = "0.1.0"
+version = "0.7.0"
 dependencies = [
  "quick-xml",
 ]
 
 [[package]]
 name = "xml-lsp"
-version = "0.5.0"
+version = "0.7.0"
 dependencies = [
  "lsp-server",
  "quick-xml",
@@ -823,7 +823,7 @@ dependencies = [
 
 [[package]]
 name = "xsd-core"
-version = "0.1.0"
+version = "0.7.0"
 dependencies = [
  "quick-xml",
  "regex",
@@ -854,7 +854,7 @@ dependencies = [
 
 [[package]]
 name = "zed-xml"
-version = "0.1.0"
+version = "0.7.0"
 dependencies = [
  "zed_extension_api",
 ]
