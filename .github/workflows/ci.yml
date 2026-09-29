@@ -23,9 +23,83 @@ jobs:
         run: |
           test -z "$(git ls-files -- 'grammars/**' '*.wasm' 'target/**')"
 
+  synchronize_release_version:
+    name: Synchronize release version
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      commit_sha: ${{ steps.sync.outputs.commit_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref_name }}
+      - uses: dtolnay/rust-toolchain@stable
+      - id: sync
+        name: Commit versions and move tag
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          VERSION="${RELEASE_VERSION#v}"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid release tag: $RELEASE_VERSION"
+            exit 1
+          fi
+
+          VERSION="$VERSION" python - <<'PY'
+          import os
+          import pathlib
+          import re
+
+          version = os.environ["VERSION"]
+          files = [
+              pathlib.Path("Cargo.toml"),
+              pathlib.Path("crates/xml-core/Cargo.toml"),
+              pathlib.Path("crates/xsd-core/Cargo.toml"),
+              pathlib.Path("crates/xml-lsp/Cargo.toml"),
+          ]
+          package_pattern = re.compile(r'(?m)^(version\s*=\s*")[^"]+("\s*)$')
+          for path in files:
+              content = path.read_text(encoding="utf-8")
+              updated, count = package_pattern.subn(rf'\g<1>{version}\g<2>', content, count=1)
+              if count != 1:
+                  raise SystemExit(f"Could not update package version in {path}")
+              path.write_text(updated, encoding="utf-8", newline="\n")
+
+          extension = pathlib.Path("extension.toml")
+          content = extension.read_text(encoding="utf-8")
+          updated, count = re.subn(
+              r'(?m)^(version\s*=\s*")[^"]+("\s*)$',
+              rf'\g<1>{version}\g<2>',
+              content,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit("Could not update extension.toml")
+          extension.write_text(updated, encoding="utf-8", newline="\n")
+          PY
+
+          cargo check --workspace
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml crates/*/Cargo.toml Cargo.lock extension.toml
+          if git diff --cached --quiet; then
+            echo "commit_sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git commit -m "chore: synchronize release version $RELEASE_VERSION"
+          git push origin "HEAD:$DEFAULT_BRANCH"
+          git push --force origin "HEAD:refs/tags/$RELEASE_VERSION"
+          echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
   native:
     name: Build ${{ matrix.target }}
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: synchronize_release_version
     strategy:
       fail-fast: false
       matrix:
@@ -38,7 +112,6 @@ jobs:
             target: x86_64-unknown-linux-gnu
             binary: xml-lsp
             asset: xml-lsp-x86_64-unknown-linux-gnu
-
           - os: macos-14
             target: aarch64-apple-darwin
             binary: xml-lsp
@@ -46,36 +119,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.synchronize_release_version.outputs.commit_sha }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - name: Synchronize Cargo package versions with the release tag
-        shell: bash
-        env:
-          RELEASE_VERSION: ${{ github.ref_name }}
-        run: |
-          VERSION="${RELEASE_VERSION#v}"
-          VERSION="$VERSION" python - <<'PY'
-          import os
-          import pathlib
-          import re
-
-          version = os.environ["VERSION"]
-          manifests = [
-              pathlib.Path("Cargo.toml"),
-              pathlib.Path("crates/xml-core/Cargo.toml"),
-              pathlib.Path("crates/xsd-core/Cargo.toml"),
-              pathlib.Path("crates/xml-lsp/Cargo.toml"),
-          ]
-          pattern = re.compile(r'(?m)^(version\s*=\s*")[^"]+("\s*)$')
-          for manifest in manifests:
-              content = manifest.read_text(encoding="utf-8")
-              updated, count = pattern.subn(rf'\g<1>{version}\g<2>', content, count=1)
-              if count != 1:
-                  raise SystemExit(f"Could not update package version in {manifest}")
-              manifest.write_text(updated, encoding="utf-8", newline="\n")
-          print(f"Synchronized Cargo packages to {version}")
-          PY
       - run: cargo build -p xml-lsp --release --target ${{ matrix.target }}
       - name: Prepare release asset
         shell: bash
