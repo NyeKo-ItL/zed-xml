@@ -11,6 +11,7 @@ XML language support for Zed, including XML, XSD, XSLT, SVG, WSDL, plist, XJB an
 - Comment and string scopes so auto-closing brackets and quotes stay out of comments and attribute values.
 - Automatic bracket and tag editing provided by Zed.
 - Native Rust LSP for XML diagnostics, formatting, completion, navigation and XSD validation.
+- Matching start/end tag name highlighting (`textDocument/documentHighlight`), including prefixed names and malformed documents.
 - `xsi:schemaLocation` and `xsi:noNamespaceSchemaLocation` support.
 - Workspace-aware revalidation when an open XSD changes.
 
