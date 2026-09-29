@@ -2,6 +2,7 @@
 
 mod highlight;
 mod linked_editing;
+mod rename;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -36,6 +37,8 @@ const REFERENCES_METHOD: &str = "textDocument/references";
 const COMPLETION_METHOD: &str = "textDocument/completion";
 const DOCUMENT_HIGHLIGHT_METHOD: &str = "textDocument/documentHighlight";
 const LINKED_EDITING_RANGE_METHOD: &str = "textDocument/linkedEditingRange";
+const PREPARE_RENAME_METHOD: &str = "textDocument/prepareRename";
+const RENAME_METHOD: &str = "textDocument/rename";
 
 type SchemaCache = HashMap<PathBuf, (SystemTime, XsdSchema)>;
 
@@ -410,6 +413,62 @@ impl XmlLanguageServer {
         let character = position.get("character")?.as_u64()? as usize;
         let offset = offset_at(source, line, character);
         linked_editing::linked_editing_ranges(source, offset)
+    }
+
+    fn prepare_rename(&self, params: &Value) -> Option<Value> {
+        let uri = params.get("textDocument")?.get("uri")?.as_str()?;
+        let source = self.documents.get(uri)?;
+        let position = params.get("position")?;
+        let line = position.get("line")?.as_u64()? as usize;
+        let character = position.get("character")?.as_u64()? as usize;
+        let offset = offset_at(source, line, character);
+        rename::prepare_rename(source, offset)
+    }
+
+    /// Retourne un `WorkspaceEdit` (`changes`), `None` si rien n'est
+    /// renommable à la position demandée. Le renommage d'un composant XSD
+    /// global est propagé aux documents ouverts qui référencent le schéma.
+    fn rename(&self, params: &Value) -> Result<Option<Value>, rename::RenameError> {
+        let location = (|| {
+            let uri = params.get("textDocument")?.get("uri")?.as_str()?;
+            let source = self.documents.get(uri)?;
+            let position = params.get("position")?;
+            let line = position.get("line")?.as_u64()? as usize;
+            let character = position.get("character")?.as_u64()? as usize;
+            Some((uri, source, offset_at(source, line, character)))
+        })();
+        let Some((uri, source, offset)) = location else {
+            return Ok(None);
+        };
+        let Some(new_name) = params.get("newName").and_then(Value::as_str) else {
+            return Err(rename::RenameError {
+                code: rename::INVALID_PARAMS,
+                message: "Paramètre `newName` manquant.".to_owned(),
+            });
+        };
+        let Some(plan) = rename::rename(source, offset, new_name)? else {
+            return Ok(None);
+        };
+        let mut changes = serde_json::Map::new();
+        changes.insert(
+            uri.to_owned(),
+            Value::Array(rename::text_edits(source, &plan.ranges, new_name)),
+        );
+        if let Some(component) = &plan.component {
+            for (document_uri, document) in &self.documents {
+                if document_uri == uri || !self.references_schema(document_uri, uri) {
+                    continue;
+                }
+                let ranges = rename::instance_ranges(document, component);
+                if !ranges.is_empty() {
+                    changes.insert(
+                        document_uri.clone(),
+                        Value::Array(rename::text_edits(document, &ranges, new_name)),
+                    );
+                }
+            }
+        }
+        Ok(Some(json!({"changes": changes})))
     }
 
     fn symbols(&self, params: &Value) -> Option<Value> {
@@ -793,6 +852,7 @@ fn server_capabilities() -> Value {
         "referencesProvider": true,
         "documentHighlightProvider": true,
         "linkedEditingRangeProvider": true,
+        "renameProvider": {"prepareProvider": true},
     })
 }
 
@@ -936,6 +996,25 @@ fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
                     connection
                         .sender
                         .send(Response::new_ok(request.id, ranges).into())?;
+                    continue;
+                }
+
+                if request.method == PREPARE_RENAME_METHOD {
+                    let result = server
+                        .prepare_rename(&request.params)
+                        .unwrap_or(Value::Null);
+                    connection
+                        .sender
+                        .send(Response::new_ok(request.id, result).into())?;
+                    continue;
+                }
+
+                if request.method == RENAME_METHOD {
+                    let response = match server.rename(&request.params) {
+                        Ok(edit) => Response::new_ok(request.id, edit.unwrap_or(Value::Null)),
+                        Err(error) => Response::new_err(request.id, error.code, error.message),
+                    };
+                    connection.sender.send(response.into())?;
                     continue;
                 }
 
@@ -1421,6 +1500,194 @@ mod tests {
     }
 
     #[test]
+    fn serves_prepare_rename_and_rename_requests() {
+        let (server, client) = Connection::memory();
+        let server_thread = thread::spawn(|| run(server).expect("server loop should succeed"));
+        let request = |id: i32, method: &str, params: Value| {
+            client
+                .sender
+                .send(
+                    Request {
+                        id: RequestId::from(id),
+                        method: method.to_owned(),
+                        params,
+                    }
+                    .into(),
+                )
+                .expect("request should be sent");
+            loop {
+                match client.receiver.recv().expect("a message should arrive") {
+                    Message::Response(response) => {
+                        assert_eq!(response.id, RequestId::from(id));
+                        return response;
+                    }
+                    Message::Notification(_) => {}
+                    message => panic!("unexpected message {message:?}"),
+                }
+            }
+        };
+        let notify = |method: &str, params: Value| {
+            client
+                .sender
+                .send(
+                    Notification {
+                        method: method.to_owned(),
+                        params,
+                    }
+                    .into(),
+                )
+                .expect("notification should be sent");
+        };
+        let range = |line: u32, start: u32, end: u32| json!({"start": {"line": line, "character": start}, "end": {"line": line, "character": end}});
+
+        let initialize = request(1, INITIALIZE_METHOD, json!({})).result.unwrap();
+        assert_eq!(
+            initialize["capabilities"]["renameProvider"],
+            json!({"prepareProvider": true})
+        );
+        notify("initialized", json!({}));
+        notify(
+            DID_OPEN_METHOD,
+            json!({
+                "textDocument": {
+                    "uri": "file:///document.xml",
+                    "text": "<ns:root xmlns:ns=\"urn:x\">\r\n  <ns:é😀 a=\"1\"/>\r\n  <item>text</item>\r\n</ns:root>",
+                }
+            }),
+        );
+        let params = |line: u32, character: u32| {
+            json!({
+                "textDocument": {"uri": "file:///document.xml"},
+                "position": {"line": line, "character": character},
+            })
+        };
+        let rename_params = |line: u32, character: u32, new_name: &str| {
+            let mut params = params(line, character);
+            params["newName"] = json!(new_name);
+            params
+        };
+
+        assert_eq!(
+            request(2, PREPARE_RENAME_METHOD, params(2, 16)).result,
+            Some(json!({"range": range(2, 14, 18), "placeholder": "item"}))
+        );
+        assert_eq!(
+            request(3, RENAME_METHOD, rename_params(2, 16, "entry")).result,
+            Some(json!({"changes": {"file:///document.xml": [
+                {"range": range(2, 3, 7), "newText": "entry"},
+                {"range": range(2, 14, 18), "newText": "entry"},
+            ]}}))
+        );
+        // Préfixe : déclaration et utilisations, positions UTF-16.
+        assert_eq!(
+            request(4, PREPARE_RENAME_METHOD, params(1, 4)).result,
+            Some(json!({"range": range(1, 3, 5), "placeholder": "ns"}))
+        );
+        assert_eq!(
+            request(5, RENAME_METHOD, rename_params(0, 16, "p")).result,
+            Some(json!({"changes": {"file:///document.xml": [
+                {"range": range(0, 1, 3), "newText": "p"},
+                {"range": range(0, 15, 17), "newText": "p"},
+                {"range": range(1, 3, 5), "newText": "p"},
+                {"range": range(3, 2, 4), "newText": "p"},
+            ]}}))
+        );
+        assert_eq!(
+            request(6, PREPARE_RENAME_METHOD, params(1, 8)).result,
+            Some(json!({"range": range(1, 3, 9), "placeholder": "ns:é😀"}))
+        );
+        // Contenu : rien à renommer.
+        assert_eq!(
+            request(7, PREPARE_RENAME_METHOD, params(2, 10)).result,
+            Some(Value::Null)
+        );
+        assert_eq!(
+            request(8, RENAME_METHOD, rename_params(2, 10, "x")).result,
+            Some(Value::Null)
+        );
+        // Nom invalide : erreur InvalidParams.
+        let invalid = request(9, RENAME_METHOD, rename_params(2, 16, "1 bad"));
+        let error = invalid.error.expect("an error should be returned");
+        assert_eq!(error.code, rename::INVALID_PARAMS);
+        assert!(error.message.contains("1 bad"));
+        assert!(
+            request(10, RENAME_METHOD, params(2, 16))
+                .error
+                .is_some_and(|error| error.code == rename::INVALID_PARAMS)
+        );
+        assert_eq!(
+            request(
+                11,
+                RENAME_METHOD,
+                json!({
+                    "textDocument": {"uri": "file:///missing.xml"},
+                    "position": {"line": 0, "character": 1},
+                    "newName": "x",
+                })
+            )
+            .result,
+            Some(Value::Null)
+        );
+
+        assert_eq!(
+            request(12, "shutdown", json!(null)).result,
+            Some(Value::Null)
+        );
+        notify(EXIT_METHOD, json!(null));
+        server_thread.join().expect("server thread should stop");
+    }
+
+    #[test]
+    fn renames_xsd_components_across_open_instance_documents() {
+        let schema_path =
+            std::env::temp_dir().join(format!("xml-lsp-rename-{}.xsd", std::process::id()));
+        let schema_source = concat!(
+            "<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\">",
+            "<xs:element name=\"root\"><xs:complexType><xs:sequence>",
+            "<xs:element ref=\"item\"/></xs:sequence></xs:complexType></xs:element>",
+            "<xs:element name=\"item\" type=\"xs:string\"/>",
+            "</xs:schema>"
+        );
+        std::fs::write(&schema_path, schema_source).expect("schema should be written");
+        let schema_uri = path_to_uri(&schema_path);
+        let schema_name = schema_path.file_name().unwrap().to_string_lossy();
+        let bound_uri = path_to_uri(&schema_path.with_file_name("rename-bound.xml"));
+        let bound = format!(
+            "<root xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:noNamespaceSchemaLocation=\"{schema_name}\"><item>a</item><item/></root>"
+        );
+        let unrelated_uri = path_to_uri(&schema_path.with_file_name("rename-unrelated.xml"));
+        let mut server = XmlLanguageServer::new();
+        server
+            .documents
+            .insert(schema_uri.clone(), schema_source.to_owned());
+        server.documents.insert(bound_uri.clone(), bound.clone());
+        server
+            .documents
+            .insert(unrelated_uri, "<root><item/></root>".to_owned());
+
+        let offset = schema_source.find("\"item\" type").unwrap() + 1;
+        let character = position_at(schema_source, offset)["character"].clone();
+        let edit = server
+            .rename(&json!({
+                "textDocument": {"uri": schema_uri},
+                "position": {"line": 0, "character": character},
+                "newName": "entry",
+            }))
+            .expect("rename should succeed")
+            .expect("an edit should be returned");
+        let changes = edit["changes"].as_object().unwrap();
+        assert_eq!(changes.len(), 2, "{edit}");
+        assert_eq!(changes[&schema_uri].as_array().unwrap().len(), 2);
+        let bound_edits = changes[&bound_uri].as_array().unwrap();
+        assert_eq!(bound_edits.len(), 3);
+        let item = bound.find("<item>").unwrap() + 1;
+        assert_eq!(bound_edits[0]["range"]["start"], position_at(&bound, item));
+        assert_eq!(bound_edits[0]["newText"], "entry");
+
+        std::fs::remove_file(schema_path).expect("schema should be removed");
+    }
+
+    #[test]
     fn serves_initialize_diagnostics_shutdown_and_exit() {
         let (server, client) = Connection::memory();
         let server_thread = thread::spawn(|| run(server).expect("server loop should succeed"));
@@ -1458,6 +1725,7 @@ mod tests {
                             "referencesProvider": true,
                             "documentHighlightProvider": true,
                             "linkedEditingRangeProvider": true,
+                            "renameProvider": {"prepareProvider": true},
                         },
                         "serverInfo": {
                             "name": "xml-lsp",

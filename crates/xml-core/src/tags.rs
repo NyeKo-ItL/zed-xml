@@ -9,8 +9,9 @@
 //! - `textDocument/documentHighlight` : [`XmlTagTree::tag_pair_at`] ;
 //! - `textDocument/linkedEditingRange` : [`XmlTagTree::tag_pair_at`] puis
 //!   [`XmlTagPair::name_ranges`] ;
-//! - `textDocument/rename` : [`XmlTagTree::tag_pair_at`] et
-//!   [`qualified_name_parts`] pour distinguer préfixe et nom local ;
+//! - `textDocument/rename` : [`XmlTagTree::tag_pair_at`],
+//!   [`qualified_name_parts`] pour distinguer préfixe et nom local, et
+//!   [`scan_attributes`] pour les déclarations `xmlns:prefix` ;
 //! - `textDocument/foldingRange` : [`XmlTagTree::elements`] et
 //!   [`XmlElement::end_tag`] ;
 //! - `textDocument/selectionRange` : [`XmlTagTree::innermost_element_at`] et
@@ -278,6 +279,99 @@ pub fn qualified_name_parts(
             name.start + colon + 1..name.end,
         ),
         None => (None, name),
+    }
+}
+
+/// Attribut repéré lexicalement dans une balise ouvrante ou auto-fermante.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct XmlAttribute {
+    /// Étendue du nom qualifié de l'attribut.
+    pub name: Range<usize>,
+    /// Étendue de la valeur, guillemets exclus (`None` sans `=` ou sans
+    /// valeur). Une valeur dont le guillemet fermant manque s'arrête avant la
+    /// fin de la balise.
+    pub value: Option<Range<usize>>,
+}
+
+impl XmlAttribute {
+    /// Nom qualifié de l'attribut.
+    pub fn name<'a>(&self, source: &'a str) -> &'a str {
+        &source[self.name.clone()]
+    }
+
+    /// Valeur brute de l'attribut (entités non résolues).
+    pub fn value<'a>(&self, source: &'a str) -> Option<&'a str> {
+        self.value.clone().map(|range| &source[range])
+    }
+}
+
+/// Liste les attributs d'une balise ouvrante ou auto-fermante, de façon
+/// tolérante. Retourne une liste vide pour une balise fermante.
+pub fn scan_attributes(source: &str, tag: &XmlTag) -> Vec<XmlAttribute> {
+    let mut attributes = Vec::new();
+    if tag.kind == XmlTagKind::End {
+        return attributes;
+    }
+    let bytes = &source.as_bytes()[..tag.range.end.min(source.len())];
+    let mut index = tag.name.end;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte.is_ascii_whitespace() || matches!(byte, b'/' | b'>' | b'=') {
+            index += 1;
+            continue;
+        }
+        if matches!(byte, b'"' | b'\'') {
+            index = find_byte(bytes, index + 1, byte).map_or(bytes.len(), |end| end + 1);
+            continue;
+        }
+        let name = scan_name(bytes, index);
+        if name.is_empty() {
+            index += 1;
+            continue;
+        }
+        index = skip_whitespace(bytes, name.end);
+        let mut value = None;
+        if bytes.get(index) == Some(&b'=') {
+            index = skip_whitespace(bytes, index + 1);
+            match bytes.get(index) {
+                Some(&quote @ (b'"' | b'\'')) => {
+                    let end = find_byte(bytes, index + 1, quote);
+                    let value_end = end.unwrap_or_else(|| unterminated_value_end(bytes));
+                    value = Some(index + 1..value_end.max(index + 1));
+                    index = end.map_or(bytes.len(), |end| end + 1);
+                }
+                Some(_) => {
+                    let unquoted = scan_name(bytes, index);
+                    index = unquoted.end.max(index + 1);
+                    if !unquoted.is_empty() {
+                        value = Some(unquoted);
+                    }
+                }
+                None => {}
+            }
+        } else {
+            index = name.end;
+        }
+        attributes.push(XmlAttribute { name, value });
+    }
+    attributes
+}
+
+fn skip_whitespace(bytes: &[u8], mut index: usize) -> usize {
+    while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+        index += 1;
+    }
+    index
+}
+
+/// Fin d'une valeur non terminée : avant le `>` ou `/>` final de la balise.
+fn unterminated_value_end(bytes: &[u8]) -> usize {
+    if bytes.ends_with(b"/>") {
+        bytes.len() - 2
+    } else if bytes.ends_with(b">") {
+        bytes.len() - 1
+    } else {
+        bytes.len()
     }
 }
 
@@ -559,6 +653,74 @@ mod tests {
         let (prefix, local) = qualified_name_parts(source, 4..11);
         assert_eq!(prefix, None);
         assert_eq!(local, 4..11);
+    }
+
+    #[test]
+    fn scans_attributes_of_start_and_self_closing_tags() {
+        let source = "<x:a xmlns:x=\"urn:x\"  b = 'v>1' c d=e\r\n\tx:f=\"\"/><b g=\"é\"></b>";
+        let tags = scan_tags(source);
+        let summary: Vec<_> = scan_attributes(source, &tags[0])
+            .iter()
+            .map(|attribute| (attribute.name(source), attribute.value(source)))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("xmlns:x", Some("urn:x")),
+                ("b", Some("v>1")),
+                ("c", None),
+                ("d", Some("e")),
+                ("x:f", Some("")),
+            ]
+        );
+        let b = scan_attributes(source, &tags[1]);
+        assert_eq!(b[0].value(source), Some("é"));
+        assert!(scan_attributes(source, &tags[2]).is_empty());
+    }
+
+    #[test]
+    fn scans_attributes_of_malformed_tags() {
+        for source in [
+            "<a b=\"",
+            "<a b=",
+            "<a b=>",
+            "<a \"x\" c='1'>",
+            "<a b=\"1\"c=\"2\">",
+            "<a b=\"x/>",
+            "<a b=\">",
+            "<a =>",
+        ] {
+            let tags = scan_tags(source);
+            for attribute in scan_attributes(source, &tags[0]) {
+                let _ = attribute.name(source);
+                let _ = attribute.value(source);
+            }
+        }
+        let names = |source: &str| -> Vec<(String, Option<String>)> {
+            let tags = scan_tags(source);
+            scan_attributes(source, &tags[0])
+                .iter()
+                .map(|attribute| {
+                    (
+                        attribute.name(source).to_owned(),
+                        attribute.value(source).map(str::to_owned),
+                    )
+                })
+                .collect()
+        };
+        assert_eq!(
+            names("<a \"x\" c='1'>"),
+            vec![("c".into(), Some("1".into()))]
+        );
+        assert_eq!(names("<a b=\"x/>"), vec![("b".into(), Some("x".into()))]);
+        assert_eq!(
+            names("<a b=\"1\"c=\"2\">"),
+            vec![
+                ("b".into(), Some("1".into())),
+                ("c".into(), Some("2".into()))
+            ]
+        );
+        assert_eq!(names("<a b=>"), vec![("b".into(), None)]);
     }
 
     #[test]
