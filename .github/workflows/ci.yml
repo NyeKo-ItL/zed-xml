@@ -42,7 +42,6 @@ jobs:
         shell: bash
         env:
           RELEASE_VERSION: ${{ github.ref_name }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           VERSION="${RELEASE_VERSION#v}"
           if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -92,7 +91,7 @@ jobs:
             exit 0
           fi
           git commit -m "chore: synchronize release version $RELEASE_VERSION"
-          git push origin "HEAD:$DEFAULT_BRANCH"
+          # Keep main protected: the synchronized commit is reachable through the tag.
           git push --force origin "HEAD:refs/tags/$RELEASE_VERSION"
           echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
