@@ -1,6 +1,7 @@
 //! Serveur LSP XML natif.
 
 mod folding;
+mod formatting;
 mod highlight;
 mod linked_editing;
 mod rename;
@@ -17,7 +18,9 @@ use std::{
 use lsp_server::{Connection, Message, Notification, Response};
 use quick_xml::{Reader, events::Event};
 use serde_json::{Value, json};
-use xml_core::{XmlDiagnostic, auto_close_tag, complete_xml, format_xml, parse_xml};
+#[cfg(test)]
+use xml_core::format_xml;
+use xml_core::{XmlDiagnostic, auto_close_tag, complete_xml, parse_xml};
 use xsd_core::{
     XsdSchema, complete_attribute_values, complete_attributes, complete_elements, merge_schemas,
     parse_xsd, resolve_schema_dependencies, resolve_schema_locations, validate_document_located,
@@ -511,14 +514,23 @@ impl XmlLanguageServer {
     fn formatting(&self, params: &Value) -> Option<Value> {
         let uri = params.get("textDocument")?.get("uri")?.as_str()?;
         let source = self.documents.get(uri)?;
-        let formatted = format_xml(source).ok()?;
-        Some(json!([{
-            "range": {
-                "start": {"line": 0, "character": 0},
-                "end": position_at(source, source.len()),
-            },
-            "newText": formatted,
-        }]))
+        let options = formatting::format_options(params, source);
+        formatting::document_edits(source, &options)
+    }
+
+    fn range_formatting(&self, params: &Value) -> Option<Value> {
+        let uri = params.get("textDocument")?.get("uri")?.as_str()?;
+        let source = self.documents.get(uri)?;
+        let range = params.get("range")?;
+        let offset = |position: &Value| {
+            let line = position.get("line")?.as_u64()? as usize;
+            let character = position.get("character")?.as_u64()? as usize;
+            Some(offset_at(source, line, character))
+        };
+        let start = offset(range.get("start")?)?;
+        let end = offset(range.get("end")?)?;
+        let options = formatting::format_options(params, source);
+        formatting::range_edits(source, start.min(end)..start.max(end), &options)
     }
 
     fn changed_document(params: &Value, current: Option<&String>) -> Option<(String, String)> {
@@ -876,7 +888,7 @@ fn server_capabilities() -> Value {
         "textDocumentSync": {"openClose": true, "change": 2},
         "completionProvider": {"triggerCharacters": ["<", " ", "/", ">", "=", "\"", "?"]},
         "documentFormattingProvider": true,
-        "documentRangeFormattingProvider": false,
+        "documentRangeFormattingProvider": true,
         "documentSymbolProvider": true,
         "hoverProvider": true,
         "definitionProvider": true,
@@ -1084,9 +1096,12 @@ fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
                     request.method.as_str(),
                     FORMATTING_METHOD | RANGE_FORMATTING_METHOD
                 ) {
-                    let edits = server
-                        .formatting(&request.params)
-                        .unwrap_or_else(|| json!([]));
+                    let edits = if request.method == FORMATTING_METHOD {
+                        server.formatting(&request.params)
+                    } else {
+                        server.range_formatting(&request.params)
+                    }
+                    .unwrap_or_else(|| json!([]));
                     connection
                         .sender
                         .send(Response::new_ok(request.id, edits).into())?;
@@ -1164,7 +1179,7 @@ mod tests {
             .formatting(&json!({"textDocument": {"uri": uri}}))
             .expect("the document should be formatted");
         assert_eq!(
-            edits[0]["newText"],
+            formatting::apply_edits(&server.documents[uri], &edits),
             "<root>\n  <item>\n  </item>\n</root>\n"
         );
     }
@@ -1785,6 +1800,191 @@ mod tests {
     }
 
     #[test]
+    fn serves_document_and_range_formatting_with_options() {
+        let (server, client) = Connection::memory();
+        let server_thread = thread::spawn(|| run(server).expect("server loop should succeed"));
+        let request = |id: i32, method: &str, params: Value| {
+            client
+                .sender
+                .send(
+                    Request {
+                        id: RequestId::from(id),
+                        method: method.to_owned(),
+                        params,
+                    }
+                    .into(),
+                )
+                .expect("request should be sent");
+            loop {
+                match client.receiver.recv().expect("a message should arrive") {
+                    Message::Response(response) => {
+                        assert_eq!(response.id, RequestId::from(id));
+                        return response.result.expect("a result should be returned");
+                    }
+                    Message::Notification(_) => {}
+                    message => panic!("unexpected message {message:?}"),
+                }
+            }
+        };
+        let notify = |method: &str, params: Value| {
+            client
+                .sender
+                .send(
+                    Notification {
+                        method: method.to_owned(),
+                        params,
+                    }
+                    .into(),
+                )
+                .expect("notification should be sent");
+        };
+        let open = |uri: &str, text: &str| {
+            notify(
+                DID_OPEN_METHOD,
+                json!({"textDocument": {"uri": uri, "text": text}}),
+            );
+        };
+        let range = |start: (u32, u32), end: (u32, u32)| {
+            json!({
+                "start": {"line": start.0, "character": start.1},
+                "end": {"line": end.0, "character": end.1},
+            })
+        };
+
+        let initialize = request(1, INITIALIZE_METHOD, json!({"capabilities": {}}));
+        assert_eq!(
+            initialize["capabilities"]["documentRangeFormattingProvider"],
+            true
+        );
+        notify("initialized", json!({}));
+
+        // Formatage complet : quatre espaces, CRLF, UTF-16, blancs finaux.
+        let uri = "file:///crlf.xml";
+        let source = "<root>\r\n<outer><😀 a=\"1\"><b/></😀></outer>\r\n<c>t  \r\n</c>\r\n</root>";
+        open(uri, source);
+        let options = json!({
+            "tabSize": 4,
+            "insertSpaces": true,
+            "trimTrailingWhitespace": true,
+            "insertFinalNewline": true,
+        });
+        let edits = request(
+            2,
+            FORMATTING_METHOD,
+            json!({"textDocument": {"uri": uri}, "options": options}),
+        );
+        assert!(edits.as_array().unwrap().len() > 1, "{edits}");
+        assert!(
+            edits
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|edit| edit["range"]["start"]["line"] != 0),
+            "the unchanged first line must not be edited: {edits}"
+        );
+        let formatted = formatting::apply_edits(source, &edits);
+        assert_eq!(
+            formatted,
+            "<root>\r\n    <outer>\r\n        <😀 a=\"1\">\r\n            <b/>\r\n        </😀>\r\n    </outer>\r\n    <c>t\r\n</c>\r\n</root>\r\n"
+        );
+        notify(
+            DID_CHANGE_METHOD,
+            json!({
+                "textDocument": {"uri": uri, "version": 2},
+                "contentChanges": [{"text": formatted}],
+            }),
+        );
+        assert_eq!(
+            request(
+                3,
+                FORMATTING_METHOD,
+                json!({"textDocument": {"uri": uri}, "options": options}),
+            ),
+            json!([]),
+            "formatting twice must not change anything"
+        );
+        // Plage sur un document déjà formaté : aucune modification.
+        assert_eq!(
+            request(
+                4,
+                RANGE_FORMATTING_METHOD,
+                json!({
+                    "textDocument": {"uri": uri},
+                    "range": range((2, 9), (4, 3)),
+                    "options": options,
+                }),
+            ),
+            json!([])
+        );
+
+        // Formatage de plage avec tabulations dans un document invalide hors
+        // de la plage.
+        let uri = "file:///malformed.xml";
+        let source = "<root>\n<broken>\n  <outer><é><b/></é></outer>\n<oops></root>\n";
+        open(uri, source);
+        let tabs = json!({"tabSize": 4, "insertSpaces": false});
+        let format_range = |id: i32, selection: Value| {
+            let edits = request(
+                id,
+                RANGE_FORMATTING_METHOD,
+                json!({
+                    "textDocument": {"uri": uri},
+                    "range": selection,
+                    "options": tabs,
+                }),
+            );
+            formatting::apply_edits(source, &edits)
+        };
+        // Élément imbriqué : `<b/>` commence à la colonne UTF-16 12.
+        assert_eq!(
+            format_range(5, range((2, 12), (2, 16))),
+            "<root>\n<broken>\n  <outer><é>\n\t\t\t<b/>\n\t\t</é></outer>\n<oops></root>\n"
+        );
+        // Plage commençant dans `<outer` et finissant dans `</é>` : étendue à
+        // l'élément `outer` complet.
+        let expanded = format_range(6, range((2, 4), (2, 17)));
+        assert_eq!(
+            expanded,
+            "<root>\n<broken>\n\t<outer>\n\t\t<é>\n\t\t\t<b/>\n\t\t</é>\n\t</outer>\n<oops></root>\n"
+        );
+        // La région invalide n'est jamais modifiée.
+        assert_eq!(format_range(7, range((3, 0), (3, 6))), source);
+        // Idempotence du formatage de plage.
+        notify(
+            DID_CHANGE_METHOD,
+            json!({
+                "textDocument": {"uri": uri, "version": 2},
+                "contentChanges": [{"text": expanded}],
+            }),
+        );
+        assert_eq!(
+            request(
+                8,
+                RANGE_FORMATTING_METHOD,
+                json!({
+                    "textDocument": {"uri": uri},
+                    "range": range((2, 1), (6, 3)),
+                    "options": tabs,
+                }),
+            ),
+            json!([])
+        );
+        // Le formatage complet refuse le document invalide.
+        assert_eq!(
+            request(
+                9,
+                FORMATTING_METHOD,
+                json!({"textDocument": {"uri": uri}, "options": tabs}),
+            ),
+            json!([])
+        );
+
+        assert_eq!(request(10, "shutdown", json!(null)), Value::Null);
+        notify(EXIT_METHOD, json!(null));
+        server_thread.join().expect("server thread should stop");
+    }
+
+    #[test]
     fn serves_prepare_rename_and_rename_requests() {
         let (server, client) = Connection::memory();
         let server_thread = thread::spawn(|| run(server).expect("server loop should succeed"));
@@ -2003,7 +2203,7 @@ mod tests {
                             "textDocumentSync": {"openClose": true, "change": 2},
                             "completionProvider": {"triggerCharacters": ["<", " ", "/", ">", "=", "\"", "?"]},
                             "documentFormattingProvider": true,
-                            "documentRangeFormattingProvider": false,
+                            "documentRangeFormattingProvider": true,
                             "documentSymbolProvider": true,
                             "hoverProvider": true,
                             "definitionProvider": true,
@@ -2192,10 +2392,10 @@ mod tests {
                     response.result,
                     Some(json!([{
                         "range": {
-                            "start": {"line": 0, "character": 0},
+                            "start": {"line": 0, "character": 8},
                             "end": {"line": 0, "character": 8},
                         },
-                        "newText": "<root />\n",
+                        "newText": "\n",
                     }]))
                 );
             }
@@ -2523,7 +2723,7 @@ mod tests {
             .formatting(&json!({"textDocument": {"uri": uri}}))
             .expect("formatting should return a workspace edit");
         assert_eq!(
-            response[0]["newText"],
+            formatting::apply_edits(source, &response),
             "<?xml version=\"1.0\" encoding=\"iso-8859-1\" ?>\n<root>\n  <outer>\n    <inner />\n  </outer>\n</root>\n"
         );
     }
