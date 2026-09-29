@@ -24,28 +24,6 @@ impl XmlExtension {
             return Ok(Self::command(path));
         }
 
-        if let Some(binary) = worktree.which(LANGUAGE_SERVER_ID) {
-            return Ok(Self::command(binary));
-        }
-
-        // Keep local development convenient when the opened worktree is this repository.
-        if worktree.read_text_file("Cargo.toml").is_ok()
-            && let Some(cargo) = worktree.which("cargo")
-        {
-            return Ok(zed::Command {
-                command: cargo,
-                args: vec![
-                    "run".to_owned(),
-                    "--quiet".to_owned(),
-                    "-p".to_owned(),
-                    LANGUAGE_SERVER_ID.to_owned(),
-                    "--".to_owned(),
-                    "--stdio".to_owned(),
-                ],
-                env: Vec::new(),
-            });
-        }
-
         Self::downloaded_command(language_server_id, worktree)
     }
 
