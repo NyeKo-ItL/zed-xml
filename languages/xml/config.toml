@@ -5,6 +5,7 @@ first_line_pattern = '^<.*xml'
 block_comment = ["<!-- ", " -->"]
 autoclose_before = ">/])\"'"
 word_characters = ["-", ":"]
+linked_edit_characters = ["-", ":", "."]
 
 brackets = [
     { start = "<", end = ">", close = true, newline = true, not_in = ["comment", "string"] },

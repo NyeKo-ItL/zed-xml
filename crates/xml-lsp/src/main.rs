@@ -1,6 +1,7 @@
 //! Serveur LSP XML natif.
 
 mod highlight;
+mod linked_editing;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -34,6 +35,7 @@ const DEFINITION_METHOD: &str = "textDocument/definition";
 const REFERENCES_METHOD: &str = "textDocument/references";
 const COMPLETION_METHOD: &str = "textDocument/completion";
 const DOCUMENT_HIGHLIGHT_METHOD: &str = "textDocument/documentHighlight";
+const LINKED_EDITING_RANGE_METHOD: &str = "textDocument/linkedEditingRange";
 
 type SchemaCache = HashMap<PathBuf, (SystemTime, XsdSchema)>;
 
@@ -398,6 +400,16 @@ impl XmlLanguageServer {
         let character = position.get("character")?.as_u64()? as usize;
         let offset = offset_at(source, line, character);
         Some(Value::Array(highlight::document_highlights(source, offset)))
+    }
+
+    fn linked_editing_range(&self, params: &Value) -> Option<Value> {
+        let uri = params.get("textDocument")?.get("uri")?.as_str()?;
+        let source = self.documents.get(uri)?;
+        let position = params.get("position")?;
+        let line = position.get("line")?.as_u64()? as usize;
+        let character = position.get("character")?.as_u64()? as usize;
+        let offset = offset_at(source, line, character);
+        linked_editing::linked_editing_ranges(source, offset)
     }
 
     fn symbols(&self, params: &Value) -> Option<Value> {
@@ -780,6 +792,7 @@ fn server_capabilities() -> Value {
         "definitionProvider": true,
         "referencesProvider": true,
         "documentHighlightProvider": true,
+        "linkedEditingRangeProvider": true,
     })
 }
 
@@ -913,6 +926,16 @@ fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
                     connection
                         .sender
                         .send(Response::new_ok(request.id, highlights).into())?;
+                    continue;
+                }
+
+                if request.method == LINKED_EDITING_RANGE_METHOD {
+                    let ranges = server
+                        .linked_editing_range(&request.params)
+                        .unwrap_or(Value::Null);
+                    connection
+                        .sender
+                        .send(Response::new_ok(request.id, ranges).into())?;
                     continue;
                 }
 
@@ -1289,6 +1312,115 @@ mod tests {
     }
 
     #[test]
+    fn serves_linked_editing_range_requests() {
+        let (server, client) = Connection::memory();
+        let server_thread = thread::spawn(|| run(server).expect("server loop should succeed"));
+        let request = |id: i32, method: &str, params: Value| {
+            client
+                .sender
+                .send(
+                    Request {
+                        id: RequestId::from(id),
+                        method: method.to_owned(),
+                        params,
+                    }
+                    .into(),
+                )
+                .expect("request should be sent");
+            loop {
+                match client.receiver.recv().expect("a message should arrive") {
+                    Message::Response(response) => {
+                        assert_eq!(response.id, RequestId::from(id));
+                        assert!(response.error.is_none(), "{:?}", response.error);
+                        return response.result;
+                    }
+                    Message::Notification(_) => {}
+                    message => panic!("unexpected message {message:?}"),
+                }
+            }
+        };
+        let notify = |method: &str, params: Value| {
+            client
+                .sender
+                .send(
+                    Notification {
+                        method: method.to_owned(),
+                        params,
+                    }
+                    .into(),
+                )
+                .expect("notification should be sent");
+        };
+
+        let initialize = request(1, INITIALIZE_METHOD, json!({}));
+        assert_eq!(
+            initialize.unwrap()["capabilities"]["linkedEditingRangeProvider"],
+            true
+        );
+        notify("initialized", json!({}));
+        notify(
+            DID_OPEN_METHOD,
+            json!({
+                "textDocument": {
+                    "uri": "file:///document.xml",
+                    "text": "<ns:root>\r\n  <ns:item><ns:item/></ns:item>\r\n</ns:root>",
+                }
+            }),
+        );
+        let params = |line: u32, character: u32| {
+            json!({
+                "textDocument": {"uri": "file:///document.xml"},
+                "position": {"line": line, "character": character},
+            })
+        };
+
+        assert_eq!(
+            request(2, LINKED_EDITING_RANGE_METHOD, params(2, 9)),
+            Some(json!({
+                "ranges": [
+                    {"start": {"line": 0, "character": 1}, "end": {"line": 0, "character": 8}},
+                    {"start": {"line": 2, "character": 2}, "end": {"line": 2, "character": 9}},
+                ],
+                "wordPattern": linked_editing::XML_NAME_WORD_PATTERN,
+            }))
+        );
+        assert_eq!(
+            request(3, LINKED_EDITING_RANGE_METHOD, params(1, 5)),
+            Some(json!({
+                "ranges": [
+                    {"start": {"line": 1, "character": 3}, "end": {"line": 1, "character": 10}},
+                    {"start": {"line": 1, "character": 23}, "end": {"line": 1, "character": 30}},
+                ],
+                "wordPattern": linked_editing::XML_NAME_WORD_PATTERN,
+            }))
+        );
+        // Élément auto-fermant, contenu et document inconnu : `null`.
+        assert_eq!(
+            request(4, LINKED_EDITING_RANGE_METHOD, params(1, 13)),
+            Some(Value::Null)
+        );
+        assert_eq!(
+            request(5, LINKED_EDITING_RANGE_METHOD, params(1, 0)),
+            Some(Value::Null)
+        );
+        assert_eq!(
+            request(
+                6,
+                LINKED_EDITING_RANGE_METHOD,
+                json!({
+                    "textDocument": {"uri": "file:///missing.xml"},
+                    "position": {"line": 0, "character": 1},
+                })
+            ),
+            Some(Value::Null)
+        );
+
+        assert_eq!(request(7, "shutdown", json!(null)), Some(Value::Null));
+        notify(EXIT_METHOD, json!(null));
+        server_thread.join().expect("server thread should stop");
+    }
+
+    #[test]
     fn serves_initialize_diagnostics_shutdown_and_exit() {
         let (server, client) = Connection::memory();
         let server_thread = thread::spawn(|| run(server).expect("server loop should succeed"));
@@ -1325,6 +1457,7 @@ mod tests {
                             "definitionProvider": true,
                             "referencesProvider": true,
                             "documentHighlightProvider": true,
+                            "linkedEditingRangeProvider": true,
                         },
                         "serverInfo": {
                             "name": "xml-lsp",
