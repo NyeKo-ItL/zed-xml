@@ -221,6 +221,9 @@ pub fn complete_xml(source: &str, offset: usize) -> Vec<XmlCompletion> {
 
     let (elements, attributes) = collect_names(source);
     let fragment = &prefix[opening + 1..];
+    if let Some(processing_instruction) = fragment.strip_prefix('?') {
+        return processing_instruction_templates(processing_instruction);
+    }
     let mut candidates = BTreeSet::new();
     let mut insert_prefix = String::new();
 
@@ -257,6 +260,36 @@ pub fn complete_xml(source: &str, offset: usize) -> Vec<XmlCompletion> {
         .map(|name| XmlCompletion {
             label: name.clone(),
             insert_text: format!("{insert_prefix}{name}"),
+        })
+        .collect()
+}
+
+fn processing_instruction_templates(typed: &str) -> Vec<XmlCompletion> {
+    const TEMPLATES: [(&str, &str); 3] = [
+        ("xml", "xml version=\"1.0\" encoding=\"UTF-8\"?>"),
+        (
+            "xml-model",
+            "xml-model href=\"schema.xsd\" type=\"application/xml\" schematypens=\"http://www.w3.org/2001/XMLSchema\"?>",
+        ),
+        (
+            "xml-stylesheet",
+            "xml-stylesheet type=\"text/xsl\" href=\"stylesheet.xsl\"?>",
+        ),
+    ];
+
+    if let Some((label, template)) = TEMPLATES.iter().find(|(label, _)| *label == typed) {
+        return vec![XmlCompletion {
+            label: (*label).to_owned(),
+            insert_text: template[typed.len()..].to_owned(),
+        }];
+    }
+
+    TEMPLATES
+        .into_iter()
+        .filter(|(label, _)| label.starts_with(typed))
+        .map(|(label, template)| XmlCompletion {
+            label: label.to_owned(),
+            insert_text: template[typed.len()..].to_owned(),
         })
         .collect()
 }
@@ -370,14 +403,13 @@ pub fn format_xml(source: &str) -> Result<String, String> {
             }
             Event::End(element) => {
                 if let Some(start) = pending_start.take() {
-                    if !stack.last().copied().unwrap_or(false) {
-                        write_indent(&mut writer, depth, output_started)?;
-                    }
-                    writer
-                        .write_event(Event::Empty(start))
-                        .map_err(|error| error.to_string())?;
-                    output_started = true;
-                    continue;
+                    flush_start_element(
+                        &mut writer,
+                        start,
+                        &mut stack,
+                        &mut depth,
+                        &mut output_started,
+                    )?;
                 }
                 depth = depth.saturating_sub(1);
                 let has_text = stack.pop().unwrap_or(false);
@@ -477,6 +509,16 @@ fn flush_pending_start(
     let Some(start) = pending_start.take() else {
         return Ok(());
     };
+    flush_start_element(writer, start, stack, depth, output_started)
+}
+
+fn flush_start_element(
+    writer: &mut Writer<Vec<u8>>,
+    start: BytesStart<'static>,
+    stack: &mut Vec<bool>,
+    depth: &mut usize,
+    output_started: &mut bool,
+) -> Result<(), String> {
     if !stack.last().copied().unwrap_or(false) {
         write_indent(writer, *depth, *output_started)?;
     }
@@ -573,13 +615,13 @@ mod tests {
     }
 
     #[test]
-    fn formats_empty_element_pairs_as_self_closing_tags() {
+    fn preserves_explicit_empty_element_pairs() {
         let source = "<root>\n  <connexionId>\n  </connexionId>\n  <nested>\n    <value>\n    </value>\n  </nested>\n</root>";
         let formatted = format_xml(source).unwrap();
 
         assert_eq!(
             formatted,
-            "<root>\n  <connexionId/>\n  <nested>\n    <value/>\n  </nested>\n</root>\n"
+            "<root>\n  <connexionId>\n  </connexionId>\n  <nested>\n    <value>\n    </value>\n  </nested>\n</root>\n"
         );
         assert_eq!(format_xml(&formatted).unwrap(), formatted);
     }
@@ -656,6 +698,37 @@ mod tests {
     }
 
     #[test]
+    fn completes_processing_instruction_templates() {
+        assert_eq!(
+            complete_xml("<?", 2),
+            vec![
+                XmlCompletion {
+                    label: "xml".to_owned(),
+                    insert_text: "xml version=\"1.0\" encoding=\"UTF-8\"?>".to_owned(),
+                },
+                XmlCompletion {
+                    label: "xml-model".to_owned(),
+                    insert_text: "xml-model href=\"schema.xsd\" type=\"application/xml\" schematypens=\"http://www.w3.org/2001/XMLSchema\"?>".to_owned(),
+                },
+                XmlCompletion {
+                    label: "xml-stylesheet".to_owned(),
+                    insert_text: "xml-stylesheet type=\"text/xsl\" href=\"stylesheet.xsl\"?>".to_owned(),
+                },
+            ]
+        );
+
+        let xml = complete_xml("<?xml", 5);
+        assert_eq!(xml.len(), 1);
+        assert_eq!(xml[0].label, "xml");
+        assert_eq!(xml[0].insert_text, " version=\"1.0\" encoding=\"UTF-8\"?>");
+
+        let model = complete_xml("<?xml-mo", 8);
+        assert_eq!(model.len(), 1);
+        assert_eq!(model[0].label, "xml-model");
+        assert!(model[0].insert_text.starts_with("del href=\"schema.xsd\""));
+    }
+
+    #[test]
     fn completes_known_attributes() {
         let completions = complete_xml("<root id=\"1\"><child name=\"x\" /></root><root ", 44);
         assert_eq!(
@@ -671,6 +744,67 @@ mod tests {
                 }
             ]
         );
+    }
+
+    #[test]
+    fn handles_completion_and_auto_close_across_many_typing_contexts() {
+        let cases = [
+            ("<root><item /></root><", vec!["item", "root"]),
+            ("<root><item /></root><ro", vec!["root"]),
+            ("<root><item /></root><root><i", vec!["item"]),
+            ("<root><item></", vec!["item"]),
+            ("<known attr=\"x\"/><root attr", vec!["attr"]),
+            ("<known attr=\"x\"/><root><item attr", vec!["attr"]),
+        ];
+
+        for (source, expected_labels) in cases {
+            let completions = complete_xml(source, source.len());
+            let labels = completions
+                .iter()
+                .map(|completion| completion.label.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(labels, expected_labels, "completion context: {source:?}");
+        }
+
+        for (source, expected) in [
+            ("<root>", Some("</root>")),
+            ("<root><item>", Some("</item>")),
+            ("<root><item>\n", None),
+            ("<root><item>text", None),
+            ("<root><item></item>", None),
+            ("<root />", None),
+        ] {
+            assert_eq!(
+                auto_close_tag(source, source.len()).map(|completion| completion.insert_text),
+                expected.map(str::to_owned),
+                "auto-close context: {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn formatting_is_stable_for_many_realistic_xml_documents() {
+        let documents = [
+            "<root />",
+            "<root><item /></root>",
+            "<root><item>value</item><empty></empty></root>",
+            "<root><item id=\"1\">one &amp; two</item><!-- note --></root>",
+            "<?xml version=\"1.0\"?><root><item><![CDATA[a < b]]></item></root>",
+            "<catalog><book><title>XML</title><author>Élodie</author></book></catalog>",
+            "<Message><Header><Id>1</Id><Date>2026-09-29</Date></Header><Body /></Message>",
+        ];
+
+        for document in documents.iter().cycle().take(100) {
+            let formatted = format_xml(document).expect("document should format");
+            assert_eq!(
+                format_xml(&formatted).unwrap(),
+                formatted,
+                "formatting should be idempotent for {document:?}"
+            );
+            assert!(formatted.ends_with('\n'));
+            assert!(!formatted.contains("</root>\n</root>"));
+            assert!(!formatted.contains("</Message>\n</Message>"));
+        }
     }
 
     #[test]
