@@ -9,6 +9,7 @@ mod linked_editing;
 mod links;
 mod rename;
 mod selection;
+mod symbols;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -52,6 +53,11 @@ const FOLDING_RANGE_METHOD: &str = "textDocument/foldingRange";
 const SELECTION_RANGE_METHOD: &str = "textDocument/selectionRange";
 const DOCUMENT_LINK_METHOD: &str = "textDocument/documentLink";
 const CODE_ACTION_METHOD: &str = "textDocument/codeAction";
+const WORKSPACE_SYMBOL_METHOD: &str = "workspace/symbol";
+
+const DID_CHANGE_WORKSPACE_FOLDERS_METHOD: &str = "workspace/didChangeWorkspaceFolders";
+const DID_CHANGE_WATCHED_FILES_METHOD: &str = "workspace/didChangeWatchedFiles";
+const REGISTER_CAPABILITY_METHOD: &str = "client/registerCapability";
 
 type SchemaCache = HashMap<PathBuf, (SystemTime, XsdSchema)>;
 
@@ -70,6 +76,12 @@ struct XmlLanguageServer {
     folding_settings: folding::FoldingSettings,
     /// Le client accepte des `LocationLink` en réponse à `textDocument/definition`.
     definition_link_support: bool,
+    /// Le client accepte des `DocumentSymbol` hiérarchiques.
+    hierarchical_document_symbols: bool,
+    /// Le client accepte l'enregistrement dynamique de
+    /// `workspace/didChangeWatchedFiles`.
+    watched_files_registration: bool,
+    workspace: symbols::WorkspaceIndex,
 }
 
 impl XmlLanguageServer {
@@ -81,6 +93,9 @@ impl XmlLanguageServer {
             model_cache: HashMap::new(),
             folding_settings: folding::FoldingSettings::default(),
             definition_link_support: false,
+            hierarchical_document_symbols: false,
+            watched_files_registration: false,
+            workspace: symbols::WorkspaceIndex::default(),
         }
     }
 
@@ -91,6 +106,17 @@ impl XmlLanguageServer {
     ) -> Result<bool, Box<dyn Error + Send + Sync>> {
         if notification.method == EXIT_METHOD {
             return Ok(true);
+        }
+        match notification.method.as_str() {
+            DID_CHANGE_WORKSPACE_FOLDERS_METHOD => {
+                self.workspace.change_folders(&notification.params);
+                return Ok(false);
+            }
+            DID_CHANGE_WATCHED_FILES_METHOD => {
+                self.workspace.files_changed(&notification.params);
+                return Ok(false);
+            }
+            _ => {}
         }
         if notification.method == DID_CLOSE_METHOD {
             if let Some(uri) = notification
@@ -171,6 +197,30 @@ impl XmlLanguageServer {
         }
 
         Ok(false)
+    }
+
+    /// Demande au client de signaler les fichiers XML modifiés sur disque
+    /// (invalide l'index `workspace/symbol`).
+    fn register_watched_files(
+        &self,
+        connection: &Connection,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        if !self.watched_files_registration || self.workspace.roots().is_empty() {
+            return Ok(());
+        }
+        connection.sender.send(
+            lsp_server::Request {
+                id: lsp_server::RequestId::from("xml-lsp/watched-files".to_owned()),
+                method: REGISTER_CAPABILITY_METHOD.to_owned(),
+                params: json!({"registrations": [{
+                    "id": "xml-lsp/watched-files",
+                    "method": DID_CHANGE_WATCHED_FILES_METHOD,
+                    "registerOptions": {"watchers": [{"globPattern": symbols::WATCHED_FILES_GLOB}]},
+                }]}),
+            }
+            .into(),
+        )?;
+        Ok(())
     }
 
     fn opened_document(params: &Value) -> Option<(String, String)> {
@@ -546,7 +596,15 @@ impl XmlLanguageServer {
     fn symbols(&self, params: &Value) -> Option<Value> {
         let uri = params.get("textDocument")?.get("uri")?.as_str()?;
         let source = self.documents.get(uri)?;
+        if self.hierarchical_document_symbols {
+            return Some(Value::Array(symbols::document_symbols(source)));
+        }
         Some(xml_symbols(source))
+    }
+
+    fn workspace_symbols(&mut self, params: &Value) -> Value {
+        let query = params.get("query").and_then(Value::as_str).unwrap_or("");
+        Value::Array(self.workspace.query(&self.documents, query))
     }
 
     fn formatting(&self, params: &Value) -> Option<Value> {
@@ -940,6 +998,8 @@ fn server_capabilities() -> Value {
         "selectionRangeProvider": true,
         "documentLinkProvider": {"resolveProvider": false},
         "codeActionProvider": {"codeActionKinds": code_actions::CODE_ACTION_KINDS},
+        "workspaceSymbolProvider": true,
+        "workspace": {"workspaceFolders": {"supported": true, "changeNotifications": true}},
     })
 }
 
@@ -1032,6 +1092,17 @@ fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
         .pointer("/capabilities/textDocument/definition/linkSupport")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    server.hierarchical_document_symbols = initialize_params
+        .pointer("/capabilities/textDocument/documentSymbol/hierarchicalDocumentSymbolSupport")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    server.watched_files_registration = initialize_params
+        .pointer("/capabilities/workspace/didChangeWatchedFiles/dynamicRegistration")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    server.workspace = symbols::WorkspaceIndex::from_initialize_params(&initialize_params);
+    // `initialize_finish` a déjà consommé la notification `initialized`.
+    server.register_watched_files(&connection)?;
 
     for message in &connection.receiver {
         match message {
@@ -1048,6 +1119,14 @@ fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
 
                 if request.method == SYMBOL_METHOD {
                     let symbols = server.symbols(&request.params).unwrap_or_else(|| json!([]));
+                    connection
+                        .sender
+                        .send(Response::new_ok(request.id, symbols).into())?;
+                    continue;
+                }
+
+                if request.method == WORKSPACE_SYMBOL_METHOD {
+                    let symbols = server.workspace_symbols(&request.params);
                     connection
                         .sender
                         .send(Response::new_ok(request.id, symbols).into())?;
@@ -1869,6 +1948,168 @@ mod tests {
     }
 
     #[test]
+    fn serves_workspace_and_hierarchical_document_symbols() {
+        let directory =
+            std::env::temp_dir().join(format!("xml-lsp-workspace-symbols {}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        for (path, content) in [
+            (
+                "schemas/shop.xsd",
+                "<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\" targetNamespace=\"urn:shop\">\n  <xs:element name=\"order\"/>\n  <xs:complexType name=\"OrderType\"/>\n</xs:schema>",
+            ),
+            (
+                "config/beans.xml",
+                "<beans>\n  <bean id=\"orderService\"/>\n</beans>",
+            ),
+            (
+                "node_modules/lib/order.xsd",
+                "<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\"><xs:element name=\"orderIgnored\"/></xs:schema>",
+            ),
+            (".hidden/order.xml", "<order id=\"orderHidden\"/>"),
+            ("target/order.xml", "<order id=\"orderBuilt\"/>"),
+        ] {
+            let path = directory.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).expect("directory should be created");
+            std::fs::write(path, content).expect("file should be written");
+        }
+        let beans_uri = path_to_uri(&directory.join("config/beans.xml"));
+
+        let (server, client) = Connection::memory();
+        let server_thread = thread::spawn(|| run(server).expect("server loop should succeed"));
+        let send = |message: Message| client.sender.send(message).expect("message should be sent");
+        let request = |id: i32, method: &str, params: Value| {
+            send(
+                Request {
+                    id: RequestId::from(id),
+                    method: method.to_owned(),
+                    params,
+                }
+                .into(),
+            );
+            loop {
+                match client.receiver.recv().expect("a message should arrive") {
+                    Message::Response(response) => {
+                        assert_eq!(response.id, RequestId::from(id));
+                        return response.result.expect("request should succeed");
+                    }
+                    Message::Notification(_) => {}
+                    message => panic!("unexpected message {message:?}"),
+                }
+            }
+        };
+        let notify = |method: &str, params: Value| {
+            send(
+                Notification {
+                    method: method.to_owned(),
+                    params,
+                }
+                .into(),
+            )
+        };
+        let names = |symbols: &Value| {
+            symbols
+                .as_array()
+                .expect("symbols should be an array")
+                .iter()
+                .map(|symbol| symbol["name"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+
+        let initialize = request(
+            1,
+            INITIALIZE_METHOD,
+            json!({
+                "rootUri": "file:///ignored-when-workspace-folders-exist",
+                "workspaceFolders": [{"uri": path_to_uri(&directory), "name": "shop"}],
+                "capabilities": {
+                    "textDocument": {"documentSymbol": {"hierarchicalDocumentSymbolSupport": true}},
+                    "workspace": {"didChangeWatchedFiles": {"dynamicRegistration": true}},
+                },
+            }),
+        );
+        assert_eq!(initialize["capabilities"]["workspaceSymbolProvider"], true);
+        notify("initialized", json!({}));
+        match client
+            .receiver
+            .recv()
+            .expect("a registration should arrive")
+        {
+            Message::Request(registration) => {
+                assert_eq!(registration.method, REGISTER_CAPABILITY_METHOD);
+                assert_eq!(
+                    registration.params["registrations"][0]["method"],
+                    DID_CHANGE_WATCHED_FILES_METHOD
+                );
+                send(Response::new_ok(registration.id, Value::Null).into());
+            }
+            message => panic!("unexpected message {message:?}"),
+        }
+
+        let symbols = request(2, WORKSPACE_SYMBOL_METHOD, json!({"query": "order"}));
+        assert_eq!(names(&symbols), vec!["order", "OrderType", "orderService"]);
+        assert_eq!(
+            symbols[0],
+            json!({
+                "name": "order",
+                "kind": symbols::kind::FIELD,
+                "containerName": "urn:shop",
+                "location": {
+                    "uri": path_to_uri(&directory.join("schemas/shop.xsd")),
+                    "range": {
+                        "start": {"line": 1, "character": 20},
+                        "end": {"line": 1, "character": 25},
+                    },
+                },
+            })
+        );
+        assert_eq!(symbols[1]["kind"], symbols::kind::CLASS);
+        assert_eq!(symbols[2]["containerName"], "bean");
+
+        // Un buffer ouvert non enregistré remplace le fichier sur disque.
+        notify(
+            DID_OPEN_METHOD,
+            json!({"textDocument": {"uri": beans_uri, "text": "<beans>\r\n  <bean id=\"orderRepository\"><property name=\"dataSource\"/></bean>\r\n</beans>"}}),
+        );
+        let symbols = request(3, WORKSPACE_SYMBOL_METHOD, json!({"query": "OrdRep"}));
+        assert_eq!(names(&symbols), vec!["orderRepository"]);
+        assert_eq!(
+            symbols[0]["location"]["range"]["start"],
+            json!({"line": 1, "character": 12})
+        );
+
+        let document = request(
+            4,
+            SYMBOL_METHOD,
+            json!({"textDocument": {"uri": beans_uri}}),
+        );
+        assert_eq!(document[0]["name"], "beans");
+        assert_eq!(document[0]["children"][0]["name"], "bean");
+        assert_eq!(
+            document[0]["children"][0]["detail"],
+            "id=\"orderRepository\""
+        );
+        assert_eq!(
+            document[0]["children"][0]["children"][0]["detail"],
+            "name=\"dataSource\""
+        );
+
+        let all = request(5, WORKSPACE_SYMBOL_METHOD, json!({"query": ""}));
+        assert_eq!(all.as_array().map(Vec::len), Some(5));
+
+        notify(
+            DID_CHANGE_WORKSPACE_FOLDERS_METHOD,
+            json!({"event": {"added": [], "removed": [{"uri": path_to_uri(&directory), "name": "shop"}]}}),
+        );
+        let symbols = request(6, WORKSPACE_SYMBOL_METHOD, json!({"query": "order"}));
+        assert_eq!(names(&symbols), vec!["orderRepository"]);
+
+        assert_eq!(request(7, "shutdown", json!(null)), Value::Null);
+        notify(EXIT_METHOD, json!(null));
+        server_thread.join().expect("server thread should stop");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
     fn serves_code_actions_that_fix_published_diagnostics() {
         let directory =
             std::env::temp_dir().join(format!("xml-lsp-code-actions {}", std::process::id()));
@@ -2636,6 +2877,8 @@ i:noNamespaceSchemaLocation=\"missing.xsd\">\r\n  \
                             "selectionRangeProvider": true,
                             "documentLinkProvider": {"resolveProvider": false},
                             "codeActionProvider": {"codeActionKinds": ["quickfix", "refactor", "source"]},
+                            "workspaceSymbolProvider": true,
+                            "workspace": {"workspaceFolders": {"supported": true, "changeNotifications": true}},
                         },
                         "serverInfo": {
                             "name": "xml-lsp",
