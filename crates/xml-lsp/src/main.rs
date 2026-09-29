@@ -1,6 +1,7 @@
 //! Serveur LSP XML natif.
 
 mod code_actions;
+mod colors;
 mod folding;
 mod formatting;
 mod highlight;
@@ -54,6 +55,8 @@ const SELECTION_RANGE_METHOD: &str = "textDocument/selectionRange";
 const DOCUMENT_LINK_METHOD: &str = "textDocument/documentLink";
 const CODE_ACTION_METHOD: &str = "textDocument/codeAction";
 const WORKSPACE_SYMBOL_METHOD: &str = "workspace/symbol";
+const DOCUMENT_COLOR_METHOD: &str = "textDocument/documentColor";
+const COLOR_PRESENTATION_METHOD: &str = "textDocument/colorPresentation";
 
 const DID_CHANGE_WORKSPACE_FOLDERS_METHOD: &str = "workspace/didChangeWorkspaceFolders";
 const DID_CHANGE_WATCHED_FILES_METHOD: &str = "workspace/didChangeWatchedFiles";
@@ -470,6 +473,33 @@ impl XmlLanguageServer {
             start.min(end)..start.max(end),
             params.get("context").unwrap_or(&Value::Null),
         )))
+    }
+
+    fn document_colors(&self, params: &Value) -> Option<Value> {
+        let uri = params.get("textDocument")?.get("uri")?.as_str()?;
+        let source = self.documents.get(uri)?;
+        Some(colors::document_colors(uri, source))
+    }
+
+    fn color_presentations(&self, params: &Value) -> Option<Value> {
+        let uri = params.get("textDocument")?.get("uri")?.as_str()?;
+        let source = self.documents.get(uri)?;
+        let color = colors::Rgba::from_json(params.get("color")?)?;
+        let range = params.get("range")?;
+        let offset = |position: &Value| {
+            let line = position.get("line")?.as_u64()? as usize;
+            let character = position.get("character")?.as_u64()? as usize;
+            Some(offset_at(source, line, character))
+        };
+        let start = offset(range.get("start")?)?;
+        let end = offset(range.get("end")?)?;
+        Some(colors::color_presentations(
+            uri,
+            source,
+            start.min(end)..start.max(end),
+            color,
+            range,
+        ))
     }
 
     fn document_links(&self, params: &Value) -> Option<Value> {
@@ -999,6 +1029,7 @@ fn server_capabilities() -> Value {
         "documentLinkProvider": {"resolveProvider": false},
         "codeActionProvider": {"codeActionKinds": code_actions::CODE_ACTION_KINDS},
         "workspaceSymbolProvider": true,
+        "colorProvider": true,
         "workspace": {"workspaceFolders": {"supported": true, "changeNotifications": true}},
     })
 }
@@ -1219,6 +1250,26 @@ fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
                     connection
                         .sender
                         .send(Response::new_ok(request.id, actions).into())?;
+                    continue;
+                }
+
+                if request.method == DOCUMENT_COLOR_METHOD {
+                    let colors = server
+                        .document_colors(&request.params)
+                        .unwrap_or_else(|| json!([]));
+                    connection
+                        .sender
+                        .send(Response::new_ok(request.id, colors).into())?;
+                    continue;
+                }
+
+                if request.method == COLOR_PRESENTATION_METHOD {
+                    let presentations = server
+                        .color_presentations(&request.params)
+                        .unwrap_or_else(|| json!([]));
+                    connection
+                        .sender
+                        .send(Response::new_ok(request.id, presentations).into())?;
                     continue;
                 }
 
@@ -1943,6 +1994,137 @@ mod tests {
         );
 
         assert_eq!(request(4, "shutdown", json!(null)), Some(Value::Null));
+        notify(EXIT_METHOD, json!(null));
+        server_thread.join().expect("server thread should stop");
+    }
+
+    #[test]
+    fn serves_document_colors_and_color_presentations() {
+        let (server, client) = Connection::memory();
+        let server_thread = thread::spawn(|| run(server).expect("server loop should succeed"));
+        let send = |message: Message| client.sender.send(message).expect("message should be sent");
+        let request = |id: i32, method: &str, params: Value| {
+            send(
+                Request {
+                    id: RequestId::from(id),
+                    method: method.to_owned(),
+                    params,
+                }
+                .into(),
+            );
+            loop {
+                match client.receiver.recv().expect("a message should arrive") {
+                    Message::Response(response) => {
+                        assert_eq!(response.id, RequestId::from(id));
+                        return response.result.expect("request should succeed");
+                    }
+                    Message::Notification(_) => {}
+                    message => panic!("unexpected message {message:?}"),
+                }
+            }
+        };
+        let notify = |method: &str, params: Value| {
+            send(
+                Notification {
+                    method: method.to_owned(),
+                    params,
+                }
+                .into(),
+            )
+        };
+
+        let initialize = request(1, INITIALIZE_METHOD, json!({"capabilities": {}}));
+        assert_eq!(initialize["capabilities"]["colorProvider"], true);
+        notify("initialized", json!({}));
+
+        let svg = "file:///icon.svg";
+        notify(
+            DID_OPEN_METHOD,
+            json!({"textDocument": {"uri": svg, "text": "<svg>\r\n  <!-- é -->\r\n  <rect fill=\"#F008\" stroke=\"rgb(0 128 0)\"/>\r\n</svg>"}}),
+        );
+        let colors = request(
+            2,
+            DOCUMENT_COLOR_METHOD,
+            json!({"textDocument": {"uri": svg}}),
+        );
+        assert_eq!(
+            colors,
+            json!([
+                {
+                    "range": {"start": {"line": 2, "character": 14}, "end": {"line": 2, "character": 19}},
+                    "color": {"red": 1.0, "green": 0.0, "blue": 0.0, "alpha": 136.0 / 255.0},
+                },
+                {
+                    "range": {"start": {"line": 2, "character": 29}, "end": {"line": 2, "character": 41}},
+                    "color": {"red": 0.0, "green": 128.0 / 255.0, "blue": 0.0, "alpha": 1.0},
+                },
+            ])
+        );
+
+        let range = colors[0]["range"].clone();
+        let presentations = request(
+            3,
+            COLOR_PRESENTATION_METHOD,
+            json!({
+                "textDocument": {"uri": svg},
+                "color": {"red": 0.0, "green": 0.0, "blue": 1.0, "alpha": 1.0},
+                "range": range,
+            }),
+        );
+        let labels = presentations
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|presentation| presentation["label"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            vec![
+                "#00FF",
+                "#0000FF",
+                "rgb(0, 0, 255)",
+                "hsl(240, 100%, 50%)",
+                "blue"
+            ]
+        );
+        assert_eq!(
+            presentations[0]["textEdit"],
+            json!({"range": range, "newText": "#00FF"})
+        );
+
+        let resources = "file:///app/res/values/colors.xml";
+        notify(
+            DID_OPEN_METHOD,
+            json!({"textDocument": {"uri": resources, "text": "<resources>\n  <color name=\"accent\">#80FF0000</color>\n</resources>"}}),
+        );
+        let colors = request(
+            4,
+            DOCUMENT_COLOR_METHOD,
+            json!({"textDocument": {"uri": resources}}),
+        );
+        assert_eq!(colors[0]["color"]["red"], 1.0);
+        assert_eq!(colors[0]["color"]["alpha"], 128.0 / 255.0);
+        let presentations = request(
+            5,
+            COLOR_PRESENTATION_METHOD,
+            json!({
+                "textDocument": {"uri": resources},
+                "color": {"red": 0.0, "green": 1.0, "blue": 0.0, "alpha": 1.0},
+                "range": colors[0]["range"],
+            }),
+        );
+        assert_eq!(presentations[0]["label"], "#FF00FF00");
+        assert_eq!(presentations[1]["label"], "#00FF00");
+        assert_eq!(presentations.as_array().map(Vec::len), Some(2));
+
+        let unknown = request(
+            6,
+            DOCUMENT_COLOR_METHOD,
+            json!({"textDocument": {"uri": "file:///closed.svg"}}),
+        );
+        assert_eq!(unknown, json!([]));
+
+        assert_eq!(request(7, "shutdown", json!(null)), Value::Null);
         notify(EXIT_METHOD, json!(null));
         server_thread.join().expect("server thread should stop");
     }
@@ -2878,6 +3060,7 @@ i:noNamespaceSchemaLocation=\"missing.xsd\">\r\n  \
                             "documentLinkProvider": {"resolveProvider": false},
                             "codeActionProvider": {"codeActionKinds": ["quickfix", "refactor", "source"]},
                             "workspaceSymbolProvider": true,
+                            "colorProvider": true,
                             "workspace": {"workspaceFolders": {"supported": true, "changeNotifications": true}},
                         },
                         "serverInfo": {

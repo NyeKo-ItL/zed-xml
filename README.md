@@ -22,6 +22,7 @@ XML language support for Zed, including XML, XSD, XSLT, SVG, WSDL, plist, XJB an
 - Code actions (`textDocument/codeAction`, LemMinX-style, Zed `editor: toggle code actions` / lightbulb): quick fixes for a mismatched end tag (rename the end tag, or the start tag), a stray end tag (remove it), an unclosed element (insert `</name>` or make it self-closing), a tag missing `>` (`>` or `/>`), a duplicate attribute (remove it), an unquoted attribute value (quote it), an unescaped `&`/`<` (`&amp;`/`&lt;`), missing required XSD attributes (inserted with their fixed/default value, first enumeration value or an empty value), a value outside its XSD enumeration (one action per allowed value, the closest preferred) and an unknown element ("Did you mean `<title>`?" by edit distance); refactorings between `<a></a>` and `<a/>`; and a source action binding an unbound document to a sibling `.xsd` (or a placeholder) with `xmlns:xsi` + `xsi:noNamespaceSchemaLocation`/`xsi:schemaLocation`. Well-formedness diagnostics are now precise (all problems, not only the first, on the offending name/value) and carry `data.kind`; XSD diagnostics carry `data.rule` and are located on the offending occurrence, and values outside an enumeration are reported.
 - Workspace symbols (`workspace/symbol`, Zed `project symbols: toggle`, IntelliJ "Go to Symbol"-style): global XSD components (`xs:element`, `xs:attribute`, `xs:complexType`, `xs:simpleType`, `xs:group`, `xs:attributeGroup`, `xs:notation`, also under `xs:redefine`/`xs:override`) with their target namespace (or file name) as container, plus the root element and elements identified by `xml:id`/`id`/`name` (e.g. `<bean id="dataSource">`) in XML files — not every element, which would drown the results. Open documents (including unsaved changes) and `*.xml`/`*.xsd`/`*.xsl`/`*.svg`/… files of the workspace folders are indexed lazily on the first query (hidden directories, `target/` and `node_modules/` skipped; at most 5000 files of 4 MiB), cached by modification time and refreshed through `workspace/didChangeWatchedFiles` and workspace folder changes. Queries match case-insensitively (exact, prefix, substring, then fuzzy subsequence); an empty query returns a bounded list.
 - Hierarchical document symbols (`textDocument/documentSymbol`) for clients that support them: nested elements with their `xml:id`/`id`/`name` attribute as detail, tolerant of malformed documents.
+- Document colors (`textDocument/documentColor` + `textDocument/colorPresentation`, VS Code/IntelliJ-style color swatches): SVG presentation attributes (`fill`, `stroke`, `stop-color`, `flood-color`, `lighting-color`, `color`, `solid-color`), `style="..."` declarations and `<style>` CSS (CDATA included, comments, strings and `url()` skipped) with `#rgb`/`#rgba`/`#rrggbb`/`#rrggbbaa`, `rgb()`/`rgba()`/`hsl()`/`hsla()` (comma or space syntax, percentages, angle units) and all CSS named colors including `transparent` (`currentColor`/`none` ignored); Android resources (`<color>`, `<item>` and `<drawable>` values in `<resources>` or `res/values*/` files, and color-like `android:`/`app:`/`tools:` attributes such as `android:textColor`, `app:tint` or `android:background`) with Android hex semantics where alpha comes first (`#ARGB`, `#AARRGGBB`). Color presentations keep the original format first, then hex, `rgb()`, `hsl()` and the color name (Android: `#AARRGGBB`, `#RRGGBB`). Zed renders them according to `lsp_document_colors` (`inlay` by default, or `background`, `border`, `none`).
 - `xsi:schemaLocation` and `xsi:noNamespaceSchemaLocation` support.
 - Workspace-aware revalidation when an open XSD changes.
 
@@ -69,6 +70,14 @@ Zed uses tree-sitter and indentation folding by default. To use the server's fol
       "document_folding_ranges": "on"
     }
   }
+}
+```
+
+Document colors are shown as inlay swatches by default. Change how Zed renders them (or turn them off) with the editor setting:
+
+```json
+{
+  "lsp_document_colors": "background"
 }
 ```
 
