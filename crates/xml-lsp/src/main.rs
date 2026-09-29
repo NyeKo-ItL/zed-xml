@@ -4,6 +4,7 @@ mod folding;
 mod highlight;
 mod linked_editing;
 mod rename;
+mod selection;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -41,6 +42,7 @@ const LINKED_EDITING_RANGE_METHOD: &str = "textDocument/linkedEditingRange";
 const PREPARE_RENAME_METHOD: &str = "textDocument/prepareRename";
 const RENAME_METHOD: &str = "textDocument/rename";
 const FOLDING_RANGE_METHOD: &str = "textDocument/foldingRange";
+const SELECTION_RANGE_METHOD: &str = "textDocument/selectionRange";
 
 type SchemaCache = HashMap<PathBuf, (SystemTime, XsdSchema)>;
 
@@ -484,6 +486,22 @@ impl XmlLanguageServer {
         )))
     }
 
+    fn selection_range(&self, params: &Value) -> Option<Value> {
+        let uri = params.get("textDocument")?.get("uri")?.as_str()?;
+        let source = self.documents.get(uri)?;
+        let offsets = params
+            .get("positions")?
+            .as_array()?
+            .iter()
+            .map(|position| {
+                let line = position.get("line")?.as_u64()? as usize;
+                let character = position.get("character")?.as_u64()? as usize;
+                Some(offset_at(source, line, character))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(Value::Array(selection::selection_ranges(source, &offsets)))
+    }
+
     fn symbols(&self, params: &Value) -> Option<Value> {
         let uri = params.get("textDocument")?.get("uri")?.as_str()?;
         let source = self.documents.get(uri)?;
@@ -867,6 +885,7 @@ fn server_capabilities() -> Value {
         "linkedEditingRangeProvider": true,
         "renameProvider": {"prepareProvider": true},
         "foldingRangeProvider": true,
+        "selectionRangeProvider": true,
     })
 }
 
@@ -1037,6 +1056,16 @@ fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
                     let ranges = server
                         .folding_range(&request.params)
                         .unwrap_or_else(|| json!([]));
+                    connection
+                        .sender
+                        .send(Response::new_ok(request.id, ranges).into())?;
+                    continue;
+                }
+
+                if request.method == SELECTION_RANGE_METHOD {
+                    let ranges = server
+                        .selection_range(&request.params)
+                        .unwrap_or(Value::Null);
                     connection
                         .sender
                         .send(Response::new_ok(request.id, ranges).into())?;
@@ -1619,6 +1648,143 @@ mod tests {
     }
 
     #[test]
+    fn serves_selection_range_requests_for_several_positions() {
+        let (server, client) = Connection::memory();
+        let server_thread = thread::spawn(|| run(server).expect("server loop should succeed"));
+        let request = |id: i32, method: &str, params: Value| {
+            client
+                .sender
+                .send(
+                    Request {
+                        id: RequestId::from(id),
+                        method: method.to_owned(),
+                        params,
+                    }
+                    .into(),
+                )
+                .expect("request should be sent");
+            loop {
+                match client.receiver.recv().expect("a message should arrive") {
+                    Message::Response(response) => {
+                        assert_eq!(response.id, RequestId::from(id));
+                        return response.result;
+                    }
+                    Message::Notification(_) => {}
+                    message => panic!("unexpected message {message:?}"),
+                }
+            }
+        };
+        let notify = |method: &str, params: Value| {
+            client
+                .sender
+                .send(
+                    Notification {
+                        method: method.to_owned(),
+                        params,
+                    }
+                    .into(),
+                )
+                .expect("notification should be sent");
+        };
+        let range = |start: (u32, u32), end: (u32, u32)| {
+            json!({
+                "start": {"line": start.0, "character": start.1},
+                "end": {"line": end.0, "character": end.1},
+            })
+        };
+        let ranges = |mut selection: &Value| {
+            let mut ranges = vec![selection["range"].clone()];
+            while let Some(parent) = selection.get("parent") {
+                ranges.push(parent["range"].clone());
+                selection = parent;
+            }
+            ranges
+        };
+
+        let initialize = request(1, INITIALIZE_METHOD, json!({"capabilities": {}}));
+        assert_eq!(
+            initialize.unwrap()["capabilities"]["selectionRangeProvider"],
+            true
+        );
+        notify("initialized", json!({}));
+        notify(
+            DID_OPEN_METHOD,
+            json!({
+                "textDocument": {
+                    "uri": "file:///document.xml",
+                    "text": "<root>\r\n  <ns:😀 a=\"x y\">text</ns:😀>\r\n</root>",
+                }
+            }),
+        );
+
+        let result = request(
+            2,
+            SELECTION_RANGE_METHOD,
+            json!({
+                "textDocument": {"uri": "file:///document.xml"},
+                "positions": [
+                    {"line": 1, "character": 12},
+                    {"line": 1, "character": 18},
+                    {"line": 1, "character": 26},
+                ],
+            }),
+        )
+        .expect("selection ranges should be returned");
+        let root = range((0, 0), (2, 7));
+        let content = range((0, 6), (2, 0));
+        let element = range((1, 2), (1, 29));
+        assert_eq!(
+            ranges(&result[0]),
+            vec![
+                range((1, 12), (1, 13)),
+                range((1, 12), (1, 15)),
+                range((1, 11), (1, 16)),
+                range((1, 9), (1, 16)),
+                range((1, 2), (1, 17)),
+                element.clone(),
+                content.clone(),
+                root.clone(),
+            ]
+        );
+        assert_eq!(
+            ranges(&result[1]),
+            vec![
+                range((1, 17), (1, 21)),
+                element.clone(),
+                content.clone(),
+                root.clone(),
+            ]
+        );
+        assert_eq!(
+            ranges(&result[2]),
+            vec![
+                range((1, 26), (1, 28)),
+                range((1, 23), (1, 28)),
+                range((1, 21), (1, 29)),
+                element,
+                content,
+                root,
+            ]
+        );
+
+        assert_eq!(
+            request(
+                3,
+                SELECTION_RANGE_METHOD,
+                json!({
+                    "textDocument": {"uri": "file:///missing.xml"},
+                    "positions": [{"line": 0, "character": 0}],
+                })
+            ),
+            Some(Value::Null)
+        );
+
+        assert_eq!(request(4, "shutdown", json!(null)), Some(Value::Null));
+        notify(EXIT_METHOD, json!(null));
+        server_thread.join().expect("server thread should stop");
+    }
+
+    #[test]
     fn serves_prepare_rename_and_rename_requests() {
         let (server, client) = Connection::memory();
         let server_thread = thread::spawn(|| run(server).expect("server loop should succeed"));
@@ -1846,6 +2012,7 @@ mod tests {
                             "linkedEditingRangeProvider": true,
                             "renameProvider": {"prepareProvider": true},
                             "foldingRangeProvider": true,
+                            "selectionRangeProvider": true,
                         },
                         "serverInfo": {
                             "name": "xml-lsp",
