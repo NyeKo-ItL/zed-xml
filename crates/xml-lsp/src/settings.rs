@@ -166,7 +166,8 @@ pub struct ValidationSettings {
     /// `xml.validation.disallowDocTypeDecl` : signale toute déclaration
     /// `<!DOCTYPE>`.
     pub disallow_doc_type_decl: bool,
-    /// `xml.validation.resolveExternalEntities` (réservé au support DTD).
+    /// `xml.validation.resolveExternalEntities` : les entités générales
+    /// externes référencées doivent être résolubles (jamais lues).
     pub resolve_external_entities: bool,
 }
 

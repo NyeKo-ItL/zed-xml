@@ -3,6 +3,7 @@
 mod catalog;
 mod code_actions;
 mod colors;
+mod dtd;
 mod folding;
 mod formatting;
 mod highlight;
@@ -108,6 +109,8 @@ struct XmlLanguageServer {
     /// Enregistrement `didChangeWatchedFiles` en cours pour les catalogues.
     catalog_registration: Option<String>,
     catalog_registrations: u64,
+    /// Textes des DTD externes lues sur disque.
+    dtd_cache: dtd::DtdCache,
 }
 
 impl XmlLanguageServer {
@@ -130,6 +133,7 @@ impl XmlLanguageServer {
             catalogs: catalog::Catalogs::default(),
             catalog_registration: None,
             catalog_registrations: 0,
+            dtd_cache: HashMap::new(),
         }
     }
 
@@ -363,12 +367,18 @@ impl XmlLanguageServer {
         if !validation.enabled {
             return json!({"uri": uri, "diagnostics": []});
         }
+        if dtd::is_dtd_uri(uri) {
+            // Fichier DTD : ni bonne formation XML, ni schéma.
+            let diagnostics = self.dtd_diagnostics(uri, source);
+            return json!({"uri": uri, "diagnostics": diagnostics});
+        }
         let diagnostics = parse_xml(source).diagnostics;
         let mut extra = Vec::new();
         if validation.disallow_doc_type_decl {
             extra.extend(doctype_diagnostics(source));
         }
         extra.extend(catalog_diagnostics(uri, source));
+        extra.extend(self.dtd_diagnostics(uri, source));
         if validation.schema != settings::SchemaValidation::Never {
             extra.extend(self.schema_diagnostics(uri, source));
         }
@@ -380,10 +390,29 @@ impl XmlLanguageServer {
         diagnostics_params(uri, source, &diagnostics, &extra)
     }
 
+    /// Contexte de chargement des DTD.
+    fn dtd_context(&mut self) -> dtd::DtdContext<'_> {
+        dtd::DtdContext {
+            documents: &self.documents,
+            catalogs: &self.catalogs,
+            cache: &mut self.dtd_cache,
+        }
+    }
+
+    /// Grammaire DTD du document (`<!DOCTYPE>` ou fichier `.dtd`).
+    fn dtd_grammar(&mut self, uri: &str, source: &str) -> Option<dtd::Grammar> {
+        dtd::load(&mut self.dtd_context(), uri, source)
+    }
+
+    fn dtd_diagnostics(&mut self, uri: &str, source: &str) -> Vec<Value> {
+        let validation = self.settings.validation.clone();
+        dtd::diagnostics(&mut self.dtd_context(), uri, source, &validation)
+    }
+
     /// Le document est associé à une grammaire (XSD, DTD, `xml-model`,
     /// `xml.fileAssociations`) ou est lui-même un schéma.
     fn has_grammar(&self, uri: &str, source: &str) -> bool {
-        if is_xsd_uri(uri) || !self.associated_schemas(uri).is_empty() {
+        if is_xsd_uri(uri) || dtd::is_dtd_uri(uri) || !self.associated_schemas(uri).is_empty() {
             return true;
         }
         if !matches!(
@@ -589,6 +618,12 @@ impl XmlLanguageServer {
         let line = position.get("line")?.as_u64()? as usize;
         let character = position.get("character")?.as_u64()? as usize;
         let offset = offset_at(&source, line, character);
+        let grammar = self.dtd_grammar(uri, &source);
+        if dtd::in_dtd_text(grammar.as_ref(), uri, &source, offset) {
+            // Fichier DTD ou sous-ensemble interne : propositions DTD seules.
+            let items = dtd::completions(grammar.as_ref(), uri, &source, offset);
+            return Some(json!({"isIncomplete": false, "items": items}));
+        }
         let mut items = complete_xml(&source, offset)
             .into_iter()
             .map(|completion| {
@@ -609,6 +644,7 @@ impl XmlLanguageServer {
         items.extend(self.schema_completions(uri, &source, offset));
         items.extend(self.schema_attributes(uri, &source, offset));
         items.extend(self.schema_attribute_values(uri, &source, offset));
+        items.extend(dtd::completions(grammar.as_ref(), uri, &source, offset));
         deduplicate_completion_items(&mut items);
         Some(json!({"isIncomplete": false, "items": items}))
     }
@@ -767,6 +803,11 @@ impl XmlLanguageServer {
         ) {
             return Some(links);
         }
+        if let Some(grammar) = self.dtd_grammar(uri, &source)
+            && let Some(location) = dtd::definition(&grammar, uri, &source, offset)
+        {
+            return Some(location);
+        }
         let name = element_name_at(&source, offset)?;
         if let Some((path, schema_source, offset)) = self.xsd_definition(uri, &source, &name) {
             return Some(json!([{
@@ -826,14 +867,16 @@ impl XmlLanguageServer {
         };
         let start = offset(range.get("start")?)?;
         let end = offset(range.get("end")?)?;
+        let range = start.min(end)..start.max(end);
+        let request_context = params.get("context").unwrap_or(&Value::Null);
+        let grammar = self.dtd_grammar(uri, &source);
         let mut context = self.hover_context(uri);
-        Some(Value::Array(code_actions::code_actions(
-            &mut context,
-            uri,
-            &source,
-            start.min(end)..start.max(end),
-            params.get("context").unwrap_or(&Value::Null),
-        )))
+        let mut actions =
+            code_actions::code_actions(&mut context, uri, &source, range.clone(), request_context);
+        let mut dtd_actions = code_actions::Actions::new(uri, &source, range, request_context);
+        dtd::code_actions(&mut dtd_actions, grammar.as_ref());
+        actions.extend(dtd_actions.actions);
+        Some(Value::Array(actions))
     }
 
     fn document_colors(&self, params: &Value) -> Option<Value> {
@@ -880,6 +923,11 @@ impl XmlLanguageServer {
         let character = position.get("character")?.as_u64()? as usize;
         let offset = offset_at(source, line, character);
         let source = source.clone();
+        if let Some(grammar) = self.dtd_grammar(uri, &source)
+            && let Some(hover) = dtd::hover(&grammar, uri, &source, offset)
+        {
+            return Some(hover);
+        }
         let mut context = self.hover_context(uri);
         hover::hover(&mut context, uri, &source, offset)
     }
@@ -985,13 +1033,19 @@ impl XmlLanguageServer {
         Some(Value::Array(selection::selection_ranges(source, &offsets)))
     }
 
-    fn symbols(&self, params: &Value) -> Option<Value> {
+    fn symbols(&mut self, params: &Value) -> Option<Value> {
         let uri = params.get("textDocument")?.get("uri")?.as_str()?;
-        let source = self.documents.get(uri)?;
+        let source = self.documents.get(uri)?.clone();
+        let source = &source;
         if !self.settings.symbols_enabled {
             return Some(json!([]));
         }
-        let mut symbols = if self.hierarchical_document_symbols {
+        let mut symbols = if dtd::is_dtd_uri(uri) {
+            let hierarchical = self.hierarchical_document_symbols;
+            self.dtd_grammar(uri, source)
+                .map(|grammar| dtd::document_symbols(&grammar, uri, source, hierarchical))
+                .unwrap_or_default()
+        } else if self.hierarchical_document_symbols {
             symbols::document_symbols(source)
         } else {
             match xml_symbols(source) {
@@ -1013,7 +1067,8 @@ impl XmlLanguageServer {
     fn formatting(&self, params: &Value) -> Option<Value> {
         let uri = params.get("textDocument")?.get("uri")?.as_str()?;
         let source = self.documents.get(uri)?;
-        if !self.settings.format.enabled {
+        if !self.settings.format.enabled || dtd::is_dtd_uri(uri) {
+            // Le formateur XML ne s'applique pas aux fichiers DTD.
             return Some(json!([]));
         }
         let options = formatting::format_options(params, source, &self.settings.format);
@@ -1023,6 +1078,9 @@ impl XmlLanguageServer {
     fn range_formatting(&self, params: &Value) -> Option<Value> {
         let uri = params.get("textDocument")?.get("uri")?.as_str()?;
         let source = self.documents.get(uri)?;
+        if dtd::is_dtd_uri(uri) {
+            return Some(json!([]));
+        }
         let range = params.get("range")?;
         let offset = |position: &Value| {
             let line = position.get("line")?.as_u64()? as usize;
@@ -1444,7 +1502,7 @@ fn symbol_value(name: &str, start: usize, end: usize, source: &str) -> Value {
 fn server_capabilities() -> Value {
     json!({
         "textDocumentSync": {"openClose": true, "change": 2},
-        "completionProvider": {"triggerCharacters": ["<", " ", "/", ">", "=", "\"", "?"]},
+        "completionProvider": {"triggerCharacters": ["<", " ", "/", ">", "=", "\"", "?", "&", "%"]},
         "documentFormattingProvider": true,
         "documentRangeFormattingProvider": true,
         "documentSymbolProvider": true,
@@ -1939,7 +1997,7 @@ mod tests {
         let capabilities = server_capabilities();
         assert_eq!(
             capabilities["completionProvider"]["triggerCharacters"],
-            json!(["<", " ", "/", ">", "=", "\"", "?"])
+            json!(["<", " ", "/", ">", "=", "\"", "?", "&", "%"])
         );
     }
 
@@ -3492,6 +3550,234 @@ mod tests {
     }
 
     #[test]
+    fn serves_dtd_diagnostics_completion_hover_definition_and_fixes() {
+        let directory = std::env::temp_dir().join(format!("xml-lsp-dtd {}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("directory should be created");
+        let dtd_path = directory.join("note.dtd");
+        std::fs::write(
+            &dtd_path,
+            "<!-- Note racine. -->\n<!ELEMENT note (to, body?)>\n<!ELEMENT to (#PCDATA)>\n<!ELEMENT body (#PCDATA)>\n<!ATTLIST note lang (fr | en) #REQUIRED>\n",
+        )
+        .expect("dtd should be written");
+        let uri = path_to_uri(&directory.join("note.xml"));
+        // Sous-ensemble interne + DTD externe, fins de ligne CRLF.
+        let source = "<!DOCTYPE note SYSTEM \"note.dtd\" [\r\n  <!ENTITY sig \"Alice\">\r\n]>\r\n<note lang=\"de\">\r\n  <to>Bob &sig; &unknown;</to>\r\n  <extra/>\r\n</note>";
+        let broken_uri = path_to_uri(&directory.join("broken.dtd"));
+        let broken = "<!ELEMENT a (b | c, d)>\n<!ELEMENT b EMPTY>";
+        let typing_uri = path_to_uri(&directory.join("typing.xml"));
+        let typing = "<!DOCTYPE note SYSTEM \"note.dtd\"><note lang=\"fr\"><";
+
+        let (server, connection) = Connection::memory();
+        let server_thread = thread::spawn(|| run(server).expect("server loop should succeed"));
+        let client = TestClient {
+            connection,
+            diagnostics: Default::default(),
+        };
+        let initialize = client.request(1, INITIALIZE_METHOD, json!({"capabilities": {}}));
+        assert_eq!(
+            initialize["capabilities"]["completionProvider"]["triggerCharacters"],
+            json!(["<", " ", "/", ">", "=", "\"", "?", "&", "%"])
+        );
+        client.notify("initialized", json!({}));
+        for (document_uri, text) in [(&uri, source), (&broken_uri, broken), (&typing_uri, typing)] {
+            client.notify(
+                DID_OPEN_METHOD,
+                json!({"textDocument": {"uri": document_uri, "text": text}}),
+            );
+        }
+        let published = client.take_diagnostics(2);
+        assert_eq!(published.len(), 3, "{published:?}");
+        assert_eq!(published[0]["uri"], uri);
+        assert_eq!(
+            codes(&published[0]),
+            vec![
+                "xml-entity",
+                "dtd-validation",
+                "dtd-validation",
+                "dtd-validation",
+            ],
+            "{published:?}"
+        );
+        assert_eq!(
+            diagnostic_kinds(&published[0]),
+            vec![
+                "undefinedEntity",
+                "invalidEnumeration",
+                "unexpectedElement",
+                "undeclaredElement",
+            ]
+        );
+        assert_eq!(
+            published[0]["diagnostics"][1]["range"],
+            json!({"start": {"line": 3, "character": 12}, "end": {"line": 3, "character": 14}})
+        );
+        // Fichier DTD : erreurs DTD seulement (pas de bonne formation XML).
+        assert_eq!(codes(&published[1]), vec!["dtd-grammar"]);
+        assert_eq!(
+            published[1]["diagnostics"][0]["range"]["start"],
+            json!({"line": 0, "character": 18})
+        );
+        // Document en cours de saisie : erreurs XML, pas d'erreur DTD.
+        assert!(
+            !codes(&published[2])
+                .iter()
+                .any(|code| code.starts_with("dtd")),
+            "{published:?}"
+        );
+
+        // Complétion : enfants permis par le modèle de contenu.
+        let completion = client.request(
+            3,
+            COMPLETION_METHOD,
+            json!({
+                "textDocument": {"uri": typing_uri},
+                "position": {"line": 0, "character": typing.len()},
+            }),
+        );
+        let items = completion["items"].as_array().unwrap();
+        let to = items
+            .iter()
+            .find(|item| item["label"] == "to")
+            .expect("`to` should be proposed");
+        assert_eq!(to["detail"], "<!ELEMENT to (#PCDATA)>");
+        assert!(!items.iter().any(|item| item["label"] == "body"));
+        // Complétion dans le sous-ensemble interne.
+        let completion = client.request(
+            4,
+            COMPLETION_METHOD,
+            json!({
+                "textDocument": {"uri": uri},
+                "position": {"line": 1, "character": 4},
+            }),
+        );
+        let labels = completion["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["label"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(labels, vec!["ELEMENT", "ATTLIST", "ENTITY", "NOTATION"]);
+
+        // Survol : déclaration, attributs et commentaire de la DTD externe.
+        let hover = client.request(
+            5,
+            HOVER_METHOD,
+            json!({"textDocument": {"uri": uri}, "position": {"line": 3, "character": 2}}),
+        );
+        let markdown = hover["contents"]["value"].as_str().unwrap();
+        assert!(
+            markdown.contains("<!ELEMENT note (to, body?)>"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("<!ATTLIST note lang (fr | en) #REQUIRED>"),
+            "{markdown}"
+        );
+        assert!(markdown.contains("Note racine."), "{markdown}");
+        assert_eq!(
+            hover["range"],
+            json!({"start": {"line": 3, "character": 1}, "end": {"line": 3, "character": 5}})
+        );
+
+        // Définition : entité du sous-ensemble interne, élément de la DTD.
+        let definition = client.request(
+            6,
+            DEFINITION_METHOD,
+            json!({"textDocument": {"uri": uri}, "position": {"line": 4, "character": 11}}),
+        );
+        assert_eq!(
+            definition,
+            json!([{"uri": uri, "range": {"start": {"line": 1, "character": 11}, "end": {"line": 1, "character": 14}}}])
+        );
+        let definition = client.request(
+            7,
+            DEFINITION_METHOD,
+            json!({"textDocument": {"uri": uri}, "position": {"line": 4, "character": 3}}),
+        );
+        assert_eq!(definition[0]["uri"], path_to_uri(&dtd_path));
+        assert_eq!(
+            definition[0]["range"]["start"],
+            json!({"line": 2, "character": 10})
+        );
+
+        // Correctifs : valeur énumérée et entité à déclarer (CRLF conservé).
+        let actions = client.request(
+            8,
+            CODE_ACTION_METHOD,
+            json!({
+                "textDocument": {"uri": uri},
+                "range": {"start": {"line": 3, "character": 12}, "end": {"line": 4, "character": 20}},
+                "context": {"diagnostics": published[0]["diagnostics"].clone()},
+            }),
+        );
+        let titles = actions
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|action| action["title"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        for expected in [
+            "Déclarer l'entité « &unknown; » dans le DOCTYPE",
+            "Remplacer par « fr »",
+            "Remplacer par « en »",
+        ] {
+            assert!(titles.iter().any(|title| title == expected), "{titles:?}");
+        }
+        let declare = actions
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|action| action["title"] == "Déclarer l'entité « &unknown; » dans le DOCTYPE")
+            .unwrap();
+        assert_eq!(
+            declare["edit"]["changes"][&uri][0],
+            json!({
+                "range": {"start": {"line": 2, "character": 0}, "end": {"line": 2, "character": 0}},
+                "newText": "  <!ENTITY unknown \"\">\r\n",
+            })
+        );
+        assert_eq!(declare["diagnostics"][0]["data"]["kind"], "undefinedEntity");
+
+        // Symboles et formatage d'un fichier DTD.
+        let symbols = client.request(
+            9,
+            SYMBOL_METHOD,
+            json!({"textDocument": {"uri": broken_uri}}),
+        );
+        let names = symbols
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|symbol| symbol["name"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["a", "b"]);
+        let formatting = client.request(
+            10,
+            FORMATTING_METHOD,
+            json!({"textDocument": {"uri": broken_uri}, "options": {"tabSize": 2, "insertSpaces": true}}),
+        );
+        assert_eq!(formatting, json!([]));
+
+        // Correction du document : plus aucun diagnostic.
+        client.notify(
+            DID_CHANGE_METHOD,
+            json!({
+                "textDocument": {"uri": uri, "version": 2},
+                "contentChanges": [{"text": "<!DOCTYPE note SYSTEM \"note.dtd\" [\r\n  <!ENTITY sig \"Alice\">\r\n]>\r\n<note lang=\"fr\">\r\n  <to>Bob &sig;</to>\r\n</note>"}],
+            }),
+        );
+        let published = client.take_diagnostics(11);
+        assert_eq!(published.len(), 1);
+        assert!(codes(&published[0]).is_empty(), "{published:?}");
+
+        client.request(12, "shutdown", json!(null));
+        client.notify(EXIT_METHOD, json!(null));
+        server_thread.join().expect("server thread should stop");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
     fn serves_document_links_and_link_definitions() {
         let directory =
             std::env::temp_dir().join(format!("xml-lsp-document-links {}", std::process::id()));
@@ -4050,7 +4336,7 @@ i:noNamespaceSchemaLocation=\"missing.xsd\">\r\n  \
                     Some(json!({
                         "capabilities": {
                             "textDocumentSync": {"openClose": true, "change": 2},
-                            "completionProvider": {"triggerCharacters": ["<", " ", "/", ">", "=", "\"", "?"]},
+                            "completionProvider": {"triggerCharacters": ["<", " ", "/", ">", "=", "\"", "?", "&", "%"]},
                             "documentFormattingProvider": true,
                             "documentRangeFormattingProvider": true,
                             "documentSymbolProvider": true,
