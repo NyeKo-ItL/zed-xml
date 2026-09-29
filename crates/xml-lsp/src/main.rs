@@ -1,5 +1,6 @@
 //! Serveur LSP XML natif.
 
+mod code_actions;
 mod folding;
 mod formatting;
 mod highlight;
@@ -24,8 +25,9 @@ use serde_json::{Value, json};
 use xml_core::format_xml;
 use xml_core::{XmlDiagnostic, auto_close_tag, complete_xml, parse_xml};
 use xsd_core::{
-    XsdSchema, complete_attribute_values, complete_attributes, complete_elements, merge_schemas,
-    parse_xsd, resolve_schema_dependencies, resolve_schema_locations, validate_document_located,
+    LocatedXsdDiagnostic, XsdSchema, complete_attribute_values, complete_attributes,
+    complete_elements, merge_schemas, parse_xsd, resolve_schema_dependencies,
+    resolve_schema_locations, validate_document_located,
 };
 
 #[cfg(test)]
@@ -49,6 +51,7 @@ const RENAME_METHOD: &str = "textDocument/rename";
 const FOLDING_RANGE_METHOD: &str = "textDocument/foldingRange";
 const SELECTION_RANGE_METHOD: &str = "textDocument/selectionRange";
 const DOCUMENT_LINK_METHOD: &str = "textDocument/documentLink";
+const CODE_ACTION_METHOD: &str = "textDocument/codeAction";
 
 type SchemaCache = HashMap<PathBuf, (SystemTime, XsdSchema)>;
 
@@ -285,10 +288,19 @@ impl XmlLanguageServer {
             .collect::<Vec<_>>();
         if !schemas.is_empty() {
             let schema = merge_schemas(schemas);
-            diagnostics.extend(validate_document_located(source, &schema).into_iter().map(
-                |diagnostic| {
-                    xsd_error_diagnostic_at(&diagnostic.message, source, diagnostic.offset)
-                },
+            diagnostics.extend(
+                validate_document_located(source, &schema)
+                    .iter()
+                    .map(|diagnostic| xsd_error_diagnostic_at(diagnostic, source)),
+            );
+            let mut context = hover::HoverContext {
+                documents: &self.documents,
+                cache: &mut self.model_cache,
+            };
+            diagnostics.extend(code_actions::enumeration_diagnostics(
+                &mut context,
+                uri,
+                source,
             ));
         }
 
@@ -383,6 +395,31 @@ impl XmlLanguageServer {
             }
         }
         None
+    }
+
+    /// Répond à `textDocument/codeAction` (liste vide sans action).
+    fn code_action(&mut self, params: &Value) -> Option<Value> {
+        let uri = params.get("textDocument")?.get("uri")?.as_str()?;
+        let source = self.documents.get(uri)?.clone();
+        let range = params.get("range")?;
+        let offset = |position: &Value| {
+            let line = position.get("line")?.as_u64()? as usize;
+            let character = position.get("character")?.as_u64()? as usize;
+            Some(offset_at(&source, line, character))
+        };
+        let start = offset(range.get("start")?)?;
+        let end = offset(range.get("end")?)?;
+        let mut context = hover::HoverContext {
+            documents: &self.documents,
+            cache: &mut self.model_cache,
+        };
+        Some(Value::Array(code_actions::code_actions(
+            &mut context,
+            uri,
+            &source,
+            start.min(end)..start.max(end),
+            params.get("context").unwrap_or(&Value::Null),
+        )))
     }
 
     fn document_links(&self, params: &Value) -> Option<Value> {
@@ -768,15 +805,17 @@ fn load_schema_graph(
     (schemas, errors)
 }
 
-fn xsd_error_diagnostic_at(message: &str, source: &str, offset: usize) -> Value {
-    let position = position_at(source, offset);
+fn xsd_error_diagnostic_at(diagnostic: &LocatedXsdDiagnostic, source: &str) -> Value {
     json!({
-        "range": {"start": position, "end": position_at(source, offset)},
+        "range": {
+            "start": position_at(source, diagnostic.offset),
+            "end": position_at(source, diagnostic.end),
+        },
         "severity": 1,
         "source": "xml-lsp",
         "code": "xsd-validation",
-        "data": {"category": "xsd", "kind": "validation"},
-        "message": message,
+        "data": {"category": "xsd", "kind": "validation", "rule": diagnostic.kind.id()},
+        "message": diagnostic.message,
     })
 }
 
@@ -900,6 +939,7 @@ fn server_capabilities() -> Value {
         "foldingRangeProvider": true,
         "selectionRangeProvider": true,
         "documentLinkProvider": {"resolveProvider": false},
+        "codeActionProvider": {"codeActionKinds": code_actions::CODE_ACTION_KINDS},
     })
 }
 
@@ -950,17 +990,20 @@ fn diagnostics_params(
     schema_diagnostics: &[Value],
 ) -> Value {
     let diagnostics = diagnostics.iter().map(|diagnostic| {
-        let position = position_at(source, diagnostic.offset);
-        json!({
+        let mut value = json!({
             "range": {
-                "start": position,
-                "end": position_at(source, diagnostic.offset),
+                "start": position_at(source, diagnostic.offset),
+                "end": position_at(source, diagnostic.end),
             },
             "severity": 1,
             "source": "xml-lsp",
             "code": diagnostic.code(),
             "message": diagnostic.message,
-        })
+        });
+        if let Some(rule) = diagnostic.rule {
+            value["data"] = json!({"category": "xml", "kind": rule});
+        }
+        value
     });
 
     let mut diagnostics = diagnostics.collect::<Vec<_>>();
@@ -1087,6 +1130,16 @@ fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
                     connection
                         .sender
                         .send(Response::new_ok(request.id, ranges).into())?;
+                    continue;
+                }
+
+                if request.method == CODE_ACTION_METHOD {
+                    let actions = server
+                        .code_action(&request.params)
+                        .unwrap_or_else(|| json!([]));
+                    connection
+                        .sender
+                        .send(Response::new_ok(request.id, actions).into())?;
                     continue;
                 }
 
@@ -1816,6 +1869,201 @@ mod tests {
     }
 
     #[test]
+    fn serves_code_actions_that_fix_published_diagnostics() {
+        let directory =
+            std::env::temp_dir().join(format!("xml-lsp-code-actions {}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("directory should be created");
+        std::fs::write(
+            directory.join("items.xsd"),
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <xs:element name="items"><xs:complexType><xs:sequence>
+    <xs:element name="item" maxOccurs="unbounded"><xs:complexType>
+      <xs:attribute name="id" type="xs:string" use="required"/>
+      <xs:attribute name="kind" use="required"><xs:simpleType><xs:restriction base="xs:string">
+        <xs:enumeration value="book"/><xs:enumeration value="disc"/>
+      </xs:restriction></xs:simpleType></xs:attribute>
+    </xs:complexType></xs:element>
+  </xs:sequence></xs:complexType></xs:element>
+</xs:schema>"#,
+        )
+        .expect("schema should be written");
+        let uri = path_to_uri(&directory.join("items.xml"));
+
+        let (server, client) = Connection::memory();
+        let server_thread = thread::spawn(|| run(server).expect("server loop should succeed"));
+        let send = |message: Message| client.sender.send(message).expect("message should be sent");
+        let request = |id: i32, method: &str, params: Value| {
+            send(
+                Request {
+                    id: RequestId::from(id),
+                    method: method.to_owned(),
+                    params,
+                }
+                .into(),
+            );
+            loop {
+                match client.receiver.recv().expect("a message should arrive") {
+                    Message::Response(response) => {
+                        assert_eq!(response.id, RequestId::from(id));
+                        return response.result.expect("request should succeed");
+                    }
+                    Message::Notification(_) => {}
+                    message => panic!("unexpected message {message:?}"),
+                }
+            }
+        };
+        let notify = |method: &str, params: Value| {
+            send(
+                Notification {
+                    method: method.to_owned(),
+                    params,
+                }
+                .into(),
+            )
+        };
+        let diagnostics = || match client
+            .receiver
+            .recv()
+            .expect("diagnostics should be published")
+        {
+            Message::Notification(notification)
+                if notification.method == PUBLISH_DIAGNOSTICS_METHOD =>
+            {
+                notification.params["diagnostics"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+            }
+            message => panic!("unexpected message {message:?}"),
+        };
+
+        let initialize = request(1, INITIALIZE_METHOD, json!({"capabilities": {}}));
+        assert_eq!(
+            initialize["capabilities"]["codeActionProvider"],
+            json!({"codeActionKinds": ["quickfix", "refactor", "source"]})
+        );
+        notify("initialized", json!({}));
+
+        // Chaque correctif rapide préféré est appliqué puis le document est
+        // revalidé : le diagnostic corrigé disparaît.
+        let mut source = "<items xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"\r\n       xsi:noNamespaceSchemaLocation=\"items.xsd\">\r\n  <item id=\"é1\" kind=\"bok\"></itme>\r\n  <item/>\r\n</items>".to_owned();
+        notify(
+            DID_OPEN_METHOD,
+            json!({"textDocument": {"uri": uri, "text": source}}),
+        );
+        let mut published = diagnostics();
+        let mut version = 1;
+        let mut applied = Vec::new();
+        for id in 2.. {
+            let Some(diagnostic) = published.first().cloned() else {
+                break;
+            };
+            assert!(id < 10, "diagnostics should converge: {published:#?}");
+            let actions = request(
+                id,
+                CODE_ACTION_METHOD,
+                json!({
+                    "textDocument": {"uri": uri},
+                    "range": diagnostic["range"],
+                    "context": {"diagnostics": [diagnostic], "only": ["quickfix"]},
+                }),
+            );
+            let action = actions
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|action| action["isPreferred"] == true)
+                .unwrap_or_else(|| panic!("no preferred fix for {diagnostic:#?}: {actions:#?}"))
+                .clone();
+            assert_eq!(action["diagnostics"], json!([diagnostic]));
+            applied.push(action["title"].as_str().unwrap().to_owned());
+            source = formatting::apply_edits(&source, &action["edit"]["changes"][&uri]);
+            version += 1;
+            notify(
+                DID_CHANGE_METHOD,
+                json!({
+                    "textDocument": {"uri": uri, "version": version},
+                    "contentChanges": [{"text": source}],
+                }),
+            );
+            let remaining = diagnostics();
+            assert!(
+                !remaining.contains(&diagnostic),
+                "{diagnostic:#?} should be fixed by {applied:?}"
+            );
+            published = remaining;
+        }
+        assert_eq!(
+            applied,
+            vec![
+                "Remplacer </itme> par </item>",
+                "Ajouter les attributs requis id, kind",
+                "Remplacer par `book`",
+            ]
+        );
+        assert_eq!(
+            source,
+            "<items xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"\r\n       xsi:noNamespaceSchemaLocation=\"items.xsd\">\r\n  <item id=\"é1\" kind=\"book\"></item>\r\n  <item id=\"\" kind=\"book\"/>\r\n</items>"
+        );
+
+        // Réécriture et liaison de schéma sur un document sans schéma.
+        let other = path_to_uri(&directory.join("other.xml"));
+        notify(
+            DID_OPEN_METHOD,
+            json!({"textDocument": {"uri": other, "text": "<root><a></a></root>"}}),
+        );
+        assert_eq!(diagnostics(), Vec::<Value>::new());
+        let actions = request(
+            20,
+            CODE_ACTION_METHOD,
+            json!({
+                "textDocument": {"uri": other},
+                "range": {"start": {"line": 0, "character": 7}, "end": {"line": 0, "character": 7}},
+                "context": {"diagnostics": []},
+            }),
+        );
+        let titles = actions
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|action| {
+                (
+                    action["kind"].as_str().unwrap(),
+                    action["title"].as_str().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            titles,
+            vec![
+                (
+                    "refactor.rewrite",
+                    "Convertir <a></a> en élément auto-fermant <a/>"
+                ),
+                ("source", "Lier le document au schéma XSD items.xsd"),
+            ]
+        );
+        assert_eq!(
+            request(
+                21,
+                CODE_ACTION_METHOD,
+                json!({
+                    "textDocument": {"uri": "file:///missing.xml"},
+                    "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}},
+                    "context": {"diagnostics": []},
+                }),
+            ),
+            json!([])
+        );
+
+        assert_eq!(request(22, "shutdown", json!(null)), Value::Null);
+        notify(EXIT_METHOD, json!(null));
+        server_thread.join().expect("server thread should stop");
+        std::fs::remove_dir_all(directory).expect("directory should be removed");
+    }
+
+    #[test]
     fn serves_document_links_and_link_definitions() {
         let directory =
             std::env::temp_dir().join(format!("xml-lsp-document-links {}", std::process::id()));
@@ -2387,6 +2635,7 @@ i:noNamespaceSchemaLocation=\"missing.xsd\">\r\n  \
                             "foldingRangeProvider": true,
                             "selectionRangeProvider": true,
                             "documentLinkProvider": {"resolveProvider": false},
+                            "codeActionProvider": {"codeActionKinds": ["quickfix", "refactor", "source"]},
                         },
                         "serverInfo": {
                             "name": "xml-lsp",
@@ -2432,9 +2681,17 @@ i:noNamespaceSchemaLocation=\"missing.xsd\">\r\n  \
         match diagnostics_notification {
             Message::Notification(notification) => {
                 assert_eq!(notification.method, PUBLISH_DIAGNOSTICS_METHOD);
+                // Élément non fermé : signalé sur le nom de sa balise ouvrante.
                 assert_eq!(
-                    notification.params["diagnostics"][0]["range"]["start"],
-                    json!({"line": 0, "character": 6})
+                    notification.params["diagnostics"][0]["range"],
+                    json!({
+                        "start": {"line": 0, "character": 1},
+                        "end": {"line": 0, "character": 5},
+                    })
+                );
+                assert_eq!(
+                    notification.params["diagnostics"][0]["data"],
+                    json!({"category": "xml", "kind": "unclosedElement"})
                 );
                 assert_eq!(notification.params["diagnostics"][0]["severity"], 1);
                 assert_eq!(

@@ -1306,6 +1306,79 @@ impl XsdModelSet {
         }
     }
 
+    /// Déclarations globales d'éléments de tous les schémas.
+    pub fn global_elements(&self) -> impl Iterator<Item = Located<'_, XsdElementDecl>> {
+        self.models.iter().enumerate().flat_map(|(schema, model)| {
+            model
+                .elements
+                .iter()
+                .map(move |item| Located { schema, item })
+        })
+    }
+
+    /// Éléments autorisés dans le contenu d'un type, dans l'ordre du modèle :
+    /// particules (groupes et références de groupes dépliés, contenu hérité
+    /// par extension compris, `ref` résolus) puis membres non abstraits des
+    /// groupes de substitution. Sans doublon de nom qualifié.
+    pub fn child_elements<'a>(
+        &'a self,
+        parent: XsdTypeRef<'a>,
+    ) -> Vec<Located<'a, XsdElementDecl>> {
+        let mut particles = Vec::new();
+        self.content_particles(parent, 0, &mut particles);
+        let mut children = Vec::new();
+        for (schema, particle) in particles {
+            self.collect_child_elements(schema, particle, 0, &mut children);
+        }
+        let heads = children.clone();
+        for head in heads {
+            children.extend(self.global_elements().filter(|member| {
+                !member.item.is_abstract
+                    && member.item.substitution_groups.iter().any(|group| {
+                        group.local == head.item.name
+                            && (group.namespace.is_none() || group.namespace == head.item.namespace)
+                    })
+            }));
+        }
+        let mut seen = std::collections::HashSet::new();
+        children.retain(|child| {
+            !child.item.is_abstract
+                && seen.insert((child.item.namespace.clone(), child.item.name.clone()))
+        });
+        children
+    }
+
+    fn collect_child_elements<'a>(
+        &'a self,
+        schema: usize,
+        particle: &'a XsdParticle,
+        depth: usize,
+        out: &mut Vec<Located<'a, XsdElementDecl>>,
+    ) {
+        if depth > MAX_DEPTH {
+            return;
+        }
+        match particle {
+            XsdParticle::Element(declaration) => out.push(self.element_target(Located {
+                schema,
+                item: declaration.as_ref(),
+            })),
+            XsdParticle::Group { particles, .. } => {
+                for particle in particles {
+                    self.collect_child_elements(schema, particle, depth + 1, out);
+                }
+            }
+            XsdParticle::GroupRef(name) => {
+                if let Some(group) = self.group(name.namespace.as_deref(), &name.local)
+                    && let Some(content) = &group.item.content
+                {
+                    self.collect_child_elements(group.schema, content, depth + 1, out);
+                }
+            }
+            XsdParticle::Any => {}
+        }
+    }
+
     /// Attributs utilisables sur un type : attributs propres, groupes
     /// d'attributs et attributs hérités du type de base.
     pub fn attribute_uses<'a>(
@@ -1502,6 +1575,38 @@ mod tests {
             local: local.to_owned(),
             xsi_type: None,
         }
+    }
+
+    #[test]
+    fn lists_child_elements_through_groups_extensions_and_substitutions() {
+        let models = set(&[
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:t="urn:t" targetNamespace="urn:t" elementFormDefault="qualified">
+            <xs:element name="root" type="t:Derived"/>
+            <xs:complexType name="Base"><xs:sequence><xs:element name="first"/></xs:sequence></xs:complexType>
+            <xs:complexType name="Derived"><xs:complexContent><xs:extension base="t:Base">
+                <xs:choice><xs:group ref="t:G"/><xs:element ref="t:head"/><xs:any/></xs:choice>
+            </xs:extension></xs:complexContent></xs:complexType>
+            <xs:group name="G"><xs:sequence><xs:element name="grouped"/><xs:element name="first"/></xs:sequence></xs:group>
+            <xs:element name="head" abstract="true"/>
+            <xs:element name="member" substitutionGroup="t:head"/>
+        </xs:schema>"#,
+        ]);
+        let root = models
+            .resolve_element_path(&[step(Some("urn:t"), "root")])
+            .unwrap();
+        let names = models
+            .child_elements(root.element_type.unwrap())
+            .iter()
+            .map(|child| child.item.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["first", "grouped", "member"]);
+        assert_eq!(
+            models
+                .global_elements()
+                .map(|element| element.item.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["root", "head", "member"]
+        );
     }
 
     #[test]

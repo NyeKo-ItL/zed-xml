@@ -54,9 +54,9 @@ pub type ModelCache = HashMap<PathBuf, (SystemTime, Arc<XsdModel>, Vec<PathBuf>)
 
 /// Schémas chargés pour une requête : `paths[i]` est la source de
 /// `set.models()[i]`.
-struct LoadedModels {
-    paths: Vec<PathBuf>,
-    set: XsdModelSet,
+pub(crate) struct LoadedModels {
+    pub(crate) paths: Vec<PathBuf>,
+    pub(crate) set: XsdModelSet,
 }
 
 /// Contexte partagé par les requêtes de survol.
@@ -104,14 +104,14 @@ enum Target {
     Text { element: usize, range: Range<usize> },
 }
 
-struct Document<'a> {
-    source: &'a str,
-    tree: XmlTagTree,
-    attributes: Vec<Vec<XmlAttribute>>,
+pub(crate) struct Document<'a> {
+    pub(crate) source: &'a str,
+    pub(crate) tree: XmlTagTree,
+    pub(crate) attributes: Vec<Vec<XmlAttribute>>,
 }
 
 impl<'a> Document<'a> {
-    fn parse(source: &'a str) -> Self {
+    pub(crate) fn parse(source: &'a str) -> Self {
         let tree = XmlTagTree::parse(source);
         let attributes = tree
             .elements()
@@ -197,16 +197,16 @@ impl<'a> Document<'a> {
             .then_some(Target::Text { element, range })
     }
 
-    fn element_name(&self, element: usize) -> &'a str {
+    pub(crate) fn element_name(&self, element: usize) -> &'a str {
         self.tree.elements()[element].name(self.source)
     }
 
-    fn namespace(&self, element: usize, prefix: Option<&str>) -> Option<&'a str> {
+    pub(crate) fn namespace(&self, element: usize, prefix: Option<&str>) -> Option<&'a str> {
         resolve_namespace(self.source, &self.tree, &self.attributes, element, prefix).flatten()
     }
 
     /// Espace de noms et nom local d'un nom qualifié lu dans `element`.
-    fn split(&self, element: usize, name: &'a str) -> (Option<&'a str>, &'a str) {
+    pub(crate) fn split(&self, element: usize, name: &'a str) -> (Option<&'a str>, &'a str) {
         match name.split_once(':') {
             Some((prefix, local)) => (self.namespace(element, Some(prefix)), local),
             None => (self.namespace(element, None), name),
@@ -230,7 +230,7 @@ impl<'a> Document<'a> {
         name == local && namespace == Some(XSD_NAMESPACE)
     }
 
-    fn is_schema(&self) -> bool {
+    pub(crate) fn is_schema(&self) -> bool {
         self.tree
             .elements()
             .iter()
@@ -239,7 +239,7 @@ impl<'a> Document<'a> {
     }
 
     /// Chemin de l'élément dans l'instance, racine en premier.
-    fn instance_path(&self, element: usize) -> Vec<XsdInstanceStep> {
+    pub(crate) fn instance_path(&self, element: usize) -> Vec<XsdInstanceStep> {
         let mut indices = self.tree.ancestors(element).collect::<Vec<_>>();
         indices.reverse();
         indices.push(element);
@@ -331,7 +331,7 @@ fn dependency_paths(source: &str, path: &Path) -> Vec<PathBuf> {
 
 /// Charge les schémas `roots` et leurs dépendances, en largeur d'abord pour
 /// que les schémas référencés directement soient prioritaires.
-fn load_models(
+pub(crate) fn load_models(
     context: &mut HoverContext<'_>,
     loaded: Vec<(PathBuf, Arc<XsdModel>)>,
     roots: Vec<PathBuf>,
@@ -385,12 +385,13 @@ fn load_models(
 // Documents d'instance
 // ---------------------------------------------------------------------------
 
-fn instance_hover(
+/// Schémas d'un document d'instance (`xsi:schemaLocation`,
+/// `xsi:noNamespaceSchemaLocation`) et leurs dépendances.
+pub(crate) fn instance_models(
     context: &mut HoverContext<'_>,
     uri: &str,
     document: &Document<'_>,
-    target: &Target,
-) -> Option<(String, Range<usize>)> {
+) -> LoadedModels {
     let roots =
         match resolve_schema_locations(schema_resolution_source(document.source), uri_to_path(uri))
         {
@@ -401,7 +402,16 @@ fn instance_hover(
             // Document en cours de saisie : lecture tolérante des attributs xsi.
             Err(_) => document.schema_locations(&uri_to_path(uri)),
         };
-    let models = load_models(context, Vec::new(), roots);
+    load_models(context, Vec::new(), roots)
+}
+
+fn instance_hover(
+    context: &mut HoverContext<'_>,
+    uri: &str,
+    document: &Document<'_>,
+    target: &Target,
+) -> Option<(String, Range<usize>)> {
+    let models = instance_models(context, uri, document);
     let source = document.source;
     match target {
         Target::ElementName { element, name } => {
@@ -478,7 +488,7 @@ fn instance_hover(
     }
 }
 
-fn attribute_namespace<'a>(
+pub(crate) fn attribute_namespace<'a>(
     document: &Document<'a>,
     element: usize,
     name: &'a str,
