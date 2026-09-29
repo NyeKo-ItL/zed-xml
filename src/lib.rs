@@ -57,54 +57,96 @@ impl XmlExtension {
         }
     }
 
+    fn release_asset(
+        os: zed::Os,
+        architecture: zed::Architecture,
+    ) -> zed::Result<(&'static str, &'static str)> {
+        match (os, architecture) {
+            (zed::Os::Windows, zed::Architecture::X8664) => {
+                Ok(("xml-lsp-x86_64-pc-windows-msvc.exe", "xml-lsp.exe"))
+            }
+            (zed::Os::Linux, zed::Architecture::X8664) => {
+                Ok(("xml-lsp-x86_64-unknown-linux-gnu", "xml-lsp"))
+            }
+            (zed::Os::Mac, zed::Architecture::Aarch64) => {
+                Ok(("xml-lsp-aarch64-apple-darwin", "xml-lsp"))
+            }
+            _ => Err(
+                "Unsupported platform for xml-lsp. Set XML_LSP_PATH to a native binary.".to_owned(),
+            ),
+        }
+    }
+
     fn downloaded_command(
         language_server_id: &zed::LanguageServerId,
         worktree: &zed::Worktree,
     ) -> zed::Result<zed::Command> {
         let (os, architecture) = zed::current_platform();
-        let (target, executable) = match (os, architecture) {
-            (zed::Os::Windows, zed::Architecture::X8664) => {
-                ("x86_64-pc-windows-msvc", "xml-lsp.exe")
-            }
-            (zed::Os::Linux, zed::Architecture::X8664) => ("x86_64-unknown-linux-gnu", "xml-lsp"),
-
-            (zed::Os::Mac, zed::Architecture::Aarch64) => ("aarch64-apple-darwin", "xml-lsp"),
-            _ => {
-                return Err(
-                    "Unsupported platform for xml-lsp. Set XML_LSP_PATH to a native binary."
-                        .to_owned(),
-                );
-            }
-        };
-        let url = Self::environment(worktree, XML_LSP_DOWNLOAD_URL_ENV).unwrap_or_else(|| {
-            format!(
-                "https://github.com/{RELEASE_REPOSITORY}/releases/latest/download/xml-lsp-{target}"
-            )
-        });
+        let (asset_name, executable) = Self::release_asset(os, architecture)?;
+        let override_url = Self::environment(worktree, XML_LSP_DOWNLOAD_URL_ENV);
 
         zed::set_language_server_installation_status(
             language_server_id,
             &zed::LanguageServerInstallationStatus::Downloading,
         );
-        if let Err(error) =
-            zed::download_file(&url, executable, zed::DownloadedFileType::Uncompressed)
-        {
-            zed::set_language_server_installation_status(
-                language_server_id,
-                &zed::LanguageServerInstallationStatus::Failed(error.clone()),
-            );
-            return Err(format!(
-                "Could not install xml-lsp from {url}: {error}. Set XML_LSP_PATH to a local binary."
-            ));
+
+        let result: zed::Result<String> = (|| {
+            let version_dir;
+            let download_url;
+            if let Some(url) = override_url {
+                version_dir = LANGUAGE_SERVER_ID.to_owned();
+                download_url = url;
+            } else {
+                let release = zed::latest_github_release(
+                    RELEASE_REPOSITORY,
+                    zed::GithubReleaseOptions {
+                        require_assets: true,
+                        pre_release: false,
+                    },
+                )?;
+                let asset = release
+                    .assets
+                    .into_iter()
+                    .find(|asset| asset.name == asset_name)
+                    .ok_or_else(|| {
+                        format!(
+                            "Could not find asset {asset_name} in the latest {RELEASE_REPOSITORY} release"
+                        )
+                    })?;
+                version_dir = format!("{LANGUAGE_SERVER_ID}-{}", release.version);
+                download_url = asset.download_url;
+            }
+
+            zed::download_file(
+                &download_url,
+                &version_dir,
+                zed::DownloadedFileType::Uncompressed,
+            )?;
+            let executable_path = format!("{version_dir}/{executable}");
+            if !matches!(os, zed::Os::Windows) {
+                zed::make_file_executable(&executable_path)?;
+            }
+            Ok(executable_path)
+        })();
+
+        match result {
+            Ok(executable_path) => {
+                zed::set_language_server_installation_status(
+                    language_server_id,
+                    &zed::LanguageServerInstallationStatus::None,
+                );
+                Ok(Self::command(executable_path))
+            }
+            Err(error) => {
+                zed::set_language_server_installation_status(
+                    language_server_id,
+                    &zed::LanguageServerInstallationStatus::Failed(error.clone()),
+                );
+                Err(format!(
+                    "Could not install xml-lsp asset {asset_name}: {error}. Set XML_LSP_PATH to a local binary."
+                ))
+            }
         }
-        if !matches!(os, zed::Os::Windows) {
-            zed::make_file_executable(executable)?;
-        }
-        zed::set_language_server_installation_status(
-            language_server_id,
-            &zed::LanguageServerInstallationStatus::None,
-        );
-        Ok(Self::command(executable.to_owned()))
     }
 }
 
@@ -125,6 +167,40 @@ impl zed::Extension for XmlExtension {
         }
 
         Self::native_command(language_server_id, worktree)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_windows_x86_64_asset_and_executable_names() {
+        assert_eq!(
+            XmlExtension::release_asset(zed::Os::Windows, zed::Architecture::X8664),
+            Ok(("xml-lsp-x86_64-pc-windows-msvc.exe", "xml-lsp.exe"))
+        );
+    }
+
+    #[test]
+    fn maps_linux_x86_64_asset_and_executable_names() {
+        assert_eq!(
+            XmlExtension::release_asset(zed::Os::Linux, zed::Architecture::X8664),
+            Ok(("xml-lsp-x86_64-unknown-linux-gnu", "xml-lsp"))
+        );
+    }
+
+    #[test]
+    fn maps_macos_arm64_asset_and_executable_names() {
+        assert_eq!(
+            XmlExtension::release_asset(zed::Os::Mac, zed::Architecture::Aarch64),
+            Ok(("xml-lsp-aarch64-apple-darwin", "xml-lsp"))
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_platforms() {
+        assert!(XmlExtension::release_asset(zed::Os::Windows, zed::Architecture::Aarch64).is_err());
     }
 }
 
