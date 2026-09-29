@@ -1,6 +1,7 @@
 use zed_extension_api as zed;
 
 const LANGUAGE_SERVER_ID: &str = "xml-lsp";
+const EXPECTED_LSP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const XML_LSP_PATH_ENV: &str = "XML_LSP_PATH";
 const XML_LSP_DOWNLOAD_URL_ENV: &str = "XML_LSP_DOWNLOAD_URL";
 const RELEASE_REPOSITORY: &str = "NyeKo-ItL/zed-xml";
@@ -35,6 +36,20 @@ impl XmlExtension {
         }
     }
 
+    fn version_output_matches(stdout: &[u8]) -> bool {
+        String::from_utf8_lossy(stdout).trim()
+            == format!("{LANGUAGE_SERVER_ID} {EXPECTED_LSP_VERSION}")
+    }
+
+    fn installed_version_matches(executable: &str) -> bool {
+        let mut command = zed::process::Command::new(executable.to_owned()).arg("--version");
+        let Ok(output) = command.output() else {
+            return false;
+        };
+
+        output.status == Some(0) && Self::version_output_matches(&output.stdout)
+    }
+
     fn release_asset(
         os: zed::Os,
         architecture: zed::Architecture,
@@ -63,6 +78,14 @@ impl XmlExtension {
         let (asset_name, executable) = Self::release_asset(os, architecture)?;
         let override_url = Self::environment(worktree, XML_LSP_DOWNLOAD_URL_ENV);
 
+        if Self::installed_version_matches(executable) {
+            zed::set_language_server_installation_status(
+                language_server_id,
+                &zed::LanguageServerInstallationStatus::None,
+            );
+            return Ok(Self::command(executable.to_owned()));
+        }
+
         zed::set_language_server_installation_status(
             language_server_id,
             &zed::LanguageServerInstallationStatus::Downloading,
@@ -75,7 +98,7 @@ impl XmlExtension {
             } else {
                 (
                     format!(
-                        "https://github.com/{RELEASE_REPOSITORY}/releases/latest/download/{asset_name}"
+                        "https://github.com/{RELEASE_REPOSITORY}/releases/download/v{EXPECTED_LSP_VERSION}/{asset_name}"
                     ),
                     executable.to_owned(),
                 )
@@ -87,13 +110,21 @@ impl XmlExtension {
                 zed::DownloadedFileType::Uncompressed,
             ) {
                 // A second Zed window may try to refresh the same binary while the
-                // first LSP process has it open. Windows reports that as os error 32.
-                if !error.contains("os error 32") {
+                // first LSP process has it open. Reuse it only when it is already the
+                // expected version; never hide an error for an outdated binary.
+                if !(error.contains("os error 32")
+                    && Self::installed_version_matches(&executable_path))
+                {
                     return Err(error);
                 }
             }
             if !matches!(os, zed::Os::Windows) {
                 zed::make_file_executable(&executable_path)?;
+            }
+            if !Self::installed_version_matches(&executable_path) {
+                return Err(format!(
+                    "Downloaded xml-lsp does not report the expected version {EXPECTED_LSP_VERSION}"
+                ));
             }
             Ok(executable_path)
         })();
@@ -170,6 +201,24 @@ mod tests {
     #[test]
     fn rejects_unsupported_platforms() {
         assert!(XmlExtension::release_asset(zed::Os::Windows, zed::Architecture::Aarch64).is_err());
+    }
+
+    #[test]
+    fn accepts_the_expected_version_output() {
+        assert!(XmlExtension::version_output_matches(
+            format!("{LANGUAGE_SERVER_ID} {EXPECTED_LSP_VERSION}\n").as_bytes()
+        ));
+    }
+
+    #[test]
+    fn rejects_another_version() {
+        assert!(!XmlExtension::version_output_matches(b"xml-lsp 0.0.0\n"));
+    }
+
+    #[test]
+    fn rejects_malformed_version_output() {
+        assert!(!XmlExtension::version_output_matches(b"xml-lsp\n"));
+        assert!(!XmlExtension::version_output_matches(b""));
     }
 
     #[test]
