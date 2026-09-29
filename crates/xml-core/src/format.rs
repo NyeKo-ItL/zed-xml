@@ -42,16 +42,43 @@ impl LineEnding {
     }
 }
 
+/// Disposition des attributs d'une balise ouvrante
+/// (`xml.format.splitAttributes` de LemMinX).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SplitAttributes {
+    /// Les attributs restent sur la ligne de la balise (ou conservent leurs
+    /// retours à la ligne, voir [`FormatOptions::preserve_attribute_line_breaks`]).
+    #[default]
+    Preserve,
+    /// Chaque attribut sur sa propre ligne, indenté d'un niveau de plus que
+    /// l'élément (lorsque la balise a au moins deux attributs).
+    SplitNewLine,
+    /// Premier attribut sur la ligne de la balise, les suivants alignés sur
+    /// lui (lorsque la balise a au moins deux attributs).
+    AlignWithFirstAttr,
+}
+
+/// Traitement des éléments vides (`xml.format.emptyElements` de LemMinX).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum EmptyElements {
+    /// `<a/>` et `<a></a>` sont laissés tels quels.
+    #[default]
+    Ignore,
+    /// `<a/>` devient `<a></a>`.
+    Expand,
+    /// `<a></a>` (ou ne contenant que des blancs) devient `<a/>`.
+    Collapse,
+}
+
 /// Options de formatage.
 ///
 /// Les valeurs par défaut reproduisent le formatage historique : deux espaces
 /// par niveau, fins de ligne `\n`, exactement un saut de ligne final, aucune
-/// ligne vide conservée entre les éléments et texte laissé intact.
+/// ligne vide conservée entre les éléments, texte laissé intact et balises
+/// ouvrantes recopiées telles quelles (attributs compris).
 ///
 /// Les cinq premiers champs correspondent aux `FormattingOptions` LSP ; les
-/// suivants préparent les réglages de type LemMinX (`xml.format.*`), qui
-/// pourront être complétés (largeur maximale, attributs sur plusieurs lignes,
-/// éléments vides, etc.) sans modifier le comportement par défaut.
+/// suivants sont les réglages de type LemMinX (`xml.format.*`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FormatOptions {
     /// Largeur d'un niveau d'indentation lorsque `insert_spaces` est vrai.
@@ -70,6 +97,27 @@ pub struct FormatOptions {
     /// Nombre maximal de lignes vides conservées entre deux constructions
     /// (`xml.format.preservedNewlines` de LemMinX ; 0 les supprime toutes).
     pub preserved_newlines: usize,
+    /// Disposition des attributs (`xml.format.splitAttributes`).
+    pub split_attributes: SplitAttributes,
+    /// Largeur maximale d'une ligne de balise ouvrante (`xml.format.maxLineWidth`) :
+    /// les attributs qui la dépasseraient passent à la ligne suivante. 0
+    /// désactive le retour à la ligne ; seul le placement des attributs est
+    /// concerné, jamais le texte.
+    pub max_line_width: usize,
+    /// Place `>` ou `/>` sur sa propre ligne lorsque les attributs sont
+    /// répartis sur plusieurs lignes par [`SplitAttributes::SplitNewLine`] ou
+    /// [`SplitAttributes::AlignWithFirstAttr`] (`xml.format.closingBracketNewLine`).
+    pub closing_bracket_new_line: bool,
+    /// Traitement des éléments vides (`xml.format.emptyElements`). Ignoré par
+    /// le formatage de plage, qui ne modifie que des blancs.
+    pub empty_elements: EmptyElements,
+    /// Conserve les retours à la ligne existants avant les attributs
+    /// (`xml.format.preserveAttributeLineBreaks`). Avec
+    /// [`SplitAttributes::Preserve`], `true` et sans `max_line_width`, la
+    /// balise ouvrante est recopiée à l'identique (comportement historique) ;
+    /// `false` place tous les attributs sur la ligne de la balise, séparés par
+    /// une espace.
+    pub preserve_attribute_line_breaks: bool,
 }
 
 impl Default for FormatOptions {
@@ -82,6 +130,11 @@ impl Default for FormatOptions {
             trim_final_newlines: true,
             line_ending: LineEnding::Lf,
             preserved_newlines: 0,
+            split_attributes: SplitAttributes::Preserve,
+            max_line_width: 0,
+            closing_bracket_new_line: false,
+            empty_elements: EmptyElements::Ignore,
+            preserve_attribute_line_breaks: true,
         }
     }
 }
@@ -98,6 +151,26 @@ impl FormatOptions {
 
     fn indent(&self, depth: usize) -> String {
         self.indent_unit().repeat(depth)
+    }
+
+    /// Les balises ouvrantes sont recopiées sans être reconstruites.
+    fn keeps_raw_tags(&self) -> bool {
+        self.split_attributes == SplitAttributes::Preserve
+            && self.preserve_attribute_line_breaks
+            && self.max_line_width == 0
+    }
+
+    /// Largeur affichée d'une indentation (une tabulation vaut `tab_size`).
+    fn display_width(&self, text: &str) -> usize {
+        text.chars()
+            .map(|character| {
+                if character == '\t' {
+                    self.tab_size.max(1)
+                } else {
+                    1
+                }
+            })
+            .sum()
     }
 }
 
@@ -187,6 +260,12 @@ pub fn format_xml_range(
         None => false,
     };
 
+    // Le formatage de plage ne modifie que des blancs (voir le garde-fou
+    // ci-dessous) : les éléments vides sont laissés tels quels.
+    let options = &FormatOptions {
+        empty_elements: EmptyElements::Ignore,
+        ..options.clone()
+    };
     let mut formatter = Formatter::new(options, region.depth, text_before, true);
     formatter.run(&source[region.range.clone()]).ok()?;
     let (body, text_after) = formatter.finish().ok()?;
@@ -464,9 +543,30 @@ impl<'a> Formatter<'a> {
                     if self.depth == 0 {
                         self.has_root = true;
                     }
-                    self.emit(Event::Empty(element.into_owned()))?;
+                    if self.options.empty_elements == EmptyElements::Expand {
+                        self.write_start_tag(element.clone(), false)?;
+                        self.write_end_tag(&element)?;
+                    } else {
+                        self.write_start_tag(element, true)?;
+                    }
                 }
                 Event::End(element) => {
+                    // Élément sans contenu (ou seulement des blancs).
+                    if self.options.empty_elements != EmptyElements::Ignore
+                        && let Some((start, blank_lines)) = self.pending_start.take()
+                    {
+                        self.blank_lines = blank_lines;
+                        if !self.has_text() {
+                            self.write_indent()?;
+                        }
+                        if self.options.empty_elements == EmptyElements::Collapse {
+                            self.write_start_tag(start, true)?;
+                        } else {
+                            self.write_start_tag(start.clone(), false)?;
+                            self.write_end_tag(&start)?;
+                        }
+                        continue;
+                    }
                     self.flush_pending_start()?;
                     if self.depth == 0 {
                         return Err("balise fermante inattendue".to_owned());
@@ -566,10 +666,39 @@ impl<'a> Formatter<'a> {
             self.write_indent()?;
         }
         self.stack.push(false);
-        self.emit(Event::Start(start))?;
+        self.write_start_tag(start, false)?;
         self.depth += 1;
         self.blank_lines = blank_lines_after;
         Ok(())
+    }
+
+    /// Écrit une balise ouvrante (ou vide), recopiée ou reconstruite selon
+    /// les options de disposition des attributs.
+    fn write_start_tag(&mut self, start: BytesStart<'_>, self_closing: bool) -> Result<(), String> {
+        let rebuilt = if self.options.keeps_raw_tags() {
+            None
+        } else {
+            let source = std::str::from_utf8(&start).map_err(|error| error.to_string())?;
+            let name_length = start.name().as_ref().len();
+            layout_start_tag(
+                self.options,
+                self.base_depth + self.depth,
+                source,
+                name_length,
+                self_closing,
+            )
+        };
+        match rebuilt {
+            Some(tag) => self.emit(Event::Text(BytesText::from_escaped(tag))),
+            None if self_closing => self.emit(Event::Empty(start.into_owned())),
+            None => self.emit(Event::Start(start.into_owned())),
+        }
+    }
+
+    /// Écrit la balise fermante correspondant à `start` sur la même ligne.
+    fn write_end_tag(&mut self, start: &BytesStart<'_>) -> Result<(), String> {
+        let end = start.to_end().into_owned();
+        self.emit(Event::End(end))
     }
 
     fn write_indent(&mut self) -> Result<(), String> {
@@ -589,6 +718,134 @@ impl<'a> Formatter<'a> {
         }
         Ok(())
     }
+}
+
+/// Attribut d'une balise ouvrante, normalisé (`nom="valeur"` sans blancs
+/// autour de `=`, guillemets d'origine conservés).
+struct TagAttribute<'a> {
+    name: &'a str,
+    quote: char,
+    value: &'a str,
+    /// L'attribut est précédé d'un retour à la ligne dans la source.
+    after_line_break: bool,
+}
+
+impl TagAttribute<'_> {
+    fn width(&self) -> usize {
+        self.name.chars().count() + self.value.chars().count() + 3
+    }
+
+    fn push_to(&self, output: &mut String) {
+        output.push_str(self.name);
+        output.push('=');
+        output.push(self.quote);
+        output.push_str(self.value);
+        output.push(self.quote);
+    }
+}
+
+/// Découpe les attributs de `source` (contenu d'une balise ouvrante, sans
+/// `<` ni `>`/`/>`) après le nom, ou `None` si la balise n'est pas analysable.
+fn tag_attributes(source: &str, name_length: usize) -> Option<Vec<TagAttribute<'_>>> {
+    let mut attributes = Vec::new();
+    let mut rest = source.get(name_length..)?;
+    loop {
+        let trimmed = rest.trim_start_matches(XML_WHITESPACE);
+        let after_line_break = rest[..rest.len() - trimmed.len()].contains('\n');
+        if trimmed.is_empty() {
+            return Some(attributes);
+        }
+        if trimmed.len() == rest.len() {
+            // Le nom et chaque attribut doivent être suivis de blancs.
+            return None;
+        }
+        let name_end = trimmed
+            .find(|character: char| character == '=' || XML_WHITESPACE.contains(&character))?;
+        let name = &trimmed[..name_end];
+        if name.is_empty() {
+            return None;
+        }
+        let after_name = trimmed[name_end..].trim_start_matches(XML_WHITESPACE);
+        let after_equals = after_name
+            .strip_prefix('=')?
+            .trim_start_matches(XML_WHITESPACE);
+        let quote = after_equals
+            .chars()
+            .next()
+            .filter(|character| *character == '"' || *character == '\'')?;
+        let value_source = &after_equals[1..];
+        let value_end = value_source.find(quote)?;
+        attributes.push(TagAttribute {
+            name,
+            quote,
+            value: &value_source[..value_end],
+            after_line_break,
+        });
+        rest = &value_source[value_end + 1..];
+    }
+}
+
+/// Reconstruit une balise ouvrante selon `splitAttributes`,
+/// `preserveAttributeLineBreaks`, `maxLineWidth` et `closingBracketNewLine`.
+/// `depth` est la profondeur d'indentation de l'élément.
+fn layout_start_tag(
+    options: &FormatOptions,
+    depth: usize,
+    source: &str,
+    name_length: usize,
+    self_closing: bool,
+) -> Option<String> {
+    let attributes = tag_attributes(source, name_length)?;
+    let name = &source[..name_length];
+    let newline = options.line_ending.as_str();
+    let element_indent = options.indent(depth);
+    let split = attributes.len() > 1;
+    let continuation_indent = match options.split_attributes {
+        SplitAttributes::AlignWithFirstAttr if split => {
+            format!("{element_indent}{}", " ".repeat(name.chars().count() + 2))
+        }
+        _ => options.indent(depth + 1),
+    };
+    let continuation_width = options.display_width(&continuation_indent);
+
+    let mut tag = format!("<{name}");
+    let mut width = options.display_width(&element_indent) + 1 + name.chars().count();
+    let mut multiline = false;
+    for (index, attribute) in attributes.iter().enumerate() {
+        let mut line_break = match options.split_attributes {
+            SplitAttributes::SplitNewLine => split,
+            SplitAttributes::AlignWithFirstAttr => split && index > 0,
+            SplitAttributes::Preserve => {
+                options.preserve_attribute_line_breaks && attribute.after_line_break
+            }
+        };
+        if !line_break
+            && options.max_line_width > 0
+            && width + 1 + attribute.width() > options.max_line_width
+        {
+            line_break = true;
+        }
+        if line_break {
+            tag.push_str(newline);
+            tag.push_str(&continuation_indent);
+            width = continuation_width;
+            multiline = true;
+        } else {
+            tag.push(' ');
+            width += 1;
+        }
+        attribute.push_to(&mut tag);
+        width += attribute.width();
+    }
+    if multiline
+        && options.closing_bracket_new_line
+        && options.split_attributes != SplitAttributes::Preserve
+    {
+        tag.push_str(newline);
+        tag.push_str(&element_indent);
+    }
+    tag.push_str(if self_closing { "/>" } else { ">" });
+    Some(tag)
 }
 
 #[cfg(test)]
@@ -725,6 +982,7 @@ mod tests {
                         trim_final_newlines: flags & 8 != 0,
                         line_ending: LineEnding::detect(document),
                         preserved_newlines: usize::from(flags % 3),
+                        ..FormatOptions::default()
                     };
                     let formatted = format_xml_with(document, &options).unwrap();
                     assert_eq!(
@@ -857,5 +1115,168 @@ mod tests {
             result,
             "<root>\r\n\r\n\t<a>\r\n\t\t<b/>\r\n\t</a>\r\n</root>\r\n"
         );
+    }
+
+    fn assert_stable(source: &str, options: &FormatOptions) -> String {
+        let formatted = format_xml_with(source, options).unwrap();
+        assert_eq!(
+            format_xml_with(&formatted, options).unwrap(),
+            formatted,
+            "{source:?} with {options:?}"
+        );
+        formatted
+    }
+
+    #[test]
+    fn default_options_keep_start_tags_verbatim() {
+        let source = "<root  a='1'\n      b = \"2\" ><c x=\"1\"   y=\"2\" /></root>";
+        assert_eq!(
+            format_xml(source).unwrap(),
+            "<root  a='1'\n      b = \"2\" >\n  <c x=\"1\"   y=\"2\" />\n</root>\n"
+        );
+    }
+
+    #[test]
+    fn splits_attributes_on_new_lines() {
+        let source = "<root><item id=\"1\" name='x &amp; y' kind=\"a\"/><one only=\"1\"/></root>";
+        let options = FormatOptions {
+            split_attributes: SplitAttributes::SplitNewLine,
+            ..FormatOptions::default()
+        };
+        assert_eq!(
+            assert_stable(source, &options),
+            "<root>\n  <item\n    id=\"1\"\n    name='x &amp; y'\n    kind=\"a\"/>\n  <one only=\"1\"/>\n</root>\n"
+        );
+        let options = FormatOptions {
+            closing_bracket_new_line: true,
+            ..options
+        };
+        assert_eq!(
+            assert_stable(source, &options),
+            "<root>\n  <item\n    id=\"1\"\n    name='x &amp; y'\n    kind=\"a\"\n  />\n  <one only=\"1\"/>\n</root>\n"
+        );
+    }
+
+    #[test]
+    fn aligns_attributes_with_the_first_one() {
+        let source =
+            "<root><ns:item id=\"1\"\n name=\"x\"><b c=\"1\" d=\"2\"></b></ns:item></root>";
+        let options = FormatOptions {
+            split_attributes: SplitAttributes::AlignWithFirstAttr,
+            insert_spaces: false,
+            ..FormatOptions::default()
+        };
+        assert_eq!(
+            assert_stable(source, &options),
+            "<root>\n\t<ns:item id=\"1\"\n\t         name=\"x\">\n\t\t<b c=\"1\"\n\t\t   d=\"2\">\n\t\t</b>\n\t</ns:item>\n</root>\n"
+        );
+    }
+
+    #[test]
+    fn joins_or_preserves_attribute_line_breaks() {
+        let source = "<root a=\"1\"\n    b=\"2\"   c=\"3\"/>";
+        let joined = FormatOptions {
+            preserve_attribute_line_breaks: false,
+            ..FormatOptions::default()
+        };
+        assert_eq!(
+            assert_stable(source, &joined),
+            "<root a=\"1\" b=\"2\" c=\"3\"/>\n"
+        );
+        // Avec une largeur maximale, les retours existants sont conservés et
+        // les espaces normalisés.
+        let preserved = FormatOptions {
+            max_line_width: 200,
+            ..FormatOptions::default()
+        };
+        assert_eq!(
+            assert_stable(source, &preserved),
+            "<root a=\"1\"\n  b=\"2\" c=\"3\"/>\n"
+        );
+    }
+
+    #[test]
+    fn wraps_attributes_beyond_the_maximum_line_width() {
+        let source = "<root><item first=\"aaaa\" second=\"bbbb\" third=\"cccc\" fourth=\"dddd\">t</item></root>";
+        for preserve in [true, false] {
+            let options = FormatOptions {
+                max_line_width: 30,
+                preserve_attribute_line_breaks: preserve,
+                ..FormatOptions::default()
+            };
+            assert_eq!(
+                assert_stable(source, &options),
+                "<root>\n  <item first=\"aaaa\"\n    second=\"bbbb\" third=\"cccc\"\n    fourth=\"dddd\">t</item>\n</root>\n"
+            );
+        }
+        // Le texte n'est jamais replié.
+        let options = FormatOptions {
+            max_line_width: 5,
+            ..FormatOptions::default()
+        };
+        assert_eq!(
+            assert_stable("<p>a long text line</p>", &options),
+            "<p>a long text line</p>\n"
+        );
+    }
+
+    #[test]
+    fn expands_and_collapses_empty_elements() {
+        let source = "<root><a/><b x=\"1\"></b><c>\n\n</c><d> t </d><e><!-- c --></e></root>";
+        let expand = FormatOptions {
+            empty_elements: EmptyElements::Expand,
+            ..FormatOptions::default()
+        };
+        assert_eq!(
+            assert_stable(source, &expand),
+            "<root>\n  <a></a>\n  <b x=\"1\"></b>\n  <c></c>\n  <d> t </d>\n  <e>\n    <!-- c -->\n  </e>\n</root>\n"
+        );
+        let collapse = FormatOptions {
+            empty_elements: EmptyElements::Collapse,
+            ..FormatOptions::default()
+        };
+        assert_eq!(
+            assert_stable(source, &collapse),
+            "<root>\n  <a/>\n  <b x=\"1\"/>\n  <c/>\n  <d> t </d>\n  <e>\n    <!-- c -->\n  </e>\n</root>\n"
+        );
+        assert_eq!(assert_stable("<r></r>", &collapse), "<r/>\n");
+        // Le formatage de plage ne touche que les blancs.
+        let range = format_range_of(source, "<a/>", &expand).unwrap();
+        assert!(range.contains("<a/>"));
+    }
+
+    #[test]
+    fn attribute_layouts_are_idempotent_and_whitespace_only() {
+        let documents = [
+            "<root xmlns:x=\"urn:x\"><x:a p=\"1\" q='2' r=\"&lt;\"/><b\n  s=\"é\"\tt=\"😀\">text <i k=\"v\" l=\"w\">it</i></b></root>",
+            "<?xml version=\"1.0\"?>\r\n<root a=\"1\" b=\"2\">\r\n<c d = \"3\" e= '4'/>\r\n</root>\r\n",
+        ];
+        let significant = |value: &str| {
+            value
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect::<String>()
+        };
+        for document in documents {
+            for split in [
+                SplitAttributes::Preserve,
+                SplitAttributes::SplitNewLine,
+                SplitAttributes::AlignWithFirstAttr,
+            ] {
+                for flags in 0..8u8 {
+                    let options = FormatOptions {
+                        split_attributes: split,
+                        closing_bracket_new_line: flags & 1 != 0,
+                        preserve_attribute_line_breaks: flags & 2 != 0,
+                        max_line_width: if flags & 4 != 0 { 20 } else { 0 },
+                        insert_spaces: flags & 2 == 0,
+                        line_ending: LineEnding::detect(document),
+                        ..FormatOptions::default()
+                    };
+                    let formatted = assert_stable(document, &options);
+                    assert_eq!(significant(&formatted), significant(document));
+                }
+            }
+        }
     }
 }

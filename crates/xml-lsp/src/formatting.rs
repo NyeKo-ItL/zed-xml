@@ -16,15 +16,17 @@ use std::ops::Range;
 use serde_json::{Value, json};
 use xml_core::{FormatOptions, LineEnding, diff::diff_text, format_xml_range, format_xml_with};
 
-use crate::selection::LineIndex;
+use crate::{selection::LineIndex, settings::FormatSettings};
 
-/// Options de formatage issues des paramètres de la requête. Les options
-/// absentes conservent le comportement par défaut.
-pub fn format_options(params: &Value, source: &str) -> FormatOptions {
+/// Options de formatage : réglages `xml.format.*`, puis options de la
+/// requête (prioritaires). Les options absentes des deux conservent le
+/// comportement par défaut.
+pub fn format_options(params: &Value, source: &str, settings: &FormatSettings) -> FormatOptions {
     let mut options = FormatOptions {
         line_ending: LineEnding::detect(source),
         ..FormatOptions::default()
     };
+    settings.apply(&mut options);
     let Some(requested) = params.get("options") else {
         return options;
     };
@@ -123,6 +125,7 @@ mod tests {
                 "trimFinalNewlines": false,
             }}),
             "<a/>\r\n",
+            &FormatSettings::default(),
         );
         assert_eq!(
             options,
@@ -136,7 +139,31 @@ mod tests {
                 ..FormatOptions::default()
             }
         );
-        assert_eq!(format_options(&json!({}), "<a/>"), FormatOptions::default());
+        assert_eq!(
+            format_options(&json!({}), "<a/>", &FormatSettings::default()),
+            FormatOptions::default()
+        );
+        // Les réglages servent de repli aux options absentes de la requête.
+        let settings = crate::settings::Settings::from_value(&json!({"xml": {"format": {
+            "tabSize": 8, "insertSpaces": false, "trimFinalNewlines": false,
+            "emptyElements": "expand", "maxLineWidth": 40,
+        }}}));
+        let options = format_options(
+            &json!({"options": {"tabSize": 3}}),
+            "<a/>",
+            &settings.format,
+        );
+        assert_eq!(
+            options,
+            FormatOptions {
+                tab_size: 3,
+                insert_spaces: false,
+                trim_final_newlines: false,
+                empty_elements: xml_core::EmptyElements::Expand,
+                max_line_width: 40,
+                ..FormatOptions::default()
+            }
+        );
     }
 
     #[test]

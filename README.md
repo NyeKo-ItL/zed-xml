@@ -25,6 +25,7 @@ XML language support for Zed, including XML, XSD, XSLT, SVG, WSDL, plist, XJB an
 - Document colors (`textDocument/documentColor` + `textDocument/colorPresentation`, VS Code/IntelliJ-style color swatches): SVG presentation attributes (`fill`, `stroke`, `stop-color`, `flood-color`, `lighting-color`, `color`, `solid-color`), `style="..."` declarations and `<style>` CSS (CDATA included, comments, strings and `url()` skipped) with `#rgb`/`#rgba`/`#rrggbb`/`#rrggbbaa`, `rgb()`/`rgba()`/`hsl()`/`hsla()` (comma or space syntax, percentages, angle units) and all CSS named colors including `transparent` (`currentColor`/`none` ignored); Android resources (`<color>`, `<item>` and `<drawable>` values in `<resources>` or `res/values*/` files, and color-like `android:`/`app:`/`tools:` attributes such as `android:textColor`, `app:tint` or `android:background`) with Android hex semantics where alpha comes first (`#ARGB`, `#AARRGGBB`). Color presentations keep the original format first, then hex, `rgb()`, `hsl()` and the color name (Android: `#AARRGGBB`, `#RRGGBB`). Zed renders them according to `lsp_document_colors` (`inlay` by default, or `background`, `border`, `none`).
 - `xsi:schemaLocation` and `xsi:noNamespaceSchemaLocation` support.
 - Workspace-aware revalidation when an open XSD changes.
+- LemMinX-style `xml.*` settings (formatting, validation, file associations, completion, symbols, colors) from Zed `lsp.xml-lsp.settings`, applied live (see [Configuration](#configuration)).
 
 ## Native Rust language server
 
@@ -80,6 +81,53 @@ Document colors are shown as inlay swatches by default. Change how Zed renders t
   "lsp_document_colors": "background"
 }
 ```
+
+## Configuration
+
+The server reads LemMinX-style settings from an `xml` section. In Zed, put them under `lsp.xml-lsp.settings` (the `xml` key is optional); the extension sends them as `initializationOptions` and answers the server's `workspace/configuration` requests, and changes are applied live through `workspace/didChangeConfiguration` (diagnostics of open documents are re-published when validation settings change). `lsp.xml-lsp.initialization_options`, when set, is sent as-is instead. Every setting is optional and the defaults keep the historical behaviour.
+
+```json
+{
+  "lsp": {
+    "xml-lsp": {
+      "settings": {
+        "xml": {
+          "format": {
+            "enabled": true,
+            "splitAttributes": "alignWithFirstAttr",
+            "maxLineWidth": 120,
+            "preservedNewlines": 1,
+            "closingBracketNewLine": false,
+            "emptyElements": "collapse",
+            "preserveAttributeLineBreaks": true
+          },
+          "validation": {
+            "enabled": true,
+            "schema": { "enabled": "always" },
+            "noGrammar": "hint",
+            "disallowDocTypeDecl": false
+          },
+          "completion": { "autoCloseTags": true },
+          "symbols": { "enabled": true, "maxItemsComputed": 5000 },
+          "colors": { "enabled": true },
+          "catalogs": ["catalog.xml"],
+          "fileAssociations": [
+            { "pattern": "**/*.project", "systemId": "schemas/project.xsd" }
+          ]
+        }
+      }
+    }
+  }
+}
+```
+
+- `xml.format.*`: enable/disable formatting, attribute layout (`splitAttributes`: `preserve`, `splitNewLine`, `alignWithFirstAttr`), attribute wrapping at `maxLineWidth`, kept blank lines, closing bracket on its own line, empty element expansion/collapse, and fallbacks for `tabSize`/`insertSpaces`/`trimFinalNewlines`/`insertFinalNewline`/`trimTrailingWhitespace` when the editor does not send them.
+- `xml.validation.*`: turn all diagnostics off, choose XSD validation (`always`, `never`, `onValidSchema`), report documents without a grammar (`noGrammar`: `ignore`, `hint`, `info`, `warning`) and forbid `<!DOCTYPE>`.
+- `xml.completion.autoCloseTags`, `xml.symbols.enabled`/`maxItemsComputed`, `xml.colors.enabled`.
+- `xml.fileAssociations`: bind files matching a glob (`*`, `?`, `**`, `{a,b}`; relative to the workspace folder, or the file name when the pattern has no `/`) to an XSD (`systemId`: path relative to the workspace folder, absolute path or `file://` URI) for validation, completion, hover and code actions, when the file declares no schema itself.
+- `xml.catalogs`: XML catalog paths (stored for catalog resolution).
+
+See [docs/configuration.md](docs/configuration.md) for the full reference.
 
 ## Development extension
 
