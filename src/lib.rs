@@ -117,12 +117,12 @@ impl XmlExtension {
                 download_url = asset.download_url;
             }
 
+            let executable_path = format!("{version_dir}/{executable}");
             zed::download_file(
                 &download_url,
-                &version_dir,
+                &executable_path,
                 zed::DownloadedFileType::Uncompressed,
             )?;
-            let executable_path = format!("{version_dir}/{executable}");
             if !matches!(os, zed::Os::Windows) {
                 zed::make_file_executable(&executable_path)?;
             }
