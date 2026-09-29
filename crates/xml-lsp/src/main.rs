@@ -832,7 +832,17 @@ fn diagnostics_params(
 }
 
 fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
-    connection.initialize(server_capabilities())?;
+    let (initialize_id, _) = connection.initialize_start()?;
+    connection.initialize_finish(
+        initialize_id,
+        json!({
+            "capabilities": server_capabilities(),
+            "serverInfo": {
+                "name": "xml-lsp",
+                "version": env!("CARGO_PKG_VERSION"),
+            },
+        }),
+    )?;
     let mut server = XmlLanguageServer::new();
 
     for message in &connection.receiver {
@@ -1013,7 +1023,11 @@ mod tests {
                             "hoverProvider": true,
                             "definitionProvider": true,
                             "referencesProvider": true,
-                        }
+                        },
+                        "serverInfo": {
+                            "name": "xml-lsp",
+                            "version": env!("CARGO_PKG_VERSION"),
+                        },
                     }))
                 );
             }
