@@ -152,21 +152,27 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
       - uses: actions/download-artifact@v4
         with:
           pattern: xml-lsp-*
           path: dist
           merge-multiple: true
       - name: Move release tag to merged commit
+        id: tag
         env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.event.pull_request.head.ref }}
+          RELEASE_BRANCH: ${{ github.event.pull_request.head.ref }}
           MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        shell: bash
         run: |
-          git fetch origin "$RELEASE_TAG"
+          RELEASE_TAG="${RELEASE_BRANCH#release/version-sync-}"
           git push --force origin "$MERGE_SHA:refs/tags/$RELEASE_TAG"
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.pull_request.head.ref }}
+          tag_name: ${{ steps.tag.outputs.release_tag }}
           files: dist/*
           generate_release_notes: true
