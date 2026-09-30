@@ -73,7 +73,6 @@ Keep the dependency direction: core crates never depend on `xml-lsp` or on LSP J
 | `selection.rs` | `selectionRange`, `LineIndex`. |
 | `colors.rs` | `documentColor`/`colorPresentation` for SVG, CSS and Android. |
 | `identity.rs` | Definition and references between ID/IDREF (XSD and DTD) and key/keyref values. |
-| `limits.rs` | `xml.maxFileSize`: which requests are skipped for large documents and the `file-too-large` diagnostic. |
 
 ### Zed side
 
@@ -131,7 +130,7 @@ The user-facing rules are in [docs/configuration.md](docs/configuration.md#secur
 - External general entities are never read; DTD entity expansion is computed, not materialized, and bounded (`dtd_core::MAX_ENTITY_EXPANSION`, `MAX_PARAMETER_EXPANSION`, `MAX_ENTITY_DEPTH`, `MAX_DOCUMENT_EXPANSION` for attribute values). Keep these limits for any new expansion code ("billion laughs", "quadratic blowup").
 - Graphs of referenced documents are bounded and cycle-safe (`xsd_core::MAX_SCHEMA_DOCUMENTS`, the catalog file limit, `dtd_core::MAX_SOURCES`).
 - No recursion on document structure: 100 000 nested elements must not overflow a 2 MiB test thread, and LSP answers must not nest JSON deeply (serializing and dropping a `serde_json::Value` is recursive). Per-element work must not walk all ancestors (use `XmlTagTree` parents and `resolve_namespace`, which only visits declaring ancestors). `fixture_smoke::every_request_handles_pathological_documents` checks this (100 000 levels in release builds).
-- Whole-document requests respect `xml.maxFileSize` through `limits::skipped_response` in `run()`; `diagnostics()` publishes `file-too-large` instead of analysing.
+- Documents above `xml.maxFileSize` only get well-formedness diagnostics and the light features (`Settings::is_large`).
 - Keep workspace scans bounded (`symbols::scan_workspace` limits files and sizes, skips hidden directories, `target/` and `node_modules/`).
 - The extension only reads its own work directory and the environment variables it documents.
 

@@ -60,7 +60,6 @@ When validation settings, file associations or catalogs change (including a cata
 | `xml.catalogs` | string[] | `[]` | OASIS XML catalog files used to resolve schema locations, namespaces and DTD identifiers. See below. |
 | `xml.autoDetectCatalogs` | boolean | `false` | Extension to LemMinX: also use `catalog.xml` at the root of each workspace folder when it is an OASIS catalog. |
 | `xml.fileAssociations` | `{ "pattern": string, "systemId": string }[]` | `[]` | Validate files matching `pattern` with the XSD `systemId` when they declare no `xsi:schemaLocation`/`xsi:noNamespaceSchemaLocation`. See below. |
-| `xml.maxFileSize` | number (bytes) | `16777216` (16 MiB) | Extension to LemMinX: documents larger than this only get the light features (completion, tag highlights, linked editing). Diagnostics, symbols, folding, links, colors, selection ranges, code actions, formatting, hover, go to definition, references and rename are skipped, and a single `file-too-large` information diagnostic says so. `0` removes the limit (the XML parser still refuses documents over 16 MiB). See [Security model](#security-model). |
 
 ### XML catalogs
 
@@ -143,7 +142,7 @@ A document with a `<!DOCTYPE>` is validated against its DTD, like LemMinX:
 | Catalog files loaded (`nextCatalog`, `delegate*`) | 64, delegation depth 16 |
 | XSD nesting depth | 256 levels (deeper schemas are reported as invalid) |
 | XML nesting depth reported by well-formedness checks | 512 levels |
-| Documents analysed as a whole | `xml.maxFileSize` (16 MiB by default) |
+| Documents analysed as a whole | `xml.maxFileSize` (10 MiB by default) |
 | Formatted output | 8 times the input, at least 64 MiB (deeply nested siblings would otherwise format into gigabytes) |
 | Selection range chain | 256 ranges (innermost ranges and the whole document) |
 | Quoted values and name lists in diagnostic messages | 80 characters, 50 names |
