@@ -11,6 +11,7 @@ Thanks for helping improve XML support in Zed. This guide covers the development
 | `crates/xml-core` | XML parsing, tag scanner, well-formedness checks, formatter, text diff, basic completion. |
 | `crates/xsd-core` | XSD parsing, schema resolution, component model, validation and completion. |
 | `crates/dtd-core` | DTD parsing, entity expansion limits, content-model automata and validation. |
+| `crates/xpath-core` | XPath 1.0/2.0/3.1 tokenizer and parser (syntax errors, variable and function references) and XSLT value templates. |
 | `crates/xml-lsp` | The native language server binary (`xml-lsp`). |
 | `crates/xml-conformance` | Test-only crate: specification cases, real-world documents, parser corpora and the W3C/libxml2 conformance suites, with baselines of known failures. |
 | `tests/fixtures` | Shared test inputs: small hand-written cases, `real-world/` documents and `corpus/` files (sources and licences in `SOURCES.md`). |

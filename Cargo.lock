@@ -1178,8 +1178,13 @@ dependencies = [
  "serde_json",
  "xml-conformance",
  "xml-core",
+ "xpath-core",
  "xsd-core",
 ]
+
+[[package]]
+name = "xpath-core"
+version = "0.12.0"
 
 [[package]]
 name = "xsd-core"
