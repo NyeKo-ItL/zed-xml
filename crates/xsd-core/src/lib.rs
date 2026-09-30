@@ -247,6 +247,9 @@ pub enum XsdDiagnosticKind {
     InvalidKeyField,
     /// `xs:keyref` value matching no key in scope.
     UnknownKeyref,
+    /// `xsi:type` unknown, not derived from the declared type, blocked or
+    /// abstract; abstract declared type without `xsi:type`.
+    InvalidXsiType,
 }
 
 impl XsdDiagnosticKind {
@@ -272,6 +275,7 @@ impl XsdDiagnosticKind {
             Self::MissingKeyField => "missingKeyField",
             Self::InvalidKeyField => "invalidKeyField",
             Self::UnknownKeyref => "unknownKeyref",
+            Self::InvalidXsiType => "invalidXsiType",
         }
     }
 }
@@ -1840,6 +1844,12 @@ fn validate(
                 &name,
                 &element,
                 &lookup,
+            ));
+            diagnostics.extend(instance_check::validate_xsi_type(
+                &models,
+                resolved.as_ref(),
+                &name,
+                step.xsi_type.as_ref(),
             ));
             diagnostics
         };
@@ -3428,6 +3438,50 @@ mod tests {
                 "content of <t:any>: 'twelve' is not a valid xs:int: expected an integer such as '-12' (digits only)"
             ]
         );
+    }
+
+    #[test]
+    fn checks_xsi_type_derivation_blocks_and_abstract_types() {
+        let schema = parse_xsd(
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <xs:complexType name="Base"><xs:sequence><xs:element name="a" type="xs:string"/></xs:sequence></xs:complexType>
+  <xs:complexType name="Ext"><xs:complexContent><xs:extension base="Base"><xs:sequence><xs:element name="b" type="xs:string"/></xs:sequence></xs:extension></xs:complexContent></xs:complexType>
+  <xs:complexType name="Other"><xs:sequence><xs:element name="a" type="xs:string"/></xs:sequence></xs:complexType>
+  <xs:complexType name="Shape" abstract="true"><xs:sequence><xs:element name="a" type="xs:string"/></xs:sequence></xs:complexType>
+  <xs:complexType name="Circle"><xs:complexContent><xs:extension base="Shape"><xs:sequence/></xs:extension></xs:complexContent></xs:complexType>
+  <xs:element name="open" type="Base"/>
+  <xs:element name="closed" type="Base" block="extension"/>
+  <xs:element name="shape" type="Shape"/>
+</xs:schema>"#,
+        )
+        .unwrap();
+        let x = r#"xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance""#;
+        let run = |element: &str, xsi: &str, content: &str| {
+            let attribute = if xsi.is_empty() {
+                String::new()
+            } else {
+                format!(r#" xsi:type="{xsi}""#)
+            };
+            validate_document(
+                &format!("<{element} {x}{attribute}>{content}</{element}>"),
+                &schema,
+            )
+        };
+        assert!(run("open", "Ext", "<a>1</a><b>2</b>").is_empty());
+        assert!(run("open", "Base", "<a>1</a>").is_empty());
+        let kinds = |diagnostics: Vec<XsdDiagnostic>| {
+            diagnostics
+                .into_iter()
+                .filter(|d| d.kind == XsdDiagnosticKind::InvalidXsiType)
+                .map(|d| d.message)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(kinds(run("open", "Other", "<a>1</a>")).len(), 1);
+        assert_eq!(kinds(run("open", "Missing", "<a>1</a>")).len(), 1);
+        assert_eq!(kinds(run("closed", "Ext", "<a>1</a><b>2</b>")).len(), 1);
+        assert_eq!(kinds(run("shape", "", "<a>1</a>")).len(), 1);
+        assert!(kinds(run("shape", "Circle", "<a>1</a>")).is_empty());
+        assert_eq!(kinds(run("shape", "Shape", "<a>1</a>")).len(), 1);
     }
 
     #[test]

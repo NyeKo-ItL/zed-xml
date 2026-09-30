@@ -7,7 +7,7 @@ use quick_xml::events::BytesStart;
 
 use crate::{
     XSI_NAMESPACE, XsdDiagnostic, XsdDiagnosticKind,
-    model::{ResolvedElement, XsdModelSet, XsdProcessContents, XsdUse},
+    model::{ResolvedElement, XsdModelSet, XsdProcessContents, XsdUse, XsiTypeProblem},
 };
 
 /// Whether the type accepts any attribute (`xs:anyType`) or is not known.
@@ -177,4 +177,40 @@ pub(crate) fn validate_nil(
         }
         _ => Vec::new(),
     }
+}
+
+/// `xsi:type` rules: unknown type, not derived from the declared type,
+/// blocked derivation, abstract types.
+pub(crate) fn validate_xsi_type(
+    models: &XsdModelSet,
+    resolved: Option<&ResolvedElement<'_>>,
+    element_name: &str,
+    xsi_type: Option<&(Option<String>, String)>,
+) -> Vec<XsdDiagnostic> {
+    let Some(resolved) = resolved else {
+        return Vec::new();
+    };
+    let type_name = xsi_type.map_or_else(String::new, |(_, local)| local.clone());
+    let message = match models.xsi_type_problem(resolved, xsi_type) {
+        None => return Vec::new(),
+        Some(XsiTypeProblem::Unknown) => {
+            format!("xsi:type \"{type_name}\" of <{element_name}> is not defined by the schema")
+        }
+        Some(XsiTypeProblem::NotDerived) => format!(
+            "xsi:type \"{type_name}\" of <{element_name}> is not derived from the declared type"
+        ),
+        Some(XsiTypeProblem::Blocked(method)) => format!(
+            "xsi:type \"{type_name}\" of <{element_name}> is derived by {method}, which is blocked"
+        ),
+        Some(XsiTypeProblem::Abstract) if xsi_type.is_some() => {
+            format!("xsi:type \"{type_name}\" of <{element_name}> is an abstract type")
+        }
+        Some(XsiTypeProblem::Abstract) => format!(
+            "<{element_name}> has an abstract type: an xsi:type naming a concrete type is required"
+        ),
+    };
+    vec![XsdDiagnostic {
+        kind: XsdDiagnosticKind::InvalidXsiType,
+        message,
+    }]
 }

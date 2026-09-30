@@ -85,6 +85,10 @@ pub struct XsdElementDecl {
     /// `block` (or the schema's `blockDefault`) includes `substitution`:
     /// members of the substitution group cannot replace this element.
     pub blocks_substitution: bool,
+    /// `block` (or `blockDefault`) includes `extension` / `restriction`:
+    /// `xsi:type` cannot name a type derived that way from the declared one.
+    pub blocks_extension: bool,
+    pub blocks_restriction: bool,
     pub substitution_groups: Vec<XsdQName>,
     pub global: bool,
     pub documentation: Option<String>,
@@ -282,6 +286,12 @@ pub struct XsdTypeDef {
     pub complex: bool,
     pub mixed: bool,
     pub simple_content: bool,
+    /// `abstract="true"` (complex types): instances need an `xsi:type`.
+    pub is_abstract: bool,
+    /// `block` (or `blockDefault`) of a complex type: types derived that way
+    /// cannot replace it through `xsi:type`.
+    pub blocks_extension: bool,
+    pub blocks_restriction: bool,
     pub derivation: Option<XsdDerivation>,
     /// Base type (`restriction`/`extension`).
     pub base: Option<XsdQName>,
@@ -752,15 +762,9 @@ impl Context<'_> {
             fixed: node.attribute("fixed"),
             nillable: is_true(node.attribute("nillable")),
             is_abstract: is_true(node.attribute("abstract")),
-            blocks_substitution: {
-                let block = node
-                    .attribute("block")
-                    .or_else(|| self.block_default.clone())
-                    .unwrap_or_default();
-                block
-                    .split_whitespace()
-                    .any(|token| token == "#all" || token == "substitution")
-            },
+            blocks_substitution: self.blocks(node, "substitution"),
+            blocks_extension: self.blocks(node, "extension"),
+            blocks_restriction: self.blocks(node, "restriction"),
             substitution_groups: self.qname_list(node, "substitutionGroup"),
             global,
             documentation: documentation(node),
@@ -926,11 +930,24 @@ impl Context<'_> {
         qualified.then(|| self.target_namespace.clone()).flatten()
     }
 
+    /// Whether the `block` of `node` (else the schema's `blockDefault`)
+    /// contains `kind` or `#all`.
+    fn blocks(&self, node: &Node, kind: &str) -> bool {
+        node.attribute("block")
+            .or_else(|| self.block_default.clone())
+            .unwrap_or_default()
+            .split_whitespace()
+            .any(|token| token == "#all" || token == kind)
+    }
+
     fn complex_type(&self, node: &Node) -> XsdTypeDef {
         let mut definition = XsdTypeDef {
             name: node.attribute("name"),
             namespace: self.target_namespace.clone(),
             complex: true,
+            is_abstract: is_true(node.attribute("abstract")),
+            blocks_extension: self.blocks(node, "extension"),
+            blocks_restriction: self.blocks(node, "restriction"),
             mixed: is_true(node.attribute("mixed")),
             documentation: documentation(node),
             ..XsdTypeDef::default()
@@ -1301,6 +1318,20 @@ pub struct ResolvedAttribute<'a> {
     pub usage: Located<'a, XsdAttributeDecl>,
     /// Effective declaration (global declaration for a `ref`).
     pub declaration: Located<'a, XsdAttributeDecl>,
+}
+
+/// Problem of the `xsi:type` of an instance element (or of its absence).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XsiTypeProblem {
+    /// `xsi:type` names a type no loaded schema defines.
+    Unknown,
+    /// The named type is not derived from the declared type.
+    NotDerived,
+    /// A derivation step is blocked by `block` of the element declaration or
+    /// of a type ("extension" or "restriction").
+    Blocked(&'static str),
+    /// The type used by the instance is abstract.
+    Abstract,
 }
 
 /// Step of the path of an instance element, from the root to the element.
@@ -1787,6 +1818,80 @@ impl XsdModelSet {
             xsi_type: xsi_type.map(|found| found.item),
             skipped: false,
         }
+    }
+
+    /// Problem of the type of an instance element: abstract declared type
+    /// without `xsi:type`, unknown `xsi:type`, type not derived from the
+    /// declared one, blocked derivation, abstract `xsi:type`. `None` when the
+    /// type is fine or cannot be judged (an unresolved or built-in side).
+    pub fn xsi_type_problem(
+        &self,
+        resolved: &ResolvedElement<'_>,
+        xsi_type: Option<&(Option<String>, String)>,
+    ) -> Option<XsiTypeProblem> {
+        let declared = self.element_type(resolved.declaration);
+        let Some((namespace, local)) = xsi_type else {
+            return declared
+                .and_then(|declared| declared.definition)
+                .filter(|definition| definition.is_abstract)
+                .map(|_| XsiTypeProblem::Abstract);
+        };
+        let Some(used) = resolved.xsi_type else {
+            let loaded = self
+                .models
+                .iter()
+                .any(|model| model.target_namespace == *namespace);
+            let builtin = namespace.as_deref() == Some(XSD_NAMESPACE);
+            return (loaded && !builtin).then_some(XsiTypeProblem::Unknown);
+        };
+        if used.is_abstract {
+            return Some(XsiTypeProblem::Abstract);
+        }
+        let declared = declared?;
+        let declared_definition = declared.definition?;
+        // Simple types also accept the members of a union (and their
+        // restrictions): only complex types are compared.
+        if !declared_definition.complex || std::ptr::eq(declared_definition, used) {
+            return None;
+        }
+        let element = resolved.declaration.item;
+        let mut current =
+            self.global_type(namespace.as_deref(), local)
+                .map(|found| XsdTypeRef {
+                    schema: found.schema,
+                    name: None,
+                    definition: Some(found.item),
+                })?;
+        for _ in 0..MAX_DEPTH {
+            let definition = current.definition?;
+            let Some(base) = self.base_type(current) else {
+                // The chain ends above the declared type.
+                return Some(XsiTypeProblem::NotDerived);
+            };
+            let method = match definition.derivation {
+                Some(XsdDerivation::Extension) => Some("extension"),
+                Some(XsdDerivation::Restriction) => Some("restriction"),
+                _ => None,
+            };
+            // Only the `block` of the element and of the declared type count,
+            // not that of the types in between (cos-ct-derived-ok).
+            if let Some(method) = method {
+                let blocked = match method {
+                    "extension" => element.blocks_extension || declared_definition.blocks_extension,
+                    _ => element.blocks_restriction || declared_definition.blocks_restriction,
+                };
+                if blocked {
+                    return Some(XsiTypeProblem::Blocked(method));
+                }
+            }
+            match base.definition {
+                Some(definition) if std::ptr::eq(definition, declared_definition) => return None,
+                Some(_) => current = base,
+                // A built-in base other than the declared type: not derived.
+                None => return Some(XsiTypeProblem::NotDerived),
+            }
+        }
+        None
     }
 
     /// Whether the content model of a type has a `processContents="skip"`
