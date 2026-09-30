@@ -13,11 +13,10 @@ Without any setting you get, as you type:
 
 ## 2. Validate against a schema (XSD)
 
-The server picks a schema in this order:
+The server binds a schema through:
 
 1. `xsi:schemaLocation` / `xsi:noNamespaceSchemaLocation` in the document (relative, absolute or `file://` paths).
-2. `<?xml-model href="…"?>`.
-3. An `xml.fileAssociations` entry, for files that declare nothing:
+2. An `xml.fileAssociations` entry, for files that declare nothing:
 
 ```json
 {
