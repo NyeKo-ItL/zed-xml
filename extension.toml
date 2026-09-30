@@ -1,7 +1,7 @@
 id = "xml"
 name = "XML"
 description = "XML language support with syntax highlighting, schema-aware diagnostics, formatting, completion, and navigation via the native Rust LSP."
-version = "0.9.0"
+version = "0.10.0"
 schema_version = 1
 authors = ["NyeKo-ItL"]
 repository = "https://github.com/NyeKo-ItL/zed-xml"
