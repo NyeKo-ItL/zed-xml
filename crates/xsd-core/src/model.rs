@@ -334,6 +334,10 @@ pub struct XsdModel {
     /// Every identity constraint of the document (global and local
     /// declarations).
     pub identity_constraints: Vec<XsdIdentityConstraint>,
+    /// Components redefined or overridden by the document, as
+    /// `(kind, name)` with kind `type`, `group` or `attributeGroup`: they
+    /// legitimately exist twice in a schema set.
+    pub redefined: Vec<(&'static str, String)>,
     /// Errors of the components (the schema is invalid but usable).
     pub problems: Vec<String>,
 }
@@ -688,7 +692,25 @@ impl Context<'_> {
                         model.attribute_groups.push(group);
                     }
                 }
-                "redefine" | "override" => self.top_level(child, model),
+                "redefine" | "override" => {
+                    let (types, groups, attribute_groups) = (
+                        model.types.len(),
+                        model.groups.len(),
+                        model.attribute_groups.len(),
+                    );
+                    self.top_level(child, model);
+                    for definition in &model.types[types..] {
+                        if let Some(name) = &definition.name {
+                            model.redefined.push(("type", name.clone()));
+                        }
+                    }
+                    for group in &model.groups[groups..] {
+                        model.redefined.push(("group", group.name.clone()));
+                    }
+                    for group in &model.attribute_groups[attribute_groups..] {
+                        model.redefined.push(("attributeGroup", group.name.clone()));
+                    }
+                }
                 _ => {}
             }
         }
@@ -1391,17 +1413,55 @@ impl XsdModelSet {
         })
     }
 
-    /// The global type `local` other than `exclude`: a type redefined
-    /// (`xs:redefine`) refers to itself for the definition it replaces.
-    pub(crate) fn global_type_other_than(
+    /// The definition `local` a redefinition (`xs:redefine`) replaces: the
+    /// first one in a schema after `after` (a document precedes the ones it
+    /// includes), else any other than `exclude`.
+    fn find_replaced<'a, T>(
+        &'a self,
+        namespace: Option<&str>,
+        local: &str,
+        after: usize,
+        exclude: &T,
+        items: impl Fn(&'a XsdModel) -> &'a [T],
+        name_of: impl Fn(&T) -> (&str, Option<&str>),
+    ) -> Option<Located<'a, T>> {
+        let matching = |schema: usize, model: &'a XsdModel| {
+            items(model)
+                .iter()
+                .find(|item| {
+                    let (name, item_namespace) = name_of(item);
+                    name == local
+                        && namespace_matches(false, namespace, item_namespace)
+                        && !std::ptr::eq(*item, exclude)
+                })
+                .map(|item| Located { schema, item })
+        };
+        self.models
+            .iter()
+            .enumerate()
+            .skip(after + 1)
+            .find_map(|(schema, model)| matching(schema, model))
+            .or_else(|| {
+                self.models
+                    .iter()
+                    .enumerate()
+                    .find_map(|(schema, model)| matching(schema, model))
+            })
+    }
+
+    /// The type a redefined type named `local` extends or restricts.
+    pub(crate) fn replaced_type(
         &self,
         namespace: Option<&str>,
         local: &str,
+        schema: usize,
         exclude: &XsdTypeDef,
     ) -> Option<Located<'_, XsdTypeDef>> {
-        self.find_where(
+        self.find_replaced(
             namespace,
             local,
+            schema,
+            exclude,
             |model| &model.types,
             |item| {
                 (
@@ -1409,24 +1469,44 @@ impl XsdModelSet {
                     item.namespace.as_deref(),
                 )
             },
-            |item| !std::ptr::eq(item, exclude),
         )
     }
 
-    /// The named model group other than `exclude` (see
-    /// [`Self::global_type_other_than`]).
-    pub(crate) fn group_other_than(
+    /// The model group a redefined group refers to (see
+    /// [`Self::replaced_type`]).
+    pub(crate) fn replaced_group(
         &self,
         namespace: Option<&str>,
         local: &str,
+        schema: usize,
         exclude: &XsdGroupDef,
     ) -> Option<Located<'_, XsdGroupDef>> {
-        self.find_where(
+        self.find_replaced(
             namespace,
             local,
+            schema,
+            exclude,
             |model| &model.groups,
             |item| (item.name.as_str(), item.namespace.as_deref()),
-            |item| !std::ptr::eq(item, exclude),
+        )
+    }
+
+    /// The attribute group a redefined attribute group refers to (see
+    /// [`Self::replaced_type`]).
+    pub(crate) fn replaced_attribute_group(
+        &self,
+        namespace: Option<&str>,
+        local: &str,
+        schema: usize,
+        exclude: &XsdAttributeGroupDef,
+    ) -> Option<Located<'_, XsdAttributeGroupDef>> {
+        self.find_replaced(
+            namespace,
+            local,
+            schema,
+            exclude,
+            |model| &model.attribute_groups,
+            |item| (item.name.as_str(), item.namespace.as_deref()),
         )
     }
 
@@ -1596,11 +1676,14 @@ impl XsdModelSet {
         if let Some(base) = &definition.base {
             let resolved = self.resolve_type(reference.schema, base);
             // A redefinition derives from the definition it replaces.
-            if resolved
-                .definition
-                .is_some_and(|found| std::ptr::eq(found, definition))
-                && let Some(original) =
-                    self.global_type_other_than(base.namespace.as_deref(), &base.local, definition)
+            if definition.name.as_deref() == Some(base.local.as_str())
+                && definition.namespace == base.namespace
+                && let Some(original) = self.replaced_type(
+                    base.namespace.as_deref(),
+                    &base.local,
+                    reference.schema,
+                    definition,
+                )
             {
                 return Some(XsdTypeRef {
                     schema: original.schema,
@@ -1937,7 +2020,7 @@ impl XsdModelSet {
                 .map(|item| Located { schema, item }),
         );
         for group in &definition.attribute_group_refs {
-            self.collect_group_attributes(group, depth + 1, uses);
+            self.collect_group_attributes(group, depth + 1, uses, None);
         }
         if definition.complex
             && let Some(base) = self.base_type(reference)
@@ -1960,13 +2043,27 @@ impl XsdModelSet {
         name: &XsdQName,
         depth: usize,
         uses: &mut Vec<Located<'a, XsdAttributeDecl>>,
+        parent: Option<Located<'a, XsdAttributeGroupDef>>,
     ) {
         if depth > MAX_DEPTH {
             return;
         }
-        let Some(group) = self.attribute_group(name.namespace.as_deref(), &name.local) else {
+        let Some(mut group) = self.attribute_group(name.namespace.as_deref(), &name.local) else {
             return;
         };
+        // A redefined attribute group refers to itself for the original.
+        if let Some(parent) = parent
+            && parent.item.name == name.local
+            && parent.item.namespace == name.namespace
+            && let Some(original) = self.replaced_attribute_group(
+                name.namespace.as_deref(),
+                &name.local,
+                parent.schema,
+                parent.item,
+            )
+        {
+            group = original;
+        }
         let schema = group.schema;
         uses.extend(
             group
@@ -1976,7 +2073,7 @@ impl XsdModelSet {
                 .map(|item| Located { schema, item }),
         );
         for nested in &group.item.attribute_group_refs {
-            self.collect_group_attributes(nested, depth + 1, uses);
+            self.collect_group_attributes(nested, depth + 1, uses, Some(group));
         }
     }
 
