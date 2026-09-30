@@ -506,7 +506,7 @@ fn strip_query_and_fragment(value: &str) -> &str {
 }
 
 /// Résout les entités prédéfinies et les références de caractères.
-fn unescape(value: &str) -> String {
+pub(crate) fn unescape(value: &str) -> String {
     if !value.contains('&') {
         return value.to_owned();
     }
