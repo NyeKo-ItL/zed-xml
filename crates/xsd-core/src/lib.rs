@@ -6,6 +6,7 @@ pub mod datatypes;
 pub mod identity;
 pub mod model;
 pub mod pattern;
+mod reference_check;
 pub mod schema_check;
 mod simple_type_check;
 
@@ -152,11 +153,33 @@ pub fn merge_schemas(schemas: impl IntoIterator<Item = XsdSchema>) -> XsdSchema 
             }
         }
     }
+    // A document listed twice (by itself and through an include) is one.
+    let mut unique: Vec<Arc<XsdModel>> = Vec::new();
+    for model in &merged.models {
+        if !unique.iter().any(|known| **known == **model) {
+            unique.push(Arc::clone(model));
+        }
+    }
+    merged.models = unique;
     let set = XsdModelSet::new(merged.models.clone());
+    // The set is complete when every include, import and redefine with a
+    // location was loaded (each loaded document is a model).
+    let locations = merged
+        .includes
+        .iter()
+        .chain(merged.imports.iter().map(|(_, location)| location))
+        .collect::<HashSet<_>>();
+    let complete = merged.models.len() > locations.len();
+    let imported = merged
+        .imports
+        .iter()
+        .filter_map(|(namespace, _)| namespace.clone())
+        .collect::<HashSet<_>>();
     for problem in set
         .identity_problems()
         .into_iter()
         .chain(set.component_problems())
+        .chain(set.reference_problems(complete, &imported))
     {
         if !merged.problems.contains(&problem) {
             merged.problems.push(problem);

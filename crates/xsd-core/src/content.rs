@@ -649,7 +649,7 @@ struct Builder<'a> {
     failed: bool,
     /// Named groups being expanded: a group reference to one of them is a
     /// redefinition referring to the group it replaces.
-    expanding: Vec<*const crate::model::XsdGroupDef>,
+    expanding: Vec<(String, Namespace, usize)>,
     /// Symbol of each element or wildcard particle: the copies a counted
     /// repetition makes of a group share them.
     symbol_of: HashMap<*const XsdParticle, u32>,
@@ -862,14 +862,19 @@ impl<'a> Builder<'a> {
             }
             XsdParticle::GroupRef { name, .. } => {
                 let mut found = self.models.group(name.namespace.as_deref(), &name.local);
+                // A redefined group referring to itself means the original.
                 if let Some(current) = found
-                    && self.expanding.contains(&std::ptr::from_ref(current.item))
-                {
-                    found = self.models.group_other_than(
+                    && let Some((expanding, namespace, group_schema)) = self.expanding.last()
+                    && *expanding == name.local
+                    && *namespace == name.namespace
+                    && let Some(original) = self.models.replaced_group(
                         name.namespace.as_deref(),
                         &name.local,
+                        *group_schema,
                         current.item,
-                    );
+                    )
+                {
+                    found = Some(original);
                 }
                 let Some(group) = found else {
                     self.failed = true;
@@ -879,9 +884,13 @@ impl<'a> Builder<'a> {
                     return self.empty_fragment();
                 };
                 let group_schema = group.schema;
-                let pointer = std::ptr::from_ref(group.item);
+                let identity = (
+                    group.item.name.clone(),
+                    group.item.namespace.clone(),
+                    group.schema,
+                );
                 self.repeat(min, max, |builder| {
-                    builder.expanding.push(pointer);
+                    builder.expanding.push(identity.clone());
                     let fragment = builder.particle(group_schema, content, depth + 1);
                     builder.expanding.pop();
                     fragment
