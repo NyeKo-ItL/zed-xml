@@ -356,19 +356,19 @@ fn floor_char_boundary(source: &str, mut offset: usize) -> usize {
 
 /// Conversion offset UTF-8 -> position LSP (ligne, unités UTF-16) en
 /// temps logarithmique pour la ligne.
-struct LineIndex {
+pub(crate) struct LineIndex {
     starts: Vec<usize>,
 }
 
 impl LineIndex {
-    fn new(source: &str) -> Self {
+    pub(crate) fn new(source: &str) -> Self {
         let starts = std::iter::once(0)
             .chain(source.match_indices('\n').map(|(index, _)| index + 1))
             .collect();
         Self { starts }
     }
 
-    fn position(&self, source: &str, offset: usize) -> Value {
+    pub(crate) fn position(&self, source: &str, offset: usize) -> Value {
         let offset = floor_char_boundary(source, offset);
         let line = self.starts.partition_point(|&start| start <= offset) - 1;
         let character: usize = source[self.starts[line]..offset]
