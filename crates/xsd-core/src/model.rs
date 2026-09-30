@@ -82,6 +82,9 @@ pub struct XsdElementDecl {
     pub fixed: Option<String>,
     pub nillable: bool,
     pub is_abstract: bool,
+    /// `block` (or the schema's `blockDefault`) includes `substitution`:
+    /// members of the substitution group cannot replace this element.
+    pub blocks_substitution: bool,
     pub substitution_groups: Vec<XsdQName>,
     pub global: bool,
     pub documentation: Option<String>,
@@ -207,6 +210,8 @@ pub enum XsdParticle {
 /// `xs:any` wildcard of a content model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XsdWildcard {
+    /// XSD 1.1 `notNamespace` or `notQName`: not modelled, so not compared.
+    pub has_exclusions: bool,
     pub process_contents: XsdProcessContents,
     pub namespaces: XsdWildcardNamespaces,
     pub min_occurs: usize,
@@ -350,6 +355,7 @@ pub fn parse_xsd_model(source: &str) -> Result<XsdModel, String> {
         attribute_form_qualified: root.attribute("attributeFormDefault").as_deref()
             == Some("qualified"),
         target_namespace,
+        block_default: root.attribute("blockDefault"),
         identity_constraints: RefCell::default(),
         problems: RefCell::default(),
     };
@@ -593,6 +599,8 @@ struct Context<'a> {
     target_namespace: Option<String>,
     element_form_qualified: bool,
     attribute_form_qualified: bool,
+    /// `blockDefault` of the schema.
+    block_default: Option<String>,
     identity_constraints: RefCell<Vec<XsdIdentityConstraint>>,
     problems: RefCell<Vec<String>>,
 }
@@ -719,6 +727,15 @@ impl Context<'_> {
             fixed: node.attribute("fixed"),
             nillable: is_true(node.attribute("nillable")),
             is_abstract: is_true(node.attribute("abstract")),
+            blocks_substitution: {
+                let block = node
+                    .attribute("block")
+                    .or_else(|| self.block_default.clone())
+                    .unwrap_or_default();
+                block
+                    .split_whitespace()
+                    .any(|token| token == "#all" || token == "substitution")
+            },
             substitution_groups: self.qname_list(node, "substitutionGroup"),
             global,
             documentation: documentation(node),
@@ -1056,6 +1073,8 @@ impl Context<'_> {
             "any" => {
                 let (min_occurs, max_occurs) = occurs(node);
                 return Some(XsdParticle::Any(XsdWildcard {
+                    has_exclusions: node.attribute("notNamespace").is_some()
+                        || node.attribute("notQName").is_some(),
                     process_contents: match node
                         .attribute("processContents")
                         .as_deref()
@@ -1313,6 +1332,10 @@ impl XsdModelSet {
         });
         let mut members = Vec::new();
         let mut seen = std::collections::HashSet::new();
+        // A head that blocks substitution has no usable member.
+        if head.item.blocks_substitution {
+            return members;
+        }
         let mut pending = vec![(head.item.namespace.clone(), head.item.name.clone())];
         while let Some(key) = pending.pop() {
             for &(schema, position) in index.get(&key).map(Vec::as_slice).unwrap_or_default() {
@@ -1320,7 +1343,9 @@ impl XsdModelSet {
                     continue;
                 }
                 let item = &self.models[schema].elements[position];
-                pending.push((item.namespace.clone(), item.name.clone()));
+                if !item.blocks_substitution {
+                    pending.push((item.namespace.clone(), item.name.clone()));
+                }
                 if !item.is_abstract {
                     members.push(Located { schema, item });
                 }
