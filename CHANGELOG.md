@@ -33,6 +33,7 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Fixed
 
+- Declared the `xml-lsp --version` process capability for versioned downloaded binaries on Windows and Unix-like platforms; release synchronization updates the permission names with the version.
 - Downloaded `xml-lsp` binaries are cached under a versioned path, so an outdated or locked binary from a previous extension version cannot be reused.
 - The cached `xml-lsp` binary is reused when its version matches, instead of being downloaded again on every start (#16).
 - Formatting keeps explicit empty elements (`<tag></tag>`) as written (#17).

@@ -94,6 +94,27 @@ jobs:
               path.write_text(updated, encoding="utf-8", newline="\n")
           PY
 
+          VERSION="$VERSION" python - <<'PY'
+          import os
+          import pathlib
+          import re
+
+          version = os.environ["VERSION"]
+          path = pathlib.Path("extension.toml")
+          content = path.read_text(encoding="utf-8")
+          capability_pattern = re.compile(
+              r'(?m)^(command\s*=\s*"xml-lsp-)[0-9]+\.[0-9]+\.[0-9]+(\.exe)?(")([ \t]*$)'
+          )
+          updated, count = capability_pattern.subn(
+              rf'\g<1>{version}\g<2>\g<3>\g<4>', content
+          )
+          if count != 2:
+              raise SystemExit(
+                  f"Expected two xml-lsp process capabilities in {path}, found {count}"
+              )
+          path.write_text(updated, encoding="utf-8", newline="\n")
+          PY
+
           cargo check --workspace
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
