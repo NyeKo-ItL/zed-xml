@@ -6,6 +6,7 @@ pub mod identity;
 pub mod model;
 pub mod pattern;
 pub mod schema_check;
+mod simple_type_check;
 
 use std::{
     collections::{HashMap, HashSet},
