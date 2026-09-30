@@ -322,7 +322,7 @@ pub fn complete_xml(source: &str, offset: usize) -> Vec<XmlCompletion> {
     } else if fragment.chars().any(char::is_whitespace) {
         let typed = fragment
             .split(|character: char| character.is_whitespace())
-            .last()
+            .next_back()
             .unwrap_or_default();
         for name in attributes {
             if name.starts_with(typed) {

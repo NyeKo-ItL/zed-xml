@@ -2,6 +2,8 @@
 name = "xml-core"
 version = "0.12.0"
 edition = "2024"
+rust-version = "1.88"
+license = "MIT"
 
 [lib]
 path = "src/lib.rs"

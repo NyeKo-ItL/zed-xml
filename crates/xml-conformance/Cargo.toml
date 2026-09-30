@@ -2,6 +2,8 @@
 name = "xml-conformance"
 version = "0.12.0"
 edition = "2024"
+rust-version = "1.88"
+license = "MIT"
 publish = false
 description = "Conformance, corpus and real-world fixture tests for xml-core and xsd-core."
 
