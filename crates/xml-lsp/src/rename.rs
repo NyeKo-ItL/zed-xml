@@ -16,13 +16,15 @@
 use std::ops::Range;
 
 use serde_json::{Value, json};
-use xml_core::tags::{XmlAttribute, XmlTagTree, qualified_name_parts, scan_attributes};
+use xml_core::tags::{
+    XmlAttribute, XmlTagTree, namespace_declaration, qualified_name_parts, resolve_namespace,
+    scan_attributes,
+};
 
 use crate::position_at;
 
 const XSD_NAMESPACE: &str = "http://www.w3.org/2001/XMLSchema";
 const XSI_NAMESPACE: &str = "http://www.w3.org/2001/XMLSchema-instance";
-const XML_NAMESPACE: &str = "http://www.w3.org/XML/1998/namespace";
 
 /// Code d'erreur JSON-RPC `InvalidParams`.
 pub const INVALID_PARAMS: i32 = -32602;
@@ -298,39 +300,13 @@ impl<'a> Document<'a> {
     /// Élément le plus proche (lui-même inclus) qui déclare `prefix`
     /// (`None` : espace de noms par défaut).
     fn declaration(&self, element: usize, prefix: Option<&str>) -> Option<(usize, &XmlAttribute)> {
-        std::iter::once(element)
-            .chain(self.tree.ancestors(element))
-            .find_map(|index| {
-                self.attributes[index]
-                    .iter()
-                    .find(|attribute| {
-                        let name = attribute.name(self.source);
-                        match prefix {
-                            Some(prefix) => name.strip_prefix("xmlns:") == Some(prefix),
-                            None => name == "xmlns",
-                        }
-                    })
-                    .map(|attribute| (index, attribute))
-            })
+        namespace_declaration(self.source, &self.tree, &self.attributes, element, prefix)
     }
 
     /// Espace de noms de `prefix` dans le contexte de `element`. Retourne
     /// `None` pour un préfixe non déclaré et `Some(None)` sans espace de noms.
     fn namespace(&self, element: usize, prefix: Option<&str>) -> Option<Option<&'a str>> {
-        if prefix == Some("xml") {
-            return Some(Some(XML_NAMESPACE));
-        }
-        match self.declaration(element, prefix) {
-            Some((_, attribute)) => Some(
-                attribute
-                    .value
-                    .clone()
-                    .map(|range| &self.source[range])
-                    .filter(|value| !value.is_empty()),
-            ),
-            None if prefix.is_none() => Some(None),
-            None => None,
-        }
+        resolve_namespace(self.source, &self.tree, &self.attributes, element, prefix)
     }
 
     fn is_xsd(&self, element: usize, local: &str) -> bool {

@@ -3,6 +3,7 @@
 mod folding;
 mod formatting;
 mod highlight;
+mod hover;
 mod linked_editing;
 mod rename;
 mod selection;
@@ -60,6 +61,7 @@ struct XmlLanguageServer {
     documents: HashMap<String, String>,
     schema_cache: SchemaCache,
     schema_index: HashMap<String, Vec<PathBuf>>,
+    model_cache: hover::ModelCache,
     folding_settings: folding::FoldingSettings,
 }
 
@@ -69,6 +71,7 @@ impl XmlLanguageServer {
             documents: HashMap::new(),
             schema_cache: HashMap::new(),
             schema_index: HashMap::new(),
+            model_cache: HashMap::new(),
             folding_settings: folding::FoldingSettings::default(),
         }
     }
@@ -376,32 +379,16 @@ impl XmlLanguageServer {
 
     fn hover(&mut self, params: &Value) -> Option<Value> {
         let uri = params.get("textDocument")?.get("uri")?.as_str()?;
-        let source = self.documents.get(uri)?.clone();
+        let source = self.documents.get(uri)?;
         let position = params.get("position")?;
         let line = position.get("line")?.as_u64()? as usize;
         let character = position.get("character")?.as_u64()? as usize;
-        let offset = offset_at(&source, line, character);
-        let element_name = element_name_at(&source, offset)?;
-        let schema = self.load_schema(uri, &source);
-        let detail = schema
-            .as_ref()
-            .and_then(|schema| {
-                schema
-                    .elements
-                    .iter()
-                    .find(|element| element.name == element_name)
-            })
-            .map(|element| {
-                format!(
-                    "Élément `<{}>`\n\nType : `{}`",
-                    element.name,
-                    element.type_name.as_deref().unwrap_or("complexType")
-                )
-            })
-            .unwrap_or_else(|| format!("Élément XML `<{element_name}>`"));
-        Some(json!({
-            "contents": {"kind": "markdown", "value": detail},
-        }))
+        let offset = offset_at(source, line, character);
+        let mut context = hover::HoverContext {
+            documents: &self.documents,
+            cache: &mut self.model_cache,
+        };
+        hover::hover(&mut context, uri, source, offset)
     }
 
     fn document_highlight(&self, params: &Value) -> Option<Value> {
@@ -2663,6 +2650,144 @@ mod tests {
         assert_eq!(references[1]["uri"], uri);
         assert_eq!(references[2]["uri"], uri);
         std::fs::remove_file(schema_path).expect("schema should be removed");
+    }
+
+    #[test]
+    fn serves_xsd_documentation_hover_requests() {
+        let directory =
+            std::env::temp_dir().join(format!("xml-lsp-hover-lsp-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).expect("directory should be written");
+        let schema_path = directory.join("order.xsd");
+        let schema_source = concat!(
+            "<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\" xmlns:o=\"urn:order\" targetNamespace=\"urn:order\" elementFormDefault=\"qualified\">\n",
+            "  <xs:element name=\"order\"><xs:annotation><xs:documentation>A customer order.</xs:documentation></xs:annotation>\n",
+            "    <xs:complexType><xs:sequence>\n",
+            "      <xs:element name=\"status\" type=\"o:Status\"><xs:annotation><xs:documentation>Order status.</xs:documentation></xs:annotation></xs:element>\n",
+            "    </xs:sequence>\n",
+            "    <xs:attribute name=\"priority\" type=\"xs:int\" use=\"required\"><xs:annotation><xs:documentation>Priority level.</xs:documentation></xs:annotation></xs:attribute>\n",
+            "    </xs:complexType>\n",
+            "  </xs:element>\n",
+            "  <xs:simpleType name=\"Status\"><xs:restriction base=\"xs:string\">\n",
+            "    <xs:enumeration value=\"open\"><xs:annotation><xs:documentation>Not shipped yet.</xs:documentation></xs:annotation></xs:enumeration>\n",
+            "    <xs:enumeration value=\"closed\"/>\n",
+            "  </xs:restriction></xs:simpleType>\n",
+            "</xs:schema>",
+        );
+        std::fs::write(&schema_path, schema_source).expect("schema should be written");
+        let document_uri = path_to_uri(&directory.join("order.xml"));
+        let schema_uri = path_to_uri(&schema_path);
+
+        let (server, client) = Connection::memory();
+        let server_thread = thread::spawn(|| run(server).expect("server loop should succeed"));
+        let request = |id: i32, method: &str, params: Value| {
+            client
+                .sender
+                .send(
+                    Request {
+                        id: RequestId::from(id),
+                        method: method.to_owned(),
+                        params,
+                    }
+                    .into(),
+                )
+                .expect("request should be sent");
+            loop {
+                match client.receiver.recv().expect("a message should arrive") {
+                    Message::Response(response) => {
+                        assert_eq!(response.id, RequestId::from(id));
+                        assert!(response.error.is_none(), "{:?}", response.error);
+                        return response.result;
+                    }
+                    Message::Notification(_) => {}
+                    message => panic!("unexpected message {message:?}"),
+                }
+            }
+        };
+        let notify = |method: &str, params: Value| {
+            client
+                .sender
+                .send(
+                    Notification {
+                        method: method.to_owned(),
+                        params,
+                    }
+                    .into(),
+                )
+                .expect("notification should be sent");
+        };
+
+        let initialize = request(1, INITIALIZE_METHOD, json!({}));
+        assert_eq!(initialize.unwrap()["capabilities"]["hoverProvider"], true);
+        notify("initialized", json!({}));
+        let text = "<order xmlns=\"urn:order\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"\r\n       xsi:schemaLocation=\"urn:order order.xsd\" priority=\"1\">\r\n  <status>open</status>\r\n</order>";
+        notify(
+            DID_OPEN_METHOD,
+            json!({"textDocument": {"uri": document_uri, "text": text}}),
+        );
+        notify(
+            DID_OPEN_METHOD,
+            json!({"textDocument": {"uri": "file:///plain.xml", "text": "<note/>"}}),
+        );
+        let params = |uri: &str, line: u32, character: u32| {
+            json!({
+                "textDocument": {"uri": uri},
+                "position": {"line": line, "character": character},
+            })
+        };
+
+        assert_eq!(
+            request(2, HOVER_METHOD, params(&document_uri, 3, 4)),
+            Some(json!({
+                "contents": {
+                    "kind": "markdown",
+                    "value": format!("**Élément** `<order>`\n\n- Espace de noms : `urn:order`\n- Type : complexe anonyme\n\nA customer order.\n\nSource : [order.xsd]({schema_uri})"),
+                },
+                "range": {"start": {"line": 3, "character": 2}, "end": {"line": 3, "character": 7}},
+            }))
+        );
+        let status = request(3, HOVER_METHOD, params(&document_uri, 2, 4)).unwrap();
+        assert_eq!(
+            status["range"],
+            json!({"start": {"line": 2, "character": 3}, "end": {"line": 2, "character": 9}})
+        );
+        let status = status["contents"]["value"].as_str().unwrap();
+        assert!(status.contains("- Type : `o:Status` (restriction de `xs:string`)"));
+        assert!(status.contains("Order status."), "{status}");
+        let priority = request(4, HOVER_METHOD, params(&document_uri, 1, 50)).unwrap();
+        let priority = priority["contents"]["value"].as_str().unwrap();
+        assert!(
+            priority.starts_with("**Attribut** `priority`"),
+            "{priority}"
+        );
+        assert!(
+            priority.contains("- Utilisation : obligatoire"),
+            "{priority}"
+        );
+        assert!(priority.contains("Priority level."), "{priority}");
+        let value = request(5, HOVER_METHOD, params(&document_uri, 2, 11)).unwrap();
+        assert_eq!(
+            value["range"],
+            json!({"start": {"line": 2, "character": 10}, "end": {"line": 2, "character": 14}})
+        );
+        let value = value["contents"]["value"].as_str().unwrap();
+        assert!(value.contains("Not shipped yet."), "{value}");
+        assert!(value.contains("- Valeurs autorisées : `open`, `closed`"));
+        assert_eq!(
+            request(6, HOVER_METHOD, params("file:///plain.xml", 0, 2)),
+            Some(json!({
+                "contents": {"kind": "markdown", "value": "**Élément** `<note>`"},
+                "range": {"start": {"line": 0, "character": 1}, "end": {"line": 0, "character": 5}},
+            }))
+        );
+        assert_eq!(
+            request(7, HOVER_METHOD, params("file:///plain.xml", 0, 0)),
+            Some(Value::Null)
+        );
+
+        assert_eq!(request(8, "shutdown", json!(null)), Some(Value::Null));
+        notify(EXIT_METHOD, json!(null));
+        server_thread.join().expect("server thread should stop");
+        std::fs::remove_dir_all(directory).expect("directory should be removed");
     }
 
     #[test]
