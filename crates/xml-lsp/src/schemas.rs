@@ -66,6 +66,9 @@ struct CachedFile {
     schema: Result<Arc<XsdSchema>, SchemaLoadError>,
     /// `(namespace, path)` of the dependencies, or the resolution error.
     dependencies: Result<Vec<(Option<String>, PathBuf)>, SchemaLoadError>,
+    /// Namespace rules of the `xs:include` / `xs:import` elements, checked
+    /// when the file is read.
+    dependency_problems: Vec<String>,
 }
 
 /// Schemas of a document: the merged model (`None` without any loadable
@@ -175,6 +178,14 @@ impl SchemaStore {
                     remote: false,
                 });
             }
+            for problem in &file.dependency_problems {
+                errors.push(SchemaLoadError {
+                    path: path.clone(),
+                    message: format!("invalid XSD schema: {problem}"),
+                    offset: 0,
+                    remote: false,
+                });
+            }
             match &file.dependencies {
                 Ok(dependencies) => {
                     queue.extend(dependencies.iter().map(|(_, path)| path.clone()));
@@ -262,10 +273,24 @@ fn read_schema(
         offset: xsd_parse_error_offset(&source),
         remote: false,
     });
+    let dependency_problems = xsd_core::dependency_problems(
+        &source,
+        path,
+        &|request| catalogs.resolve_schema(request),
+        &|dependency| {
+            let text = xml_core::resource::read_text_file(
+                dependency,
+                xml_core::resource::MAX_RESOURCE_SIZE,
+            )
+            .ok()?;
+            xsd_core::schema_target_namespace(&text)
+        },
+    );
     Ok(CachedFile {
         stamp,
         schema,
         dependencies,
+        dependency_problems,
     })
 }
 

@@ -358,6 +358,17 @@ pub fn load_schema_set(path: &Path) -> Result<XsdSchema, String> {
         let source = decode(&bytes).ok_or_else(|| format!("{}: undecodable", path.display()))?;
         let schema = parse_xsd(&source).map_err(|error| format!("{}: {error}", path.display()))?;
         schemas.push(schema);
+        let namespace_of = |dependency: &Path| {
+            let bytes = fs::read(dependency).ok()?;
+            xsd_core::schema_target_namespace(&decode(&bytes)?)
+        };
+        if let Some(problem) =
+            xsd_core::dependency_problems(&source, &path, &|_| None, &namespace_of)
+                .into_iter()
+                .next()
+        {
+            return Err(format!("invalid schema: {}: {problem}", path.display()));
+        }
         for reference in resolve_schema_dependencies(&source, &path)? {
             if reference.path.exists() {
                 queue.push(reference.path);

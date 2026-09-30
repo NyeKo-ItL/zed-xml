@@ -1292,10 +1292,12 @@ fn consults_the_location_resolver_first() {
             SchemaReference {
                 namespace: Some("urn:a".to_owned()),
                 path: PathBuf::from("/catalog/a.xsd"),
+                kind: SchemaLocationKind::SchemaLocation,
             },
             SchemaReference {
                 namespace: Some("urn:c".to_owned()),
                 path: PathBuf::from("/docs/c.xsd"),
+                kind: SchemaLocationKind::SchemaLocation,
             },
         ]
     );
@@ -1631,4 +1633,43 @@ fn checks_xsi_type_of_simple_types_nil_and_undeclared_roots() {
         1
     );
     assert_eq!(messages(r#"<other/>"#.to_owned()).len(), 1);
+}
+
+#[test]
+fn checks_the_namespaces_of_includes_and_imports() {
+    let problems = |source: &str, dependency: Option<Option<&str>>| {
+        dependency_problems(source, Path::new("/schemas/a.xsd"), &|_| None, &|_| {
+            dependency.map(|namespace| namespace.map(str::to_owned))
+        })
+    };
+    let schema = |namespace: &str, body: &str| {
+        format!(
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"{namespace}>{body}</xs:schema>"#
+        )
+    };
+    let own = r#" targetNamespace="urn:a""#;
+    let include = r#"<xs:include schemaLocation="b.xsd"/>"#;
+    // An included schema has no target namespace, or the same one.
+    assert!(problems(&schema(own, include), Some(None)).is_empty());
+    assert!(problems(&schema(own, include), Some(Some("urn:a"))).is_empty());
+    assert_eq!(
+        problems(&schema(own, include), Some(Some("urn:b"))).len(),
+        1
+    );
+    assert_eq!(problems(&schema("", include), Some(Some("urn:b"))).len(), 1);
+    assert!(problems(&schema(own, include), None).is_empty());
+    // An import names the namespace of the imported schema, not its own.
+    let import = r#"<xs:import namespace="urn:b" schemaLocation="b.xsd"/>"#;
+    assert!(problems(&schema(own, import), Some(Some("urn:b"))).is_empty());
+    assert_eq!(problems(&schema(own, import), Some(Some("urn:c"))).len(), 1);
+    assert_eq!(problems(&schema(own, import), Some(None)).len(), 1);
+    let own_import = r#"<xs:import namespace="urn:a"/>"#;
+    assert_eq!(problems(&schema(own, own_import), None).len(), 1);
+    // Without namespace, the importing schema needs a target namespace.
+    let bare = r#"<xs:import schemaLocation="b.xsd"/>"#;
+    assert!(problems(&schema(own, bare), Some(None)).is_empty());
+    assert_eq!(problems(&schema("", bare), Some(None)).len(), 1);
+    // A schema does not redefine itself.
+    let redefine = r#"<xs:redefine schemaLocation="a.xsd"/>"#;
+    assert_eq!(problems(&schema(own, redefine), None).len(), 1);
 }

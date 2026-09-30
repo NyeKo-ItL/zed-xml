@@ -278,6 +278,7 @@ impl XmlLanguageServer {
             .map(|path| xsd_core::SchemaReference {
                 namespace: None,
                 path,
+                kind: xsd_core::SchemaLocationKind::NoNamespaceSchemaLocation,
             })
             .collect())
     }
