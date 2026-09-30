@@ -5,6 +5,10 @@ XML language support for Zed, including XML, XSD, XSLT, SVG, WSDL, plist, XJB an
 ## Features
 
 - Tree-sitter syntax highlighting, indentation and outline support.
+- Matching start/end tag pairs and delimiters (`<`/`>`, `<?`/`?>`, quotes) for bracket highlighting and jumping.
+- Text objects for elements (function/class) and comments, e.g. for Vim mode.
+- Embedded CSS in `<style>` and JavaScript in `<script>` (SVG, XHTML, CDATA sections included).
+- Comment and string scopes so auto-closing brackets and quotes stay out of comments and attribute values.
 - Automatic bracket and tag editing provided by Zed.
 - Native Rust LSP for XML diagnostics, formatting, completion, navigation and XSD validation.
 - `xsi:schemaLocation` and `xsi:noNamespaceSchemaLocation` support.
