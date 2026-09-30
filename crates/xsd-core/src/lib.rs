@@ -2654,6 +2654,14 @@ fn validate_text_content(
         }
     };
     if nil {
+        if fixed.is_some() {
+            return vec![XsdDiagnostic {
+                kind: XsdDiagnosticKind::FixedValue,
+                message: format!(
+                    "element <{name}> has xsi:nil=\"true\" but a fixed value constraint"
+                ),
+            }];
+        }
         // An element with `xsi:nil="true"` has no content (whitespace
         // tolerated, as editors reformat documents).
         return if frame.children.is_empty() && frame.text.trim_matches(XML_WHITESPACE).is_empty() {
@@ -2673,7 +2681,8 @@ fn validate_text_content(
         // Complex content: only the `fixed` value of a text-only element.
         return match fixed {
             Some(fixed)
-                if frame.children.is_empty() && !frame.text.is_empty() && frame.text != fixed =>
+                if !frame.children.is_empty()
+                    || (!frame.text.is_empty() && frame.text != fixed) =>
             {
                 vec![XsdDiagnostic {
                     kind: XsdDiagnosticKind::FixedValue,

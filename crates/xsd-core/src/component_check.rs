@@ -717,6 +717,28 @@ impl XsdModelSet {
     fn local_declaration_problems(&self) -> Vec<String> {
         let mut problems = Vec::new();
         for (schema, model) in self.models().iter().enumerate() {
+            // A global element with a value constraint needs a type with
+            // simple or mixed content.
+            for element in &model.elements {
+                if element.default.is_none() && element.fixed.is_none() {
+                    continue;
+                }
+                let declaration = Located {
+                    schema,
+                    item: element,
+                };
+                if let Some(reference) = self.element_type(declaration)
+                    && let Some(definition) = reference.definition
+                    && definition.complex
+                    && !definition.simple_content
+                    && !definition.mixed
+                {
+                    problems.push(format!(
+                        "element '{}' has a default or fixed value but its type has element-only content",
+                        element.name
+                    ));
+                }
+            }
             for (definition, label) in complex_types(model) {
                 for attribute in &definition.attributes {
                     let local = Located {
