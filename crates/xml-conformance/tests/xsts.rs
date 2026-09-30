@@ -17,7 +17,7 @@ use xml_conformance::{
     Outcome, SuiteRun, decode, external_suite, guarded, load_schema_set, schema_set,
     well_formedness_errors,
 };
-use xsd_core::{XsdSchema, merge_schemas, validate_document_located};
+use xsd_core::{XsdSchema, merge_schemas, resolve_schema_locations, validate_document_located};
 
 const XLINK: &str = "http://www.w3.org/1999/xlink";
 
@@ -144,6 +144,23 @@ fn guarded_load(documents: &[PathBuf]) -> Result<XsdSchema, String> {
 fn validate_instance(path: &Path, schema: &XsdSchema, expected_valid: bool) -> Outcome {
     let Some(source) = fs::read(path).ok().and_then(|bytes| decode(&bytes)) else {
         return Outcome::Skip("unreadable instance".to_owned());
+    };
+    // Like the server, also load the schemas the instance points to with
+    // `xsi:schemaLocation` (some tests spread their components over them).
+    let mut schemas = vec![schema.clone()];
+    for reference in resolve_schema_locations(&source, path).unwrap_or_default() {
+        if reference.path.exists()
+            && let Ok(hinted) = load_schema_set(&reference.path)
+        {
+            schemas.push(hinted);
+        }
+    }
+    let merged;
+    let schema = if schemas.len() > 1 {
+        merged = merge_schemas(schemas);
+        &merged
+    } else {
+        schema
     };
     let mut problems = well_formedness_errors(&source);
     problems.extend(

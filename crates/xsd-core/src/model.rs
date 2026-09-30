@@ -89,6 +89,10 @@ pub struct XsdElementDecl {
     /// `xsi:type` cannot name a type derived that way from the declared one.
     pub blocks_extension: bool,
     pub blocks_restriction: bool,
+    /// `final` (or `finalDefault`) of a global element: members of its
+    /// substitution group cannot have a type derived that way.
+    pub final_extension: bool,
+    pub final_restriction: bool,
     pub substitution_groups: Vec<XsdQName>,
     pub global: bool,
     pub documentation: Option<String>,
@@ -292,6 +296,12 @@ pub struct XsdTypeDef {
     /// cannot replace it through `xsi:type`.
     pub blocks_extension: bool,
     pub blocks_restriction: bool,
+    /// `final` (or `finalDefault`): derivations by these methods are
+    /// forbidden.
+    pub final_extension: bool,
+    pub final_restriction: bool,
+    pub final_list: bool,
+    pub final_union: bool,
     pub derivation: Option<XsdDerivation>,
     /// Base type (`restriction`/`extension`).
     pub base: Option<XsdQName>,
@@ -371,6 +381,7 @@ pub fn parse_xsd_model(source: &str) -> Result<XsdModel, String> {
             == Some("qualified"),
         target_namespace,
         block_default: root.attribute("blockDefault"),
+        final_default: root.attribute("finalDefault"),
         identity_constraints: RefCell::default(),
         problems: RefCell::default(),
     };
@@ -616,6 +627,8 @@ struct Context<'a> {
     attribute_form_qualified: bool,
     /// `blockDefault` of the schema.
     block_default: Option<String>,
+    /// `finalDefault` of the schema.
+    final_default: Option<String>,
     identity_constraints: RefCell<Vec<XsdIdentityConstraint>>,
     problems: RefCell<Vec<String>>,
 }
@@ -765,6 +778,8 @@ impl Context<'_> {
             blocks_substitution: self.blocks(node, "substitution"),
             blocks_extension: self.blocks(node, "extension"),
             blocks_restriction: self.blocks(node, "restriction"),
+            final_extension: self.finals(node, "extension"),
+            final_restriction: self.finals(node, "restriction"),
             substitution_groups: self.qname_list(node, "substitutionGroup"),
             global,
             documentation: documentation(node),
@@ -940,6 +955,16 @@ impl Context<'_> {
             .any(|token| token == "#all" || token == kind)
     }
 
+    /// Whether the `final` of `node` (else the schema's `finalDefault`)
+    /// contains `kind` or `#all`.
+    fn finals(&self, node: &Node, kind: &str) -> bool {
+        node.attribute("final")
+            .or_else(|| self.final_default.clone())
+            .unwrap_or_default()
+            .split_whitespace()
+            .any(|token| token == "#all" || token == kind)
+    }
+
     fn complex_type(&self, node: &Node) -> XsdTypeDef {
         let mut definition = XsdTypeDef {
             name: node.attribute("name"),
@@ -948,6 +973,8 @@ impl Context<'_> {
             is_abstract: is_true(node.attribute("abstract")),
             blocks_extension: self.blocks(node, "extension"),
             blocks_restriction: self.blocks(node, "restriction"),
+            final_extension: self.finals(node, "extension"),
+            final_restriction: self.finals(node, "restriction"),
             mixed: is_true(node.attribute("mixed")),
             documentation: documentation(node),
             ..XsdTypeDef::default()
@@ -968,6 +995,12 @@ impl Context<'_> {
                         definition.derivation = Some(kind);
                         definition.base = self.qname_attribute(derivation, "base");
                         self.type_body(derivation, &mut definition);
+                        // Anonymous simple type of a simpleContent restriction.
+                        definition.inline_types.extend(
+                            derivation
+                                .xsd_children("simpleType")
+                                .map(|inline| self.simple_type(inline)),
+                        );
                         self.facets(derivation, &mut definition);
                     }
                 }
@@ -999,6 +1032,9 @@ impl Context<'_> {
         let mut definition = XsdTypeDef {
             name: node.attribute("name"),
             namespace: self.target_namespace.clone(),
+            final_restriction: self.finals(node, "restriction"),
+            final_list: self.finals(node, "list"),
+            final_union: self.finals(node, "union"),
             documentation: documentation(node),
             ..XsdTypeDef::default()
         };
@@ -1165,11 +1201,11 @@ impl Context<'_> {
 fn occurs(node: &Node) -> (usize, Option<usize>) {
     let min = node
         .attribute("minOccurs")
-        .and_then(|value| value.trim().parse().ok())
+        .and_then(|value| crate::parse_count(&value))
         .unwrap_or(1);
     let max = match node.attribute("maxOccurs").as_deref().map(str::trim) {
         Some("unbounded") => None,
-        Some(value) => Some(value.parse().unwrap_or(1)),
+        Some(value) => Some(crate::parse_count(value).unwrap_or(1)),
         None => Some(1),
     };
     (min, max)
@@ -1848,13 +1884,31 @@ impl XsdModelSet {
             return Some(XsiTypeProblem::Abstract);
         }
         let declared = declared?;
-        let declared_definition = declared.definition?;
-        // Simple types also accept the members of a union (and their
-        // restrictions): only complex types are compared.
-        if !declared_definition.complex || std::ptr::eq(declared_definition, used) {
+        let element = resolved.declaration.item;
+        let declared_is_any_type = declared
+            .name
+            .is_some_and(|name| name.is_builtin() && name.local == "anyType");
+        if declared_is_any_type {
             return None;
         }
-        let element = resolved.declaration.item;
+        if declared
+            .definition
+            .is_none_or(|definition| !definition.complex)
+        {
+            // A simple type (or a built-in one): the type named must be
+            // derived from it (a complex type with simple content can be).
+            let found = self.global_type(namespace.as_deref(), local)?;
+            let used_reference = XsdTypeRef {
+                schema: found.schema,
+                name: None,
+                definition: Some(found.item),
+            };
+            return self.simple_xsi_type_problem(element, declared, used_reference);
+        }
+        let declared_definition = declared.definition?;
+        if std::ptr::eq(declared_definition, used) {
+            return None;
+        }
         let mut current =
             self.global_type(namespace.as_deref(), local)
                 .map(|found| XsdTypeRef {
@@ -1892,6 +1946,123 @@ impl XsdModelSet {
             }
         }
         None
+    }
+
+    /// Derivation methods from `derived` to `target`: `(extension,
+    /// restriction)` used along the way (both false when they are the same
+    /// type), `Some(None)` when `derived` does not derive from `target` and
+    /// `None` when this cannot be decided.
+    pub(crate) fn derivation_methods(
+        &self,
+        derived: XsdTypeRef<'_>,
+        target: XsdTypeRef<'_>,
+    ) -> Option<Option<(bool, bool)>> {
+        let mut current = derived;
+        let (mut extension, mut restriction) = (false, false);
+        for _ in 0..MAX_DEPTH {
+            let same = match (current.definition, target.definition) {
+                (Some(a), Some(b)) => std::ptr::eq(a, b),
+                (None, None) => match (current.name, target.name) {
+                    (Some(a), Some(b)) => a.namespace == b.namespace && a.local == b.local,
+                    _ => return None,
+                },
+                _ => false,
+            };
+            if same {
+                return Some(Some((extension, restriction)));
+            }
+            let Some(definition) = current.definition else {
+                let (Some(a), Some(b)) = (current.name, target.name) else {
+                    return None;
+                };
+                if !a.is_builtin() || !b.is_builtin() {
+                    return Some(None);
+                }
+                let (a, b) = (
+                    crate::datatypes::BuiltinType::from_local_name(&a.local)?,
+                    crate::datatypes::BuiltinType::from_local_name(&b.local)?,
+                );
+                return Some(
+                    a.derives_from(b)
+                        .then_some((extension, restriction || a != b)),
+                );
+            };
+            match definition.derivation {
+                Some(XsdDerivation::Restriction) => restriction = true,
+                Some(XsdDerivation::Extension) => extension = true,
+                // A list or union is derived from nothing but its own base.
+                Some(_) => return Some(None),
+                None => return None,
+            }
+            current = self.base_type(current)?;
+        }
+        None
+    }
+
+    /// `xsi:type` rules for an element of a simple type: the type named must
+    /// be derived from it (or be, or derive from, a member of the union it
+    /// is), unless `block` forbids the derivation method.
+    fn simple_xsi_type_problem(
+        &self,
+        element: &XsdElementDecl,
+        declared: XsdTypeRef<'_>,
+        used: XsdTypeRef<'_>,
+    ) -> Option<XsiTypeProblem> {
+        let verdict = |(extension, restriction): (bool, bool)| {
+            if extension && element.blocks_extension {
+                Some(XsiTypeProblem::Blocked("extension"))
+            } else if restriction && element.blocks_restriction {
+                Some(XsiTypeProblem::Blocked("restriction"))
+            } else {
+                None
+            }
+        };
+        if let Some(methods) = self.derivation_methods(used, declared)? {
+            return verdict(methods);
+        }
+        // A union: its members (unions too), and what derives from them.
+        match self.union_member_derivation(used, declared, 0)? {
+            Some(methods) => verdict(methods),
+            None => Some(XsiTypeProblem::NotDerived),
+        }
+    }
+
+    /// Derivation of `used` from a member of the union `union`, nested unions
+    /// included (same result shape as [`Self::derivation_methods`]).
+    pub(crate) fn union_member_derivation(
+        &self,
+        used: XsdTypeRef<'_>,
+        union: XsdTypeRef<'_>,
+        depth: usize,
+    ) -> Option<Option<(bool, bool)>> {
+        let definition = union.definition?;
+        if definition.derivation != Some(XsdDerivation::Union) || depth > MAX_DEPTH {
+            return Some(None);
+        }
+        let mut members = Vec::new();
+        for name in &definition.member_types {
+            members.push(self.resolve_type(union.schema, name));
+        }
+        for inline in &definition.inline_types {
+            members.push(XsdTypeRef {
+                schema: union.schema,
+                name: None,
+                definition: Some(inline),
+            });
+        }
+        let mut undecided = false;
+        for member in members {
+            match self.derivation_methods(used, member) {
+                Some(Some(methods)) => return Some(Some(methods)),
+                Some(None) => match self.union_member_derivation(used, member, depth + 1) {
+                    Some(Some(methods)) => return Some(Some(methods)),
+                    Some(None) => {}
+                    None => undecided = true,
+                },
+                None => undecided = true,
+            }
+        }
+        if undecided { None } else { Some(None) }
     }
 
     /// Whether the content model of a type has a `processContents="skip"`
@@ -1949,9 +2120,10 @@ impl XsdModelSet {
     ) -> Option<Located<'a, XsdElementDecl>> {
         let mut particles = Vec::new();
         self.content_particles(parent, 0, &mut particles);
-        // Declarations by name first, substitution group members last (the
-        // member search scans every global declaration).
-        [(true, false), (false, false), (true, true), (false, true)]
+        // Exact names first (declarations, then substitution group members), the
+        // namespace-lenient match (chameleon schemas) last (the member search
+        // scans every global declaration).
+        [(true, false), (true, true), (false, false), (false, true)]
             .into_iter()
             .find_map(|(strict, substitutions)| {
                 particles.iter().find_map(|&(schema, particle)| {
@@ -2148,6 +2320,11 @@ impl XsdModelSet {
         if definition.complex
             && let Some(base) = self.base_type(reference)
         {
+            if definition.derivation == Some(XsdDerivation::Extension) {
+                // A prohibited use removes nothing from the base type of an
+                // extension: it is ignored.
+                uses.retain(|usage| usage.item.usage != XsdUse::Prohibited);
+            }
             let own = uses.len();
             let mut inherited = Vec::new();
             self.collect_attribute_uses(base, depth + 1, &mut inherited);

@@ -1444,3 +1444,191 @@ fn a_redefined_type_extends_the_definition_it_replaces() {
     assert!(!validate_document("<root><c/></root>", &schema).is_empty());
     std::fs::remove_dir_all(directory).ok();
 }
+
+/// Schema problems of `body` wrapped in an `xs:schema`.
+fn schema_problems(body: &str) -> Vec<String> {
+    let source =
+        format!(r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">{body}</xs:schema>"#);
+    merge_schemas([parse_xsd(&source).unwrap()]).problems
+}
+
+#[test]
+fn checks_final_and_the_kind_of_base_of_derivations() {
+    let derived = |base: &str, derivation: &str| {
+        format!(
+            r#"{base}<xs:complexType name="d"><xs:complexContent><xs:{derivation} base="b"><xs:sequence/></xs:{derivation}></xs:complexContent></xs:complexType>"#
+        )
+    };
+    let plain = r#"<xs:complexType name="b"><xs:sequence/></xs:complexType>"#;
+    assert!(schema_problems(&derived(plain, "extension")).is_empty());
+    let final_extension =
+        r#"<xs:complexType name="b" final="extension"><xs:sequence/></xs:complexType>"#;
+    assert_eq!(
+        schema_problems(&derived(final_extension, "extension")).len(),
+        1
+    );
+    assert!(schema_problems(&derived(final_extension, "restriction")).is_empty());
+    let source = format!(
+        r##"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" finalDefault="#all">{}</xs:schema>"##,
+        derived(plain, "restriction")
+    );
+    assert_eq!(
+        merge_schemas([parse_xsd(&source).unwrap()]).problems.len(),
+        1
+    );
+    // A complexContent derivation of a simple type.
+    let simple = r#"<xs:simpleType name="b"><xs:restriction base="xs:string"/></xs:simpleType>"#;
+    assert_eq!(schema_problems(&derived(simple, "extension")).len(), 1);
+    // A simpleContent restriction of a simple type.
+    let restriction = r#"<xs:complexType name="d"><xs:simpleContent><xs:restriction base="xs:string"/></xs:simpleContent></xs:complexType>"#;
+    assert_eq!(schema_problems(restriction).len(), 1);
+}
+
+#[test]
+fn checks_element_attribute_and_all_rules_of_restrictions_and_extensions() {
+    let restriction = |base: &str, derived: &str| {
+        schema_problems(&format!(
+            r#"<xs:complexType name="b">{base}</xs:complexType>
+               <xs:complexType name="d"><xs:complexContent><xs:restriction base="b">{derived}</xs:restriction></xs:complexContent></xs:complexType>"#
+        ))
+    };
+    let element = |attributes: &str| {
+        format!(
+            r#"<xs:sequence><xs:element name="e" type="xs:string" {attributes}/></xs:sequence>"#
+        )
+    };
+    assert!(restriction(&element(""), &element("")).is_empty());
+    assert!(restriction(&element(r#"nillable="true""#), &element("")).is_empty());
+    assert_eq!(
+        restriction(&element(""), &element(r#"nillable="true""#)).len(),
+        1
+    );
+    assert_eq!(restriction(&element(r#"fixed="a""#), &element("")).len(), 1);
+    assert_eq!(
+        restriction(&element(r##"block="#all""##), &element("")).len(),
+        1
+    );
+    assert_eq!(
+        restriction(
+            r#"<xs:sequence><xs:element name="e" type="xs:string"/></xs:sequence>"#,
+            r#"<xs:sequence><xs:element name="e" type="xs:int"/></xs:sequence>"#
+        )
+        .len(),
+        1
+    );
+    // A choice cannot restrict a sequence.
+    assert!(
+        !restriction(
+            r#"<xs:sequence><xs:element name="a"/><xs:element name="b"/></xs:sequence>"#,
+            r#"<xs:choice><xs:element name="a"/><xs:element name="b"/></xs:choice>"#
+        )
+        .is_empty()
+    );
+    // Attributes: a required one stays required, a fixed one stays fixed.
+    let attribute = |usage: &str| format!(r#"<xs:attribute name="a" use="{usage}" fixed="1"/>"#);
+    assert!(restriction(&attribute("required"), &attribute("required")).is_empty());
+    assert_eq!(
+        restriction(&attribute("required"), &attribute("prohibited")).len(),
+        1
+    );
+    assert_eq!(
+        restriction(
+            &attribute("optional"),
+            r#"<xs:attribute name="a" fixed="2"/>"#
+        )
+        .len(),
+        1
+    );
+    // An extension cannot add an xs:all to a type that has content.
+    let extension = |content: &str| {
+        schema_problems(&format!(
+            r#"<xs:complexType name="b"><xs:sequence><xs:element name="x"/></xs:sequence></xs:complexType>
+               <xs:complexType name="d"><xs:complexContent><xs:extension base="b">{content}</xs:extension></xs:complexContent></xs:complexType>"#
+        ))
+    };
+    assert!(extension(r#"<xs:sequence><xs:element name="y"/></xs:sequence>"#).is_empty());
+    assert_eq!(
+        extension(r#"<xs:all><xs:element name="y"/></xs:all>"#).len(),
+        1
+    );
+}
+
+#[test]
+fn checks_xsd_facets_and_occurrence_bounds_of_schema_documents() {
+    let check = |body: &str| {
+        let source =
+            format!(r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">{body}</xs:schema>"#);
+        schema_check::check_schema_document(&source).len()
+    };
+    let all = |attributes: &str| {
+        format!(
+            r#"<xs:complexType name="t"><xs:all {attributes}><xs:element name="a"/></xs:all></xs:complexType>"#
+        )
+    };
+    assert_eq!(check(&all("")), 0);
+    assert_eq!(check(&all(r#"minOccurs="0""#)), 0);
+    assert_eq!(check(&all(r#"maxOccurs="2""#)), 1);
+    // Bounds beyond usize are allowed.
+    assert_eq!(
+        check(
+            r#"<xs:complexType name="t"><xs:sequence minOccurs="79228162514244337593543950335" maxOccurs="unbounded"><xs:element name="a"/></xs:sequence></xs:complexType>"#
+        ),
+        0
+    );
+    assert_eq!(
+        check(
+            r#"<xs:simpleType name="s"><xs:restriction base="xs:string"><xs:length value="3"/><xs:maxLength value="5"/></xs:restriction></xs:simpleType>"#
+        ),
+        1
+    );
+}
+
+#[test]
+fn checks_xsi_type_of_simple_types_nil_and_undeclared_roots() {
+    let schema = parse_xsd(
+        r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <xs:simpleType name="Base"><xs:restriction base="xs:string"><xs:maxLength value="5"/></xs:restriction></xs:simpleType>
+  <xs:simpleType name="Short"><xs:restriction base="Base"><xs:maxLength value="2"/></xs:restriction></xs:simpleType>
+  <xs:simpleType name="Other"><xs:restriction base="xs:string"/></xs:simpleType>
+  <xs:element name="open" type="Base"/>
+  <xs:element name="closed" type="Base" block="restriction"/>
+  <xs:element name="nil" nillable="true" type="xs:string"/>
+  <xs:element name="plain" type="xs:string"/>
+</xs:schema>"#,
+    )
+    .unwrap();
+    let x = r#"xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance""#;
+    let messages = |source: String| -> Vec<String> {
+        validate_document(&source, &schema)
+            .into_iter()
+            .map(|diagnostic| diagnostic.message)
+            .collect()
+    };
+    assert!(messages(format!(r#"<open {x} xsi:type="Short">ab</open>"#)).is_empty());
+    assert_eq!(
+        messages(format!(r#"<open {x} xsi:type="Other">ab</open>"#)).len(),
+        1
+    );
+    assert_eq!(
+        messages(format!(r#"<closed {x} xsi:type="Short">ab</closed>"#)).len(),
+        1
+    );
+    assert!(messages(format!(r#"<closed {x}>ab</closed>"#)).is_empty());
+    // Any xsi:nil on a declaration that is not nillable, content in a nil element.
+    assert_eq!(
+        messages(format!(r#"<plain {x} xsi:nil="false">a</plain>"#)).len(),
+        1
+    );
+    assert!(messages(format!(r#"<nil {x} xsi:nil="true"/>"#)).is_empty());
+    assert_eq!(
+        messages(format!(r#"<nil {x} xsi:nil="true">text</nil>"#)).len(),
+        1
+    );
+    // A root without declaration is judged by its xsi:type.
+    assert!(messages(format!(r#"<other {x} xsi:type="Short">ab</other>"#)).is_empty());
+    assert_eq!(
+        messages(format!(r#"<other {x} xsi:type="Short">abcdef</other>"#)).len(),
+        1
+    );
+    assert_eq!(messages(r#"<other/>"#.to_owned()).len(), 1);
+}

@@ -72,16 +72,36 @@ pub(crate) fn validate_attributes(
             continue;
         }
         present.push((namespace.clone(), local.to_owned()));
+        // A prohibited use is no use at all (XML Schema 1.0, 3.4.2): the
+        // attribute is then matched by the wildcard, if any.
+        let matches = |usage: &&crate::model::Located<'_, crate::model::XsdAttributeDecl>| {
+            usage.item.name == local
+                && (usage.item.namespace == namespace
+                    // A reference to a global attribute of a chameleon schema
+                    // (no target namespace, included by one with a namespace)
+                    // takes the namespace of the including schema.
+                    || ((usage.item.reference.is_some()
+                        || models
+                            .models()
+                            .get(usage.schema)
+                            .is_some_and(|model| {
+                                model.attribute_form_qualified && model.target_namespace.is_none()
+                            }))
+                        && usage.item.namespace.is_none()
+                        && namespace.is_some()
+                        && models
+                            .models()
+                            .iter()
+                            .any(|model| model.target_namespace == namespace)))
+        };
         let usage = uses
             .iter()
-            .find(|usage| usage.item.name == local && usage.item.namespace == namespace);
+            .filter(|usage| usage.item.usage != XsdUse::Prohibited)
+            .find(matches);
+        let prohibited = uses
+            .iter()
+            .any(|usage| usage.item.usage == XsdUse::Prohibited && matches(&usage));
         match usage {
-            Some(usage) if usage.item.usage == XsdUse::Prohibited => {
-                diagnostics.push(XsdDiagnostic {
-                    kind: XsdDiagnosticKind::UnexpectedAttribute,
-                    message: format!("attribute @{key} is prohibited on <{element_name}>"),
-                });
-            }
             Some(usage) => {
                 let declaration = models.attribute_declaration(*usage);
                 let fixed = usage
@@ -90,9 +110,8 @@ pub(crate) fn validate_attributes(
                     .as_deref()
                     .or(declaration.item.fixed.as_deref());
                 if let Some(fixed) = fixed
-                    && attribute
-                        .unescape_value()
-                        .is_ok_and(|value| !same_value(local, value.as_ref(), fixed))
+                    && crate::model::normalized_attribute_value(&attribute)
+                        .is_some_and(|value| !same_value(local, &value, fixed))
                 {
                     diagnostics.push(XsdDiagnostic {
                         kind: XsdDiagnosticKind::FixedValue,
@@ -127,7 +146,11 @@ pub(crate) fn validate_attributes(
                     Some(_) => {}
                     None => diagnostics.push(XsdDiagnostic {
                         kind: XsdDiagnosticKind::UnexpectedAttribute,
-                        message: format!("attribute @{key} not allowed on <{element_name}>"),
+                        message: if prohibited {
+                            format!("attribute @{key} is prohibited on <{element_name}>")
+                        } else {
+                            format!("attribute @{key} not allowed on <{element_name}>")
+                        },
                     }),
                 }
             }
@@ -162,11 +185,11 @@ pub(crate) fn validate_nil(
         let Ok(key) = std::str::from_utf8(attribute.key.as_ref()) else {
             return false;
         };
+        // Any `xsi:nil` (even `false`) on a declaration that is not
+        // nillable is an error (cvc-elt 3.1).
         key.split_once(':').is_some_and(|(prefix, local)| {
             local == "nil" && lookup(prefix).as_deref() == Some(XSI_NAMESPACE)
-        }) && attribute
-            .unescape_value()
-            .is_ok_and(|value| matches!(value.trim(), "true" | "1"))
+        })
     });
     match resolved {
         Some(resolved) if is_nil && !resolved.declaration.item.nillable => {

@@ -200,7 +200,7 @@ fn is_builtin_type(name: &XsdQName) -> bool {
 impl XsdModelSet {
     /// Effective declaration of an attribute use: the global declaration for
     /// a `ref`.
-    fn attribute_target<'a>(
+    pub(crate) fn attribute_target<'a>(
         &'a self,
         usage: Located<'a, XsdAttributeDecl>,
     ) -> Located<'a, XsdAttributeDecl> {
@@ -516,7 +516,7 @@ impl XsdModelSet {
         }
     }
 
-    fn check_default<'a>(
+    pub(crate) fn check_default<'a>(
         &'a self,
         _schema: usize,
         default: Option<&str>,

@@ -295,6 +295,20 @@ fn check_lengths<'a>(
             problems,
         );
     }
+    if let Some((_, length)) = length
+        && let Some((facet, _)) = minimum.or(maximum)
+    {
+        // XML Schema 1.0 Part 2 §4.3.1.4: `length` with `minLength` or
+        // `maxLength` in the same derivation step is an error.
+        report(
+            facet,
+            format!(
+                "{} cannot be combined with length ({length}) in the same restriction",
+                facet.name
+            ),
+            problems,
+        );
+    }
     if let Some((facet, length)) = length {
         if let Some((_, minimum)) = minimum
             && minimum > length

@@ -832,14 +832,14 @@ fn problem(
 fn occurs(document: &SchemaDocument<'_>, element: usize) -> (usize, Option<usize>) {
     let min = document
         .value(element, "minOccurs")
-        .and_then(|value| collapse(&value).parse().ok())
+        .and_then(|value| crate::parse_count(&collapse(&value)))
         .unwrap_or(1);
     let max = match document
         .value(element, "maxOccurs")
         .map(|value| collapse(&value))
     {
         Some(value) if value == "unbounded" => None,
-        Some(value) => value.parse().ok().or(Some(1)),
+        Some(value) => crate::parse_count(&value).or(Some(1)),
         None => Some(1),
     };
     (min, max)
@@ -1027,6 +1027,36 @@ fn check_constraints(
                 }
             }
         }
+        "all" | "choice" | "sequence"
+            if parent == Some("group")
+                && document
+                    .parent(element)
+                    .is_some_and(|group| document.has_attribute(group, "name"))
+                && (document.has_attribute(element, "minOccurs")
+                    || document.has_attribute(element, "maxOccurs")) =>
+        {
+            problems.push(problem(
+                document,
+                element,
+                INVALID_COMBINATION,
+                "the model group of a global xs:group has no minOccurs or maxOccurs",
+            ));
+        }
+        _ => {}
+    }
+    if local == "all" {
+        // XML Schema 1.0: minOccurs 0 or 1, maxOccurs 1.
+        let (min, max) = occurs(document, element);
+        if min > 1 || max != Some(1) {
+            problems.push(problem(
+                document,
+                element,
+                INVALID_VALUE,
+                "an xs:all group has minOccurs 0 or 1 and maxOccurs 1",
+            ));
+        }
+    }
+    match local {
         "all"
             if !matches!(
                 parent,
