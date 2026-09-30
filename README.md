@@ -14,6 +14,7 @@ XML language support for Zed, including XML, XSD, XSLT, SVG, WSDL, plist, XJB an
 - Matching start/end tag name highlighting (`textDocument/documentHighlight`), including prefixed names and malformed documents.
 - Linked editing of start/end tag names (`textDocument/linkedEditingRange`, Zed `linked_edits` setting): renaming `<ns:item>` also renames `</ns:item>`, including `-`, `:` and `.` in names.
 - Rename symbol (`textDocument/prepareRename` + `textDocument/rename`): element names (start and end tags), namespace prefixes (the `xmlns:ns` declaration and every use in its scope, including `type="ns:T"` in XSD and `xsi:type`, honouring nested redeclarations), and global XSD components (`xs:element`, `xs:attribute`, `xs:complexType`, `xs:simpleType`, `xs:group`, `xs:attributeGroup`) with their `ref`/`type`/`base`/`itemType`/`memberTypes`/`substitutionGroup` references and matching elements in open XML documents bound to the schema. Invalid XML names are rejected.
+- Folding ranges (`textDocument/foldingRange`, LemMinX-style): multi-line elements fold up to the line before their end tag (which stays visible), multi-line start tags with many attributes, comments, CDATA sections, processing instructions, the `<!DOCTYPE ... [...]>` internal subset and nested `<!-- #region -->` / `<!-- #endregion -->` regions. The client `rangeLimit` is honoured. Zed only uses LSP folding ranges when `document_folding_ranges` is `"on"` (see below).
 - `xsi:schemaLocation` and `xsi:noNamespaceSchemaLocation` support.
 - Workspace-aware revalidation when an open XSD changes.
 
@@ -47,6 +48,18 @@ If Zed has a user or project formatter override, force XML formatting through th
   "languages": {
     "XML": {
       "formatter": "language_server"
+    }
+  }
+}
+```
+
+Zed uses tree-sitter and indentation folding by default. To use the server's folding ranges (regions, comments, DOCTYPE, CDATA...), enable them for XML:
+
+```json
+{
+  "languages": {
+    "XML": {
+      "document_folding_ranges": "on"
     }
   }
 }
