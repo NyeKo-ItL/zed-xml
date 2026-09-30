@@ -19,3 +19,13 @@ path = "dtd"
 [language_servers.xml-lsp]
 name = "XML Rust LSP"
 languages = ["XML", "DTD"]
+
+[[capabilities]]
+kind = "process:exec"
+command = "xml-lsp-0.11.0.exe"
+args = ["--version"]
+
+[[capabilities]]
+kind = "process:exec"
+command = "xml-lsp-0.11.0"
+args = ["--version"]
