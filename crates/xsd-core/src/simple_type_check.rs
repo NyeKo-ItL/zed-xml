@@ -338,10 +338,10 @@ fn check_lengths<'a>(
     };
     let base_length = base(&|facets| facets.length.as_ref());
     // The built-in list types have at least one item.
-    let builtin_list = matches!(simple.variety, Variety::List(_))
-        && ["NMTOKENS", "IDREFS", "ENTITIES"]
-            .iter()
-            .any(|name| simple.name.ends_with(name));
+    let builtin_list = matches!(
+        simple.variety,
+        Variety::Atomic(BuiltinType::NmTokens | BuiltinType::IdRefs | BuiltinType::Entities)
+    );
     let base_minimum = base(&|facets| facets.min_length.as_ref()).or(builtin_list.then_some(1));
     let base_maximum = base(&|facets| facets.max_length.as_ref());
     if let Some((facet, value)) = length {
