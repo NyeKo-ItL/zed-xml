@@ -3,6 +3,7 @@
 pub mod diff;
 mod format;
 pub mod tags;
+pub mod wellformed;
 
 pub use format::{
     FormatOptions, FormattedRange, LineEnding, format_xml, format_xml_range, format_xml_with,
@@ -10,7 +11,12 @@ pub use format::{
 
 use std::collections::BTreeSet;
 
-use quick_xml::{Reader, events::Event};
+use quick_xml::{
+    Reader,
+    errors::{Error as QuickXmlError, IllFormedError, SyntaxError},
+    events::Event,
+};
+use wellformed::{XmlProblemKind, check_well_formedness};
 
 const MAX_XML_SOURCE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_XML_DEPTH: usize = 512;
@@ -31,12 +37,29 @@ pub enum XmlDiagnosticKind {
     Structure,
 }
 
-/// Diagnostic d'analyse exprimé avec un offset UTF-8 dans la source.
+/// Diagnostic d'analyse exprimé avec des offsets UTF-8 dans la source.
 #[derive(Debug, PartialEq, Eq)]
 pub struct XmlDiagnostic {
     pub kind: XmlDiagnosticKind,
     pub message: String,
     pub offset: usize,
+    /// Fin de l'étendue signalée (`offset` pour un diagnostic ponctuel).
+    pub end: usize,
+    /// Identifiant stable du problème ([`wellformed::XmlProblemKind::id`]),
+    /// publié dans `data.kind` pour les correctifs rapides.
+    pub rule: Option<&'static str>,
+}
+
+impl XmlDiagnostic {
+    fn at(kind: XmlDiagnosticKind, message: String, offset: usize) -> Self {
+        Self {
+            kind,
+            message,
+            offset,
+            end: offset,
+            rule: None,
+        }
+    }
 }
 
 impl XmlDiagnostic {
@@ -56,41 +79,55 @@ pub struct XmlParseResult {
 }
 
 /// Analyse une source XML et retourne les diagnostics récupérables pendant l'édition.
+///
+/// Les erreurs d'appariement des balises, de balise non terminée et de
+/// référence non fermée signalées par `quick-xml` (qui s'arrête à la première
+/// erreur) sont remplacées par les problèmes localisés de
+/// [`wellformed::check_well_formedness`] lorsque celui-ci en relève ; les
+/// attributs dupliqués, valeurs sans guillemets et caractères non échappés
+/// viennent toujours de ce dernier.
 pub fn parse_xml(source: &str) -> XmlParseResult {
     if source.len() > MAX_XML_SOURCE_BYTES {
         return XmlParseResult {
             document: XmlDocument::default(),
-            diagnostics: vec![XmlDiagnostic {
-                kind: XmlDiagnosticKind::Syntax,
-                message: "document XML trop volumineux".to_owned(),
-                offset: 0,
-            }],
+            diagnostics: vec![XmlDiagnostic::at(
+                XmlDiagnosticKind::Syntax,
+                "document XML trop volumineux".to_owned(),
+                0,
+            )],
         };
     }
     let mut reader = Reader::from_str(source);
     let mut stack = Vec::new();
     let mut document = XmlDocument::default();
-    let mut diagnostics = Vec::new();
+    // Diagnostics `quick-xml` et indicateur « couvert par l'analyse tolérante ».
+    let mut diagnostics: Vec<(XmlDiagnostic, bool)> = Vec::new();
 
     loop {
         match reader.read_event() {
             Ok(Event::Start(element)) => {
                 if stack.len() >= MAX_XML_DEPTH {
-                    diagnostics.push(XmlDiagnostic {
-                        kind: XmlDiagnosticKind::Structure,
-                        message: "profondeur XML maximale dépassée".to_owned(),
-                        offset: reader.buffer_position() as usize,
-                    });
+                    diagnostics.push((
+                        XmlDiagnostic::at(
+                            XmlDiagnosticKind::Structure,
+                            "profondeur XML maximale dépassée".to_owned(),
+                            reader.buffer_position() as usize,
+                        ),
+                        false,
+                    ));
                     break;
                 }
                 let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
                 if stack.is_empty() {
                     if document.root.is_some() {
-                        diagnostics.push(XmlDiagnostic {
-                            kind: XmlDiagnosticKind::Structure,
-                            message: "XML doit contenir un seul élément racine".to_owned(),
-                            offset: reader.buffer_position() as usize,
-                        });
+                        diagnostics.push((
+                            XmlDiagnostic::at(
+                                XmlDiagnosticKind::Structure,
+                                "XML doit contenir un seul élément racine".to_owned(),
+                                reader.buffer_position() as usize,
+                            ),
+                            false,
+                        ));
                     } else {
                         document.root = Some(name.clone());
                     }
@@ -102,11 +139,14 @@ pub fn parse_xml(source: &str) -> XmlParseResult {
                 let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
                 if stack.is_empty() {
                     if document.root.is_some() {
-                        diagnostics.push(XmlDiagnostic {
-                            kind: XmlDiagnosticKind::Structure,
-                            message: "XML doit contenir un seul élément racine".to_owned(),
-                            offset: reader.buffer_position() as usize,
-                        });
+                        diagnostics.push((
+                            XmlDiagnostic::at(
+                                XmlDiagnosticKind::Structure,
+                                "XML doit contenir un seul élément racine".to_owned(),
+                                reader.buffer_position() as usize,
+                            ),
+                            false,
+                        ));
                     } else {
                         document.root = Some(name);
                     }
@@ -115,40 +155,78 @@ pub fn parse_xml(source: &str) -> XmlParseResult {
             }
             Ok(Event::End(element)) => {
                 let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
-                match stack.pop() {
-                    Some(open_name) if open_name == name => {}
-                    Some(open_name) => diagnostics.push(XmlDiagnostic {
-                        kind: XmlDiagnosticKind::Structure,
-                        message: format!("balise fermante </{name}> attend </{open_name}>"),
-                        offset: reader.buffer_position() as usize,
-                    }),
-                    None => diagnostics.push(XmlDiagnostic {
-                        kind: XmlDiagnosticKind::Structure,
-                        message: format!("balise fermante inattendue </{name}>"),
-                        offset: reader.buffer_position() as usize,
-                    }),
-                }
+                let message = match stack.pop() {
+                    Some(open_name) if open_name == name => continue,
+                    Some(open_name) => format!("balise fermante </{name}> attend </{open_name}>"),
+                    None => format!("balise fermante inattendue </{name}>"),
+                };
+                diagnostics.push((
+                    XmlDiagnostic::at(
+                        XmlDiagnosticKind::Structure,
+                        message,
+                        reader.buffer_position() as usize,
+                    ),
+                    true,
+                ));
             }
             Ok(Event::Eof) => break,
             Ok(_) => {}
             Err(error) => {
-                diagnostics.push(XmlDiagnostic {
-                    kind: XmlDiagnosticKind::Syntax,
-                    message: format!("erreur XML : {error}"),
-                    offset: reader.buffer_position() as usize,
-                });
+                let covered = matches!(
+                    error,
+                    QuickXmlError::IllFormed(
+                        IllFormedError::MismatchedEndTag { .. }
+                            | IllFormedError::UnmatchedEndTag(_)
+                            | IllFormedError::UnclosedReference
+                    ) | QuickXmlError::Syntax(SyntaxError::UnclosedTag)
+                );
+                diagnostics.push((
+                    XmlDiagnostic::at(
+                        XmlDiagnosticKind::Syntax,
+                        format!("erreur XML : {error}"),
+                        reader.buffer_position() as usize,
+                    ),
+                    covered,
+                ));
                 break;
             }
         }
     }
 
     if let Some(open_name) = stack.last() {
-        diagnostics.push(XmlDiagnostic {
-            kind: XmlDiagnosticKind::Structure,
-            message: format!("balise non fermée <{open_name}>"),
-            offset: source.len(),
-        });
+        diagnostics.push((
+            XmlDiagnostic::at(
+                XmlDiagnosticKind::Structure,
+                format!("balise non fermée <{open_name}>"),
+                source.len(),
+            ),
+            true,
+        ));
     }
+
+    let problems = check_well_formedness(source);
+    let replaces_covered = problems.iter().any(|problem| {
+        !matches!(
+            problem.kind,
+            XmlProblemKind::DuplicateAttribute { .. } | XmlProblemKind::UnquotedAttributeValue
+        )
+    });
+    let mut diagnostics = diagnostics
+        .into_iter()
+        .filter(|(_, covered)| !(replaces_covered && *covered))
+        .map(|(diagnostic, _)| diagnostic)
+        .collect::<Vec<_>>();
+    diagnostics.extend(problems.into_iter().map(|problem| XmlDiagnostic {
+        kind: if problem.kind.is_structural() {
+            XmlDiagnosticKind::Structure
+        } else {
+            XmlDiagnosticKind::Syntax
+        },
+        rule: Some(problem.kind.id()),
+        message: problem.message,
+        offset: problem.range.start,
+        end: problem.range.end,
+    }));
 
     XmlParseResult {
         document,
@@ -355,24 +433,62 @@ mod tests {
 
     #[test]
     fn reports_a_mismatched_closing_tag() {
+        // `</root>` ferme la racine : l'élément <child> reste non fermé.
         let result = parse_xml("<root><child></root>");
 
-        assert_eq!(result.diagnostics.len(), 2);
-        assert!(
-            result.diagnostics[0]
-                .message
-                .contains("expected `</child>`")
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(result.diagnostics[0].message, "balise non fermée <child>");
+        assert_eq!(result.diagnostics[0].code(), "xml-structure");
+        assert_eq!(result.diagnostics[0].rule, Some("unclosedElement"));
+        assert_eq!(
+            (result.diagnostics[0].offset, result.diagnostics[0].end),
+            (7, 12)
         );
-        assert!(result.diagnostics[1].message.contains("non fermée <child>"));
+
+        let result = parse_xml("<root><child></chidl></root>");
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].message,
+            "balise fermante </chidl> attend </child>"
+        );
+        assert_eq!(result.diagnostics[0].rule, Some("mismatchedEndTag"));
     }
 
     #[test]
     fn reports_an_unclosed_tag_at_end_of_source() {
         let result = parse_xml("<root><child>");
 
+        assert_eq!(result.diagnostics.len(), 2);
+        assert_eq!(result.diagnostics[1].offset, "<root><".len());
+        assert!(result.diagnostics[0].message.contains("non fermée <root>"));
+        assert!(result.diagnostics[1].message.contains("non fermée <child>"));
+    }
+
+    #[test]
+    fn keeps_quick_xml_diagnostics_not_covered_by_the_tolerant_checks() {
+        let result = parse_xml("<a/><b/>");
         assert_eq!(result.diagnostics.len(), 1);
-        assert_eq!(result.diagnostics[0].offset, "<root><child>".len());
-        assert!(result.diagnostics[0].message.contains("non fermée <child>"));
+        assert_eq!(result.diagnostics[0].rule, None);
+        assert!(
+            result.diagnostics[0]
+                .message
+                .contains("seul élément racine")
+        );
+
+        // Attributs dupliqués et caractères non échappés : diagnostics ajoutés.
+        let result = parse_xml("<a x=\"1\" x=\"2\">1 & 2</a>");
+        let rules = result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.rule, diagnostic.code()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rules,
+            vec![
+                (Some("duplicateAttribute"), "xml-syntax"),
+                (Some("unescapedCharacter"), "xml-syntax"),
+            ]
+        );
     }
 
     #[test]

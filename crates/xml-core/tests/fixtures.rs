@@ -20,17 +20,22 @@ fn valid_fixture_builds_a_document_and_formats_idempotently() {
 fn malformed_fixture_reports_syntax_and_structure() {
     let parsed = parse_xml(MALFORMED);
 
+    // `</catalog>` ferme la racine : <book> et <title> restent non fermés,
+    // chacun signalé sur le nom de sa balise ouvrante.
+    let unclosed = parsed
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.kind == XmlDiagnosticKind::Structure)
+        .map(|diagnostic| &MALFORMED[diagnostic.offset..diagnostic.end])
+        .collect::<Vec<_>>();
+    assert_eq!(unclosed, vec!["book", "title"]);
+
+    let parsed = parse_xml(&MALFORMED.replace("<title>", "<title"));
     assert!(
         parsed
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.kind == XmlDiagnosticKind::Syntax)
-    );
-    assert!(
-        parsed
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.kind == XmlDiagnosticKind::Structure)
     );
 }
 

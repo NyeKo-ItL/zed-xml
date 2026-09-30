@@ -4,6 +4,7 @@ pub mod model;
 
 use std::{
     collections::HashMap,
+    ops::Range,
     path::{Component, Path, PathBuf},
     str,
 };
@@ -152,17 +153,57 @@ pub struct XsdCompletion {
     pub insert_text: String,
 }
 
+/// Règle de validation XSD à l'origine d'un diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XsdDiagnosticKind {
+    MissingRoot,
+    UnknownRoot,
+    UnexpectedElement,
+    UnexpectedOrder,
+    MissingElement,
+    TooManyElements,
+    FixedValue,
+    InvalidContent,
+    NotNillable,
+    UnexpectedAttribute,
+    MissingAttribute,
+}
+
+impl XsdDiagnosticKind {
+    /// Identifiant stable de la règle (publié dans `data.rule` côté LSP).
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::MissingRoot => "missingRoot",
+            Self::UnknownRoot => "unknownRoot",
+            Self::UnexpectedElement => "unexpectedElement",
+            Self::UnexpectedOrder => "unexpectedOrder",
+            Self::MissingElement => "missingElement",
+            Self::TooManyElements => "tooManyElements",
+            Self::FixedValue => "fixedValue",
+            Self::InvalidContent => "invalidContent",
+            Self::NotNillable => "notNillable",
+            Self::UnexpectedAttribute => "unexpectedAttribute",
+            Self::MissingAttribute => "missingAttribute",
+        }
+    }
+}
+
 /// Diagnostic de validation XSD minimal.
 #[derive(Debug, PartialEq, Eq)]
 pub struct XsdDiagnostic {
+    pub kind: XsdDiagnosticKind,
     pub message: String,
 }
 
-/// Diagnostic XSD associé à un offset dans le document XML.
+/// Diagnostic XSD associé à une étendue du document XML.
 #[derive(Debug, PartialEq, Eq)]
 pub struct LocatedXsdDiagnostic {
+    pub kind: XsdDiagnosticKind,
     pub message: String,
+    /// Début de la balise ouvrante concernée (`<`).
     pub offset: usize,
+    /// Fin du nom de cette balise (`offset` si l'élément est inconnu).
+    pub end: usize,
 }
 
 /// Parse un `xs:schema`, ses éléments et une première `xs:sequence`.
@@ -1278,91 +1319,110 @@ struct XmlFrame {
     name: String,
     children: Vec<String>,
     text: String,
+    /// Étendue `<name` de la balise ouvrante.
+    location: Range<usize>,
 }
 
-/// Vérifie le document XML et associe chaque diagnostic à un offset approximatif.
+/// Vérifie le document XML et associe chaque diagnostic à la balise ouvrante
+/// de l'élément concerné (l'élément fautif, ou le parent pour les règles de
+/// modèle de contenu).
 pub fn validate_document_located(source: &str, schema: &XsdSchema) -> Vec<LocatedXsdDiagnostic> {
-    validate_document(source, schema)
-        .into_iter()
-        .map(|diagnostic| LocatedXsdDiagnostic {
-            offset: diagnostic_offset(source, &diagnostic.message),
-            message: diagnostic.message,
-        })
-        .collect()
-}
-
-fn diagnostic_offset(source: &str, message: &str) -> usize {
-    let Some(start) = message.find('<') else {
-        return 0;
-    };
-    let Some(end) = message[start + 1..].find('>') else {
-        return 0;
-    };
-    let name = &message[start + 1..start + 1 + end];
-    source.find(&format!("<{name}")).unwrap_or_default()
-}
-
-/// Vérifie le document XML contre les éléments déclarés par le schéma.
-pub fn validate_document(source: &str, schema: &XsdSchema) -> Vec<XsdDiagnostic> {
-    let mut diagnostics = match root_element_name(source) {
-        Some(root) => validate_root(&root, schema),
-        None => vec![XsdDiagnostic {
-            message: "document XML sans élément racine".to_owned(),
-        }],
-    };
     let mut reader = Reader::from_str(source);
     let mut stack: Vec<XmlFrame> = Vec::new();
+    let mut diagnostics = Vec::new();
+    let mut root_checked = false;
+    let located = |diagnostics: Vec<XsdDiagnostic>, location: &Range<usize>| {
+        diagnostics
+            .into_iter()
+            .map(|diagnostic| LocatedXsdDiagnostic {
+                kind: diagnostic.kind,
+                message: diagnostic.message,
+                offset: location.start,
+                end: location.end,
+            })
+            .collect::<Vec<_>>()
+    };
 
     loop {
-        match reader.read_event() {
-            Ok(Event::Start(element)) => {
-                let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
-                diagnostics.extend(validate_attributes(schema, &name, &element));
-                diagnostics.extend(validate_nil(schema, &name, &element));
-                if let Some(parent) = stack.last_mut() {
-                    if !is_allowed_child(schema, &parent.name, &name) {
-                        diagnostics.push(XsdDiagnostic {
-                            message: format!("élément <{name}> interdit dans <{}>", parent.name),
-                        });
-                    }
-                    parent.children.push(name.clone());
-                }
-                stack.push(XmlFrame {
-                    name,
-                    children: Vec::new(),
-                    text: String::new(),
-                });
-            }
-            Ok(Event::Empty(element)) => {
-                let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
-                diagnostics.extend(validate_attributes(schema, &name, &element));
-                diagnostics.extend(validate_nil(schema, &name, &element));
-                if let Some(parent) = stack.last_mut() {
-                    if !is_allowed_child(schema, &parent.name, &name) {
-                        diagnostics.push(XsdDiagnostic {
-                            message: format!("élément <{name}> interdit dans <{}>", parent.name),
-                        });
-                    }
-                    parent.children.push(name);
-                }
-            }
+        let event_start = reader.buffer_position() as usize;
+        let event = reader.read_event();
+        let (element, empty) = match event {
+            Ok(Event::Start(element)) => (element, false),
+            Ok(Event::Empty(element)) => (element, true),
             Ok(Event::End(_)) => {
                 if let Some(frame) = stack.pop() {
-                    diagnostics.extend(validate_sequence_frame(&frame, schema));
-                    diagnostics.extend(validate_text_content(&frame, schema));
+                    diagnostics.extend(located(
+                        validate_sequence_frame(&frame, schema),
+                        &frame.location,
+                    ));
+                    diagnostics.extend(located(
+                        validate_text_content(&frame, schema),
+                        &frame.location,
+                    ));
                 }
+                continue;
             }
             Ok(Event::Text(text)) => {
                 if let Some(frame) = stack.last_mut() {
                     frame.text.push_str(&String::from_utf8_lossy(text.as_ref()));
                 }
+                continue;
             }
             Ok(Event::Eof) | Err(_) => break,
-            Ok(_) => {}
+            Ok(_) => continue,
+        };
+        let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
+        let start = source
+            .get(event_start..)
+            .and_then(|rest| rest.find('<'))
+            .map_or(event_start, |offset| event_start + offset);
+        let location = start..(start + 1 + element.name().as_ref().len()).min(source.len());
+        if !root_checked {
+            root_checked = true;
+            diagnostics.extend(located(validate_root(&name, schema), &location));
+        }
+        let mut element_diagnostics = validate_attributes(schema, &name, &element);
+        element_diagnostics.extend(validate_nil(schema, &name, &element));
+        if let Some(parent) = stack.last_mut() {
+            if !is_allowed_child(schema, &parent.name, &name) {
+                element_diagnostics.push(XsdDiagnostic {
+                    kind: XsdDiagnosticKind::UnexpectedElement,
+                    message: format!("élément <{name}> interdit dans <{}>", parent.name),
+                });
+            }
+            parent.children.push(name.clone());
+        }
+        diagnostics.extend(located(element_diagnostics, &location));
+        if !empty {
+            stack.push(XmlFrame {
+                name,
+                children: Vec::new(),
+                text: String::new(),
+                location,
+            });
         }
     }
 
+    if !root_checked {
+        diagnostics.push(LocatedXsdDiagnostic {
+            kind: XsdDiagnosticKind::MissingRoot,
+            message: "document XML sans élément racine".to_owned(),
+            offset: 0,
+            end: 0,
+        });
+    }
     diagnostics
+}
+
+/// Vérifie le document XML contre les éléments déclarés par le schéma.
+pub fn validate_document(source: &str, schema: &XsdSchema) -> Vec<XsdDiagnostic> {
+    validate_document_located(source, schema)
+        .into_iter()
+        .map(|diagnostic| XsdDiagnostic {
+            kind: diagnostic.kind,
+            message: diagnostic.message,
+        })
+        .collect()
 }
 
 fn validate_sequence_frame(frame: &XmlFrame, schema: &XsdSchema) -> Vec<XsdDiagnostic> {
@@ -1379,6 +1439,7 @@ fn validate_sequence_frame(frame: &XmlFrame, schema: &XsdSchema) -> Vec<XsdDiagn
         if let Some(index) = expected.iter().position(|name| name == child) {
             if !schema.alls.contains_key(&frame.name) && index < previous_index {
                 diagnostics.push(XsdDiagnostic {
+                    kind: XsdDiagnosticKind::UnexpectedOrder,
                     message: format!("ordre inattendu de <{child}> dans <{}>", frame.name),
                 });
             }
@@ -1404,6 +1465,7 @@ fn validate_sequence_frame(frame: &XmlFrame, schema: &XsdSchema) -> Vec<XsdDiagn
         {
             if count < element.occurs.min {
                 diagnostics.push(XsdDiagnostic {
+                    kind: XsdDiagnosticKind::MissingElement,
                     message: format!("élément <{child}> requis dans <{}>", frame.name),
                 });
             }
@@ -1411,6 +1473,7 @@ fn validate_sequence_frame(frame: &XmlFrame, schema: &XsdSchema) -> Vec<XsdDiagn
                 && count > max
             {
                 diagnostics.push(XsdDiagnostic {
+                    kind: XsdDiagnosticKind::TooManyElements,
                     message: format!("trop d’éléments <{child}> dans <{}>", frame.name),
                 });
             }
@@ -1438,6 +1501,7 @@ fn validate_text_content(frame: &XmlFrame, schema: &XsdSchema) -> Vec<XsdDiagnos
         && value != fixed
     {
         diagnostics.push(XsdDiagnostic {
+            kind: XsdDiagnosticKind::FixedValue,
             message: format!("contenu de <{}> différent de la valeur fixed", frame.name),
         });
     }
@@ -1460,6 +1524,7 @@ fn validate_text_content(frame: &XmlFrame, schema: &XsdSchema) -> Vec<XsdDiagnos
         && length != expected
     {
         diagnostics.push(XsdDiagnostic {
+            kind: XsdDiagnosticKind::InvalidContent,
             message: format!(
                 "contenu de <{}> de longueur incorrecte (attendu {expected} caractères)",
                 frame.name
@@ -1470,6 +1535,7 @@ fn validate_text_content(frame: &XmlFrame, schema: &XsdSchema) -> Vec<XsdDiagnos
         && length < min
     {
         diagnostics.push(XsdDiagnostic {
+            kind: XsdDiagnosticKind::InvalidContent,
             message: format!(
                 "contenu de <{}> trop court (minimum {min} caractères)",
                 frame.name
@@ -1480,6 +1546,7 @@ fn validate_text_content(frame: &XmlFrame, schema: &XsdSchema) -> Vec<XsdDiagnos
         && length > max
     {
         diagnostics.push(XsdDiagnostic {
+            kind: XsdDiagnosticKind::InvalidContent,
             message: format!(
                 "contenu de <{}> trop long (maximum {max} caractères)",
                 frame.name
@@ -1490,6 +1557,7 @@ fn validate_text_content(frame: &XmlFrame, schema: &XsdSchema) -> Vec<XsdDiagnos
         && Regex::new(pattern).is_ok_and(|regex| !regex.is_match(value))
     {
         diagnostics.push(XsdDiagnostic {
+            kind: XsdDiagnosticKind::InvalidContent,
             message: format!("contenu de <{}> ne respecte pas le motif XSD", frame.name),
         });
     }
@@ -1552,6 +1620,7 @@ fn validate_numeric_facets(
                 _ => number < limit,
             };
             (!valid).then(|| XsdDiagnostic {
+                kind: XsdDiagnosticKind::InvalidContent,
                 message: format!("contenu de <{element_name}> hors {label} du type {type_name}"),
             })
         })
@@ -1582,6 +1651,7 @@ fn validate_digit_facets(
         && digits != expected
     {
         diagnostics.push(XsdDiagnostic {
+            kind: XsdDiagnosticKind::InvalidContent,
             message: format!("contenu de <{element_name}> invalide (totalDigits={expected})"),
         });
     }
@@ -1589,6 +1659,7 @@ fn validate_digit_facets(
         && fraction > expected
     {
         diagnostics.push(XsdDiagnostic {
+            kind: XsdDiagnosticKind::InvalidContent,
             message: format!("contenu de <{element_name}> invalide (fractionDigits={expected})"),
         });
     }
@@ -1647,6 +1718,7 @@ fn validate_list_union(
             .any(|member| validate_builtin_type(element_name, member, value).is_empty())
     {
         return vec![XsdDiagnostic {
+            kind: XsdDiagnosticKind::InvalidContent,
             message: format!("contenu de <{element_name}> invalide pour l’union {type_name}"),
         }];
     }
@@ -1664,6 +1736,7 @@ fn validate_builtin_type(element_name: &str, type_name: &str, value: &str) -> Ve
         Vec::new()
     } else {
         vec![XsdDiagnostic {
+            kind: XsdDiagnosticKind::InvalidContent,
             message: format!("contenu de <{element_name}> invalide pour le type {type_name}"),
         }]
     }
@@ -1692,6 +1765,7 @@ fn validate_nil(
         Vec::new()
     } else {
         vec![XsdDiagnostic {
+            kind: XsdDiagnosticKind::NotNillable,
             message: format!("élément <{element_name}> non nillable avec xsi:nil"),
         }]
     }
@@ -1724,6 +1798,7 @@ fn validate_attributes(
         present.push(name.clone());
         if !allowed.iter().any(|item| item == &name) {
             diagnostics.push(XsdDiagnostic {
+                kind: XsdDiagnosticKind::UnexpectedAttribute,
                 message: format!("attribut @{name} interdit sur <{element_name}>"),
             });
         }
@@ -1735,6 +1810,7 @@ fn validate_attributes(
                 .is_ok_and(|value| value.as_ref() != fixed)
         {
             diagnostics.push(XsdDiagnostic {
+                kind: XsdDiagnosticKind::FixedValue,
                 message: format!("attribut @{name} différent de la valeur fixed"),
             });
         }
@@ -1743,6 +1819,7 @@ fn validate_attributes(
         for name in required {
             if !present.iter().any(|item| item == name) {
                 diagnostics.push(XsdDiagnostic {
+                    kind: XsdDiagnosticKind::MissingAttribute,
                     message: format!("attribut @{name} requis sur <{element_name}>"),
                 });
             }
@@ -1786,6 +1863,7 @@ pub fn validate_root(root_name: &str, schema: &XsdSchema) -> Vec<XsdDiagnostic> 
         Vec::new()
     } else {
         vec![XsdDiagnostic {
+            kind: XsdDiagnosticKind::UnknownRoot,
             message: format!("élément racine <{root_name}> absent du schéma XSD"),
         }]
     }
@@ -1901,6 +1979,36 @@ mod tests {
             "élément <magazine> interdit dans <root>"
         );
         assert_eq!(diagnostics[0].offset, source.find("<magazine").unwrap());
+        assert_eq!(diagnostics[0].end, source.find(" />").unwrap());
+        assert_eq!(diagnostics[0].kind, XsdDiagnosticKind::UnexpectedElement);
+        assert_eq!(diagnostics[0].kind.id(), "unexpectedElement");
+    }
+
+    #[test]
+    fn locates_diagnostics_on_the_offending_occurrence() {
+        let schema = parse_xsd(
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <xs:element name="root"><xs:complexType><xs:sequence>
+    <xs:element name="item" maxOccurs="unbounded"><xs:complexType>
+      <xs:attribute name="id" use="required"/>
+    </xs:complexType></xs:element>
+  </xs:sequence></xs:complexType></xs:element>
+</xs:schema>"#,
+        )
+        .unwrap();
+        let source = "<root>\n  <item id=\"1\"/>\n  <item/>\n</root>";
+        let diagnostics = validate_document_located(source, &schema);
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].kind, XsdDiagnosticKind::MissingAttribute);
+        assert_eq!(diagnostics[0].offset, source.rfind("<item").unwrap());
+        assert_eq!(&source[diagnostics[0].offset..diagnostics[0].end], "<item");
+
+        let unknown = validate_document_located("<?xml version=\"1.0\"?>\n<other/>", &schema);
+        assert_eq!(unknown[0].kind, XsdDiagnosticKind::UnknownRoot);
+        assert_eq!((unknown[0].offset, unknown[0].end), (22, 28));
+        let empty = validate_document_located("", &schema);
+        assert_eq!(empty[0].kind, XsdDiagnosticKind::MissingRoot);
     }
 
     #[test]
