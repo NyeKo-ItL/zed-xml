@@ -495,7 +495,7 @@ fn word_at(source: &str, offset: usize) -> Option<Range<usize>> {
     (start < end).then_some(start..end)
 }
 
-fn floor_boundary(source: &str, offset: usize) -> usize {
+pub(crate) fn floor_boundary(source: &str, offset: usize) -> usize {
     let mut offset = offset.min(source.len());
     while !source.is_char_boundary(offset) {
         offset -= 1;
@@ -505,7 +505,7 @@ fn floor_boundary(source: &str, offset: usize) -> usize {
 
 /// The cursor is inside a comment, a CDATA section, a processing
 /// instruction or a declaration.
-fn in_markup(source: &str, offset: usize) -> bool {
+pub(crate) fn in_markup(source: &str, offset: usize) -> bool {
     scan_markup(source)
         .iter()
         .any(|markup| markup.range.start < offset && (offset < markup.range.end || !markup.closed))
@@ -513,7 +513,7 @@ fn in_markup(source: &str, offset: usize) -> bool {
 
 /// Context in a start tag.
 #[derive(Debug, PartialEq, Eq)]
-enum TagContext<'s> {
+pub(crate) enum TagContext<'s> {
     ElementName,
     AttributeName {
         element: &'s str,
@@ -526,7 +526,7 @@ enum TagContext<'s> {
 }
 
 /// Parses the tag start `fragment` (after `<`, up to the cursor).
-fn tag_context(fragment: &str) -> Option<TagContext<'_>> {
+pub(crate) fn tag_context(fragment: &str) -> Option<TagContext<'_>> {
     if fragment.starts_with(['/', '!', '?']) {
         return None;
     }

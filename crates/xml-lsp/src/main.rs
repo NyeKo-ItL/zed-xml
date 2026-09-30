@@ -22,6 +22,7 @@ mod selection;
 mod settings;
 mod symbols;
 mod worker;
+mod xslt;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -424,6 +425,7 @@ impl XmlLanguageServer {
             extra.extend(doctype_diagnostics(source));
         }
         extra.extend(catalog_diagnostics(uri, source));
+        extra.extend(xslt::diagnostics(uri, source));
         extra.extend(self.dtd_diagnostics(uri, source));
         if validation.schema != settings::SchemaValidation::Never {
             extra.extend(self.schema_diagnostics(uri, source));
@@ -528,6 +530,13 @@ impl XmlLanguageServer {
                 path,
             })
             .collect())
+    }
+
+    fn xslt_context(&self) -> xslt::XsltContext<'_> {
+        xslt::XsltContext {
+            documents: &self.documents,
+            catalogs: &self.catalogs,
+        }
     }
 
     fn hover_context(&mut self, uri: &str) -> hover::HoverContext<'_> {
@@ -679,6 +688,12 @@ impl XmlLanguageServer {
             items.extend(schema_items);
         }
         items.extend(dtd::completions(grammar.as_ref(), uri, &source, offset));
+        items.extend(xslt::completions(
+            &self.xslt_context(),
+            uri,
+            &source,
+            offset,
+        ));
         deduplicate_completion_items(&mut items);
         Some(json!({"isIncomplete": false, "items": items}))
     }
@@ -758,6 +773,19 @@ impl XmlLanguageServer {
                 .unwrap_or(true);
             return identity::references(&links, uri, &source, offset, include_declaration);
         }
+        let include_declaration = params
+            .pointer("/context/includeDeclaration")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        if let Some(locations) = xslt::references(
+            &self.xslt_context(),
+            uri,
+            &source,
+            offset,
+            include_declaration,
+        ) {
+            return Some(locations);
+        }
         let name = element_name_at(&source, offset)?;
         let mut locations = Vec::new();
         if let Some((path, schema_source, declaration_offset)) =
@@ -806,6 +834,15 @@ impl XmlLanguageServer {
         }
         let identity_links = self.identity_links(uri, &source);
         if let Some(location) = identity::definition(&identity_links, uri, &source, offset) {
+            return Some(location);
+        }
+        if let Some(location) = xslt::definition(
+            &self.xslt_context(),
+            uri,
+            &source,
+            offset,
+            self.definition_link_support,
+        ) {
             return Some(location);
         }
         if let Some(grammar) = self.dtd_grammar(uri, &source)
@@ -951,6 +988,9 @@ impl XmlLanguageServer {
         let character = position.get("character")?.as_u64()? as usize;
         let offset = offset_at(source, line, character);
         let source = source.clone();
+        if let Some(hover) = xslt::hover(&self.xslt_context(), uri, &source, offset) {
+            return Some(hover);
+        }
         if let Some(grammar) = self.dtd_grammar(uri, &source)
             && let Some(hover) = dtd::hover(&grammar, uri, &source, offset)
         {
@@ -991,7 +1031,7 @@ impl XmlLanguageServer {
         let line = position.get("line")?.as_u64()? as usize;
         let character = position.get("character")?.as_u64()? as usize;
         let offset = offset_at(source, line, character);
-        rename::prepare_rename(source, offset)
+        xslt::prepare_rename(uri, source, offset).or_else(|| rename::prepare_rename(source, offset))
     }
 
     /// Returns a `WorkspaceEdit` (`changes`), `None` if nothing can be
@@ -1015,6 +1055,9 @@ impl XmlLanguageServer {
                 message: "Missing `newName` parameter.".to_owned(),
             });
         };
+        if let Some(result) = xslt::rename(&self.xslt_context(), uri, source, offset, new_name) {
+            return result.map(Some);
+        }
         let Some(plan) = rename::rename(source, offset, new_name)? else {
             return Ok(None);
         };
@@ -1475,7 +1518,7 @@ fn server_capabilities(encoding: positions::PositionEncoding) -> Value {
     json!({
         "positionEncoding": encoding.as_str(),
         "textDocumentSync": {"openClose": true, "change": 2},
-        "completionProvider": {"triggerCharacters": ["<", " ", "/", ">", "=", "\"", "?", "&", "%"]},
+        "completionProvider": {"triggerCharacters": ["<", " ", "/", ">", "=", "\"", "?", "&", "%", "$"]},
         "documentFormattingProvider": true,
         "documentRangeFormattingProvider": true,
         "documentSymbolProvider": true,
@@ -1926,7 +1969,7 @@ mod tests {
         let capabilities = server_capabilities(positions::PositionEncoding::default());
         assert_eq!(
             capabilities["completionProvider"]["triggerCharacters"],
-            json!(["<", " ", "/", ">", "=", "\"", "?", "&", "%"])
+            json!(["<", " ", "/", ">", "=", "\"", "?", "&", "%", "$"])
         );
     }
 
@@ -3828,7 +3871,7 @@ mod tests {
         let initialize = client.request(1, INITIALIZE_METHOD, json!({"capabilities": {}}));
         assert_eq!(
             initialize["capabilities"]["completionProvider"]["triggerCharacters"],
-            json!(["<", " ", "/", ">", "=", "\"", "?", "&", "%"])
+            json!(["<", " ", "/", ">", "=", "\"", "?", "&", "%", "$"])
         );
         client.notify("initialized", json!({}));
         for (document_uri, text) in [(&uri, source), (&broken_uri, broken), (&typing_uri, typing)] {
@@ -4509,6 +4552,138 @@ i:noNamespaceSchemaLocation=\"missing.xsd\">\r\n  \
     }
 
     #[test]
+    fn serves_xslt_diagnostics_navigation_rename_hover_and_completion() {
+        let directory = std::env::temp_dir().join(format!("xml-lsp-xslt {}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("directory should be created");
+        let library_path = directory.join("lib.xsl");
+        std::fs::write(
+            &library_path,
+            "<xsl:stylesheet version=\"3.0\" xmlns:xsl=\"http://www.w3.org/1999/XSL/Transform\">\n  <xsl:variable name=\"prefix\" select=\"'#'\"/>\n  <xsl:template name=\"helper\">\n    <xsl:param name=\"label\"/>\n    <xsl:value-of select=\"$label\"/>\n  </xsl:template>\n</xsl:stylesheet>\n",
+        )
+        .expect("library should be written");
+        let library_uri = path_to_uri(&library_path);
+        let uri = path_to_uri(&directory.join("main.xsl"));
+        let source = "<xsl:stylesheet version=\"3.0\" xmlns:xsl=\"http://www.w3.org/1999/XSL/Transform\">\n  <xsl:include href=\"lib.xsl\"/>\n  <xsl:template match=\"/\">\n    <xsl:variable name=\"count\" select=\"count(//item)\"/>\n    <xsl:for-each select=\"//item[position() le $count]\">\n      <xsl:call-template name=\"helper\">\n        <xsl:with-param name=\"label\" select=\"$prefix\"/>\n      </xsl:call-template>\n    </xsl:for-each>\n    <xsl:if test=\"$count >\"/>\n  </xsl:template>\n</xsl:stylesheet>\n";
+
+        let (server, connection) = Connection::memory();
+        let server_thread = thread::spawn(|| run(server).expect("server loop should succeed"));
+        let client = TestClient {
+            connection,
+            diagnostics: Default::default(),
+        };
+        client.request(1, INITIALIZE_METHOD, json!({"capabilities": {}}));
+        client.notify("initialized", json!({}));
+        client.notify(
+            DID_OPEN_METHOD,
+            json!({"textDocument": {"uri": uri, "text": source}}),
+        );
+        let published = client.take_diagnostics(2);
+        let diagnostics = published[0]["diagnostics"]
+            .as_array()
+            .expect("diagnostics")
+            .iter()
+            .filter(|diagnostic| diagnostic["code"] == "xpath-syntax")
+            .collect::<Vec<_>>();
+        assert_eq!(diagnostics.len(), 1, "{published:?}");
+        assert_eq!(
+            diagnostics[0]["range"],
+            json!({"start": {"line": 9, "character": 25}, "end": {"line": 9, "character": 26}})
+        );
+        let range = |line: u32, start: u32, end: u32| json!({"start": {"line": line, "character": start}, "end": {"line": line, "character": end}});
+        let position = |line: u32, character: u32| json!({"textDocument": {"uri": uri}, "position": {"line": line, "character": character}});
+
+        // Named template, global variable and template parameter across
+        // `xsl:include`.
+        assert_eq!(
+            client.request(3, DEFINITION_METHOD, position(5, 33)),
+            json!([{"uri": library_uri, "range": range(2, 22, 28)}])
+        );
+        assert_eq!(
+            client.request(4, DEFINITION_METHOD, position(6, 48)),
+            json!([{"uri": library_uri, "range": range(1, 22, 28)}])
+        );
+        assert_eq!(
+            client.request(5, DEFINITION_METHOD, position(6, 30)),
+            json!([{"uri": library_uri, "range": range(3, 21, 26)}])
+        );
+
+        let mut references = position(3, 26);
+        references["context"] = json!({"includeDeclaration": true});
+        assert_eq!(
+            client.request(6, REFERENCES_METHOD, references),
+            json!([
+                {"uri": uri, "range": range(3, 24, 29)},
+                {"uri": uri, "range": range(4, 48, 53)},
+                {"uri": uri, "range": range(9, 19, 24)},
+            ])
+        );
+
+        assert_eq!(
+            client.request(7, PREPARE_RENAME_METHOD, position(5, 33)),
+            json!({"range": range(5, 31, 37), "placeholder": "helper"})
+        );
+        let mut rename = position(5, 33);
+        rename["newName"] = json!("render");
+        let edit = client.request(8, RENAME_METHOD, rename);
+        assert_eq!(
+            edit["changes"][&uri],
+            json!([{"range": range(5, 31, 37), "newText": "render"}])
+        );
+        assert_eq!(
+            edit["changes"][&library_uri],
+            json!([{"range": range(2, 22, 28), "newText": "render"}])
+        );
+        let mut invalid = position(5, 33);
+        invalid["newName"] = json!("not valid");
+        client.send(
+            Request {
+                id: RequestId::from(9),
+                method: RENAME_METHOD.to_owned(),
+                params: invalid,
+            }
+            .into(),
+        );
+        match client.next() {
+            Message::Response(response) => assert!(response.error.is_some()),
+            message => panic!("unexpected message {message:?}"),
+        }
+
+        let hover = client.request(10, HOVER_METHOD, position(4, 8));
+        assert!(
+            hover["contents"]["value"]
+                .as_str()
+                .is_some_and(|value| value.contains("**xsl:for-each**")),
+            "{hover}"
+        );
+        assert_eq!(hover["range"], range(4, 5, 17));
+        let hover = client.request(11, HOVER_METHOD, position(6, 48));
+        assert!(
+            hover["contents"]["value"]
+                .as_str()
+                .is_some_and(|value| value.contains("Global variable") && value.contains("lib.xsl")),
+            "{hover}"
+        );
+
+        let completion = client.request(12, COMPLETION_METHOD, position(9, 19));
+        let labels = completion["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .filter_map(|item| item["label"].as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            labels.contains(&"count") && labels.contains(&"prefix"),
+            "{labels:?}"
+        );
+
+        assert_eq!(client.request(13, "shutdown", json!(null)), Value::Null);
+        client.notify(EXIT_METHOD, json!(null));
+        server_thread.join().expect("server thread should stop");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
     fn renames_xsd_components_across_open_instance_documents() {
         let schema_path =
             std::env::temp_dir().join(format!("xml-lsp-rename-{}.xsd", std::process::id()));
@@ -4588,7 +4763,7 @@ i:noNamespaceSchemaLocation=\"missing.xsd\">\r\n  \
                         "capabilities": {
                             "positionEncoding": "utf-16",
                             "textDocumentSync": {"openClose": true, "change": 2},
-                            "completionProvider": {"triggerCharacters": ["<", " ", "/", ">", "=", "\"", "?", "&", "%"]},
+                            "completionProvider": {"triggerCharacters": ["<", " ", "/", ">", "=", "\"", "?", "&", "%", "$"]},
                             "documentFormattingProvider": true,
                             "documentRangeFormattingProvider": true,
                             "documentSymbolProvider": true,

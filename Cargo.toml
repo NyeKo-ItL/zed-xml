@@ -4,6 +4,7 @@ members = [
     "crates/xml-core",
     "crates/xsd-core",
     "crates/dtd-core",
+    "crates/xpath-core",
     "crates/xml-lsp",
     "crates/xml-conformance",
 ]
