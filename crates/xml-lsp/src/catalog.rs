@@ -1287,11 +1287,13 @@ mod tests {
         write(&root.join(AUTO_DETECTED_CATALOG), &catalog(""));
         write(&other.join(AUTO_DETECTED_CATALOG), "<notACatalog/>");
         let roots = vec![root.clone(), other.clone()];
+        // Absolute on every platform (`/abs` has no drive letter on Windows).
+        let absolute = std::env::temp_dir().join("abs").join("c.xml");
         let configured = vec![
             "cat/extra.xml".to_owned(),
             "missing/./c.xml".to_owned(),
             path_to_uri(&root.join("u r i.xml")),
-            "/abs/c.xml".to_owned(),
+            absolute.to_string_lossy().into_owned(),
             " ".to_owned(),
         ];
         assert_eq!(
@@ -1300,7 +1302,7 @@ mod tests {
                 other.join("cat/extra.xml"),
                 root.join("missing/c.xml"),
                 root.join("u r i.xml"),
-                PathBuf::from("/abs/c.xml"),
+                absolute,
             ]
         );
         let detected = catalog_paths(&[], &roots, true);

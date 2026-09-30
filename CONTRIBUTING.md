@@ -101,13 +101,15 @@ Every pull request runs these jobs of `.github/workflows/ci.yml`; all must pass:
 | Job | What it checks |
 |-----|----------------|
 | Format | `cargo fmt --all -- --check`, and that `target/`, `grammars/` and `*.wasm` are not tracked. |
-| Clippy | `cargo clippy --workspace --all-targets -- -D warnings`, and the extension crate for `wasm32-wasip2`: any warning fails. |
+| Clippy | `cargo clippy --workspace --all-targets -- -D warnings`, and the extension crate for `wasm32-wasip2`, with the pinned toolchain `CLIPPY_TOOLCHAIN` (top of `ci.yml`): any warning fails. |
 | Tests | `cargo test --workspace` on Ubuntu, Windows and macOS. Keep tests portable: paths built with `Path::join` under `std::env::temp_dir()`, `file://` URIs derived from those paths, no assumption about the line endings of files read from disk (`.gitattributes` checks sources out with LF everywhere; fixtures stay byte-exact). |
 | Minimum supported Rust version | Builds the workspace and the extension with the toolchain named by `rust-version` (1.88, required by edition 2024 `let` chains and by dependencies such as `encoding_rs`). The job fails if a crate declares another value. Raise it in every `Cargo.toml` at once, in its own pull request. |
 | Extension (wasm32-wasip2) | Release build of the extension module, uploaded as the `zed-xml-extension-wasm` artifact. |
 | Dependencies (cargo-deny) | `cargo deny check` with [`deny.toml`](deny.toml): licences compatible with MIT, RustSec advisories (vulnerable, unmaintained, unsound or yanked crates), wildcard versions, and crates.io as the only source. Duplicate versions are reported as warnings. |
 | Coverage | `cargo llvm-cov` over the workspace; the summary is written to the job summary and the `coverage` artifact holds `lcov.info` and an HTML report (`html/index.html`). No external service is involved. |
 | Conformance suites | The external suites and the fixture smoke test (below). |
+
+The Clippy toolchain is pinned so that lints introduced by a new stable Rust release never break an unrelated pull request. To move to a newer release, in a dedicated `ci:` pull request: install it (`rustup toolchain install 1.NN -c clippy -t wasm32-wasip2`), run `cargo +1.NN clippy --workspace --all-targets -- -D warnings` and `cargo +1.NN clippy -p zed-xml --target wasm32-wasip2 -- -D warnings`, fix the new warnings (keeping code within the MSRV), and update `CLIPPY_TOOLCHAIN`. Locally, `cargo clippy` with your own toolchain is fine; when it reports a lint CI does not, fix it too.
 
 Jobs share a [`Swatinem/rust-cache`](https://github.com/Swatinem/rust-cache) cache per pull request, and a new push cancels the checks still running for the previous one. To reproduce coverage locally: `cargo install cargo-llvm-cov`, then `cargo llvm-cov --workspace --html` (report in `target/llvm-cov/html`).
 

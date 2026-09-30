@@ -17,6 +17,8 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   RUST_BACKTRACE: "1"
+  # Toolchain of the Clippy job (see CONTRIBUTING.md, "Continuous integration").
+  CLIPPY_TOOLCHAIN: "1.98"
 
 jobs:
   fmt:
@@ -40,8 +42,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned so that lints added by a new stable release do not break
+      # unrelated pull requests; bump it deliberately (see CONTRIBUTING.md).
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.CLIPPY_TOOLCHAIN }}
           components: clippy
           targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@v2

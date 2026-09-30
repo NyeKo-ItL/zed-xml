@@ -77,7 +77,7 @@ cargo build -p xml-lsp                  # server binary for XML_LSP_PATH
 cargo test -p xml-lsp -- <name filter>  # focused tests
 ```
 
-CI denies every clippy warning, runs the tests on Linux, Windows and macOS, and builds with the minimum supported Rust version (`rust-version` in every `Cargo.toml`, currently 1.88): do not use newer standard library APIs or language features without raising it everywhere.
+CI denies every clippy warning (with the toolchain pinned by `CLIPPY_TOOLCHAIN` in `ci.yml`), runs the tests on Linux, Windows and macOS, and builds with the minimum supported Rust version (`rust-version` in every `Cargo.toml`, currently 1.88): do not use newer standard library APIs or language features without raising it everywhere.
 
 ## Coding conventions
 
