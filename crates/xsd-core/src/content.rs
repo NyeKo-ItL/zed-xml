@@ -18,7 +18,7 @@ use std::{
 
 use crate::model::{
     Located, MAX_DEPTH, XsdCompositor, XsdDerivation, XsdElementDecl, XsdModelSet, XsdParticle,
-    XsdTypeRef, XsdWildcardNamespaces,
+    XsdProcessContents, XsdTypeRef, XsdWildcardNamespaces,
 };
 
 /// Maximum number of automaton states of one content model.
@@ -45,6 +45,13 @@ struct Symbol {
     matcher: Matcher,
     /// Name shown in messages.
     label: String,
+    /// `processContents` of a wildcard.
+    process: Option<XsdProcessContents>,
+    /// XSD 1.1 exclusions on a wildcard, not modelled: never compared.
+    exclusions: bool,
+    /// Identifier of the declaration (type) of an element particle, to
+    /// find elements of the same name declared differently.
+    declaration: Option<String>,
 }
 
 impl Symbol {
@@ -153,7 +160,308 @@ pub(crate) struct ContentModel {
     wildcards: Vec<XsdWildcardNamespaces>,
 }
 
+/// Order of `processContents`: a restriction may only make it stronger.
+fn strength(process: Option<XsdProcessContents>) -> u8 {
+    match process {
+        Some(XsdProcessContents::Strict) | None => 2,
+        Some(XsdProcessContents::Lax) => 1,
+        Some(XsdProcessContents::Skip) => 0,
+    }
+}
+
+/// Whether every namespace `inner` allows is allowed by `outer`.
+fn wildcard_covers(outer: &XsdWildcardNamespaces, inner: &XsdWildcardNamespaces) -> bool {
+    match (outer, inner) {
+        (XsdWildcardNamespaces::Any, _) => true,
+        (_, XsdWildcardNamespaces::Any) => false,
+        (XsdWildcardNamespaces::Other(outer), XsdWildcardNamespaces::Other(inner)) => {
+            outer == inner
+        }
+        (XsdWildcardNamespaces::Other(_), XsdWildcardNamespaces::Set(namespaces)) => namespaces
+            .iter()
+            .all(|namespace| outer.allows(namespace.as_deref())),
+        (XsdWildcardNamespaces::Set(_), XsdWildcardNamespaces::Other(_)) => false,
+        (XsdWildcardNamespaces::Set(outer), XsdWildcardNamespaces::Set(inner)) => {
+            inner.iter().all(|namespace| outer.contains(namespace))
+        }
+    }
+}
+
+/// Whether some namespace is allowed by both wildcards.
+fn wildcards_intersect(left: &XsdWildcardNamespaces, right: &XsdWildcardNamespaces) -> bool {
+    match (left, right) {
+        (XsdWildcardNamespaces::Any, _) | (_, XsdWildcardNamespaces::Any) => true,
+        (XsdWildcardNamespaces::Other(_), XsdWildcardNamespaces::Other(_)) => true,
+        (XsdWildcardNamespaces::Other(_), XsdWildcardNamespaces::Set(namespaces))
+        | (XsdWildcardNamespaces::Set(namespaces), XsdWildcardNamespaces::Other(_)) => {
+            let other = if matches!(left, XsdWildcardNamespaces::Other(_)) {
+                left
+            } else {
+                right
+            };
+            namespaces
+                .iter()
+                .any(|namespace| other.allows(namespace.as_deref()))
+        }
+        (XsdWildcardNamespaces::Set(left), XsdWildcardNamespaces::Set(right)) => {
+            left.iter().any(|namespace| right.contains(namespace))
+        }
+    }
+}
+
+/// Whether two symbols can match the same element.
+fn symbols_overlap(left: &Symbol, right: &Symbol) -> bool {
+    if left.exclusions || right.exclusions {
+        return false;
+    }
+    match (&left.matcher, &right.matcher) {
+        (Matcher::Names(left), Matcher::Names(right)) => left.iter().any(|(local, entries)| {
+            right.get(local).is_some_and(|other| {
+                entries
+                    .iter()
+                    .any(|(namespace, _)| other.iter().any(|(candidate, _)| candidate == namespace))
+            })
+        }),
+        (Matcher::Names(names), Matcher::Wildcard(wildcard))
+        | (Matcher::Wildcard(wildcard), Matcher::Names(names)) => names.values().any(|entries| {
+            entries
+                .iter()
+                .any(|(namespace, _)| wildcard.allows(namespace.as_deref()))
+        }),
+        (Matcher::Wildcard(left), Matcher::Wildcard(right)) => wildcards_intersect(left, right),
+    }
+}
+
+/// Problem of a content model as a whole.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ModelProblem {
+    /// Unique Particle Attribution: two particles can match the same
+    /// element.
+    Ambiguous(String),
+    /// Element Declarations Consistent: two elements of the same name are
+    /// declared with different types.
+    Inconsistent(String),
+}
+
+/// Pairs (derived state, base states) explored by [`ContentModel::restricts`].
+const MAX_PAIRS: usize = 200_000;
+/// Sets of states explored by the determinism check.
+const MAX_SETS: usize = 20_000;
+
 impl ContentModel {
+    /// Whether every sequence of elements this model accepts is also
+    /// accepted by `base` (derivation by restriction, XML Schema 1.0 Part 1
+    /// §3.9.6 "Particle Valid (Restriction)", checked on the languages).
+    /// Models too large to explore are accepted.
+    pub(crate) fn restricts(&self, base: &ContentModel) -> std::result::Result<(), String> {
+        let (derived, parent) = match (&self.kind, &base.kind) {
+            (Kind::Nfa(derived), Kind::Nfa(parent)) => (derived, parent),
+            (Kind::Empty, Kind::Nfa(parent)) => {
+                return if parent.closure(parent.start).contains(&parent.accept) {
+                    Ok(())
+                } else {
+                    Err("the base type requires content but the restriction is empty".to_owned())
+                };
+            }
+            (Kind::Nfa(derived), Kind::Empty) => {
+                return if derived
+                    .closure(derived.start)
+                    .iter()
+                    .all(|state| derived.edge[*state as usize].is_none())
+                {
+                    Ok(())
+                } else {
+                    Err(
+                        "the base type has empty content but the restriction allows elements"
+                            .to_owned(),
+                    )
+                };
+            }
+            _ => return Ok(()),
+        };
+        let parent_start = parent.closure(parent.start).to_vec();
+        let mut queue: Vec<(u32, Vec<u32>)> = derived
+            .closure(derived.start)
+            .iter()
+            .map(|state| (*state, parent_start.clone()))
+            .collect();
+        let mut visited = HashSet::new();
+        while let Some((state, parent_states)) = queue.pop() {
+            if !visited.insert((state, parent_states.clone())) {
+                continue;
+            }
+            if visited.len() > MAX_PAIRS {
+                return Ok(());
+            }
+            if state == derived.accept && !parent_states.contains(&parent.accept) {
+                return Err(
+                    "the restriction accepts content that is incomplete for the base type"
+                        .to_owned(),
+                );
+            }
+            let Some((symbol, target)) = derived.edge[state as usize] else {
+                continue;
+            };
+            let symbol = &derived.symbols[symbol as usize];
+            let mut nexts: Vec<Vec<u32>> = Vec::new();
+            match &symbol.matcher {
+                Matcher::Names(names) => {
+                    for (local, entries) in names {
+                        for (namespace, _) in entries {
+                            let mut next =
+                                parent.step(&parent_states, namespace.as_deref(), local, true);
+                            if next.is_empty() {
+                                next =
+                                    parent.step(&parent_states, namespace.as_deref(), local, false);
+                            }
+                            if next.is_empty() {
+                                return Err(format!(
+                                    "<{}> is not allowed by the base type at this position",
+                                    symbol.label
+                                ));
+                            }
+                            nexts.push(next);
+                        }
+                    }
+                }
+                Matcher::Wildcard(allowed) => {
+                    let mut next = Vec::new();
+                    for &parent_state in &parent_states {
+                        let Some((parent_symbol, parent_target)) =
+                            parent.edge[parent_state as usize]
+                        else {
+                            continue;
+                        };
+                        let parent_symbol = &parent.symbols[parent_symbol as usize];
+                        if let Matcher::Wildcard(parent_allowed) = &parent_symbol.matcher
+                            && (parent_symbol.exclusions
+                                || symbol.exclusions
+                                || wildcard_covers(parent_allowed, allowed))
+                            && strength(symbol.process) >= strength(parent_symbol.process)
+                        {
+                            next.extend(parent.closure(parent_target).iter().copied());
+                        }
+                    }
+                    next.sort_unstable();
+                    next.dedup();
+                    if next.is_empty() {
+                        return Err(format!(
+                            "the wildcard {} is not allowed by the base type at this position",
+                            symbol.label
+                        ));
+                    }
+                    nexts.push(next);
+                }
+            }
+            for next in nexts {
+                for derived_state in derived.closure(target).iter() {
+                    queue.push((*derived_state, next.clone()));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Unique Particle Attribution and Element Declarations Consistent.
+    pub(crate) fn problems(&self) -> Vec<ModelProblem> {
+        let mut problems = Vec::new();
+        match &self.kind {
+            Kind::Nfa(nfa) => {
+                // Elements of the same name declared with different types.
+                let mut declared: HashMap<(Namespace, String), (&str, &str)> = HashMap::new();
+                for symbol in &nfa.symbols {
+                    let (Matcher::Names(names), Some(declaration)) =
+                        (&symbol.matcher, &symbol.declaration)
+                    else {
+                        continue;
+                    };
+                    for (local, entries) in names {
+                        for (namespace, _) in entries {
+                            match declared.get(&(namespace.clone(), local.clone())) {
+                                Some((previous, _)) if previous != declaration => {
+                                    problems.push(ModelProblem::Inconsistent(format!(
+                                        "the element <{local}> is declared with different types in the same content model"
+                                    )));
+                                }
+                                Some(_) => {}
+                                None => {
+                                    declared.insert(
+                                        (namespace.clone(), local.clone()),
+                                        (declaration.as_str(), ""),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                // Determinism.
+                let mut queue = vec![nfa.closure(nfa.start).to_vec()];
+                let mut visited: HashSet<Vec<u32>> = HashSet::new();
+                'sets: while let Some(set) = queue.pop() {
+                    if !visited.insert(set.clone()) {
+                        continue;
+                    }
+                    if visited.len() > MAX_SETS {
+                        break;
+                    }
+                    let mut by_symbol: Vec<(u32, Vec<u32>)> = Vec::new();
+                    for &state in &set {
+                        let Some((symbol, target)) = nfa.edge[state as usize] else {
+                            continue;
+                        };
+                        match by_symbol
+                            .iter_mut()
+                            .find(|(candidate, _)| *candidate == symbol)
+                        {
+                            Some((_, targets)) => {
+                                targets.extend(nfa.closure(target).iter().copied())
+                            }
+                            None => by_symbol.push((symbol, nfa.closure(target).to_vec())),
+                        }
+                    }
+                    for (index, (left, _)) in by_symbol.iter().enumerate() {
+                        for (right, _) in &by_symbol[index + 1..] {
+                            let (first, second) =
+                                (&nfa.symbols[*left as usize], &nfa.symbols[*right as usize]);
+                            if symbols_overlap(first, second) {
+                                problems.push(ModelProblem::Ambiguous(format!(
+                                    "<{}> and <{}> can match the same element (Unique Particle Attribution)",
+                                    first.label, second.label
+                                )));
+                                break 'sets;
+                            }
+                        }
+                    }
+                    for (_, mut targets) in by_symbol {
+                        targets.sort_unstable();
+                        targets.dedup();
+                        queue.push(targets);
+                    }
+                }
+            }
+            Kind::All { members, .. } => {
+                for (index, member) in members.iter().enumerate() {
+                    for other in &members[index + 1..] {
+                        if member.names.iter().any(|(local, entries)| {
+                            other.names.get(local).is_some_and(|others| {
+                                entries.iter().any(|(namespace, _)| {
+                                    others.iter().any(|(candidate, _)| candidate == namespace)
+                                })
+                            })
+                        }) {
+                            problems.push(ModelProblem::Inconsistent(format!(
+                                "the element <{}> appears twice in an xs:all group",
+                                member.label
+                            )));
+                        }
+                    }
+                }
+            }
+            Kind::Empty => {}
+        }
+        problems
+    }
+
     fn is_known(&self, namespace: Option<&str>, local: &str) -> bool {
         self.known.get(local).is_some_and(|entries| {
             entries
@@ -342,6 +650,9 @@ struct Builder<'a> {
     /// Named groups being expanded: a group reference to one of them is a
     /// redefinition referring to the group it replaces.
     expanding: Vec<*const crate::model::XsdGroupDef>,
+    /// Symbol of each element or wildcard particle: the copies a counted
+    /// repetition makes of a group share them.
+    symbol_of: HashMap<*const XsdParticle, u32>,
 }
 
 impl<'a> Builder<'a> {
@@ -467,6 +778,24 @@ impl<'a> Builder<'a> {
         (names, target.item.name.clone())
     }
 
+    /// Identifies the type an element particle declares: the qualified type
+    /// name, or the address of its anonymous type.
+    fn declaration_id(&self, schema: usize, declaration: &XsdElementDecl) -> String {
+        let target = self.models.element_target(Located {
+            schema,
+            item: declaration,
+        });
+        match (&target.item.type_name, &target.item.anonymous_type) {
+            (Some(name), _) => format!(
+                "{{{}}}{}",
+                name.namespace.as_deref().unwrap_or_default(),
+                name.local
+            ),
+            (None, Some(anonymous)) => format!("anonymous {:p}", &**anonymous),
+            (None, None) => "anyType".to_owned(),
+        }
+    }
+
     fn particle(&mut self, schema: usize, particle: &XsdParticle, depth: usize) -> (u32, u32) {
         if depth > MAX_DEPTH || self.failed {
             self.failed = true;
@@ -475,19 +804,38 @@ impl<'a> Builder<'a> {
         let (min, max) = particle.occurs();
         match particle {
             XsdParticle::Element(declaration) => {
-                let (names, label) = self.names_of(schema, declaration);
-                let symbol = self.symbols.len() as u32;
-                self.symbols.push(Symbol {
-                    matcher: Matcher::Names(names),
-                    label,
-                });
+                let symbol = match self.symbol_of.get(&std::ptr::from_ref(particle)) {
+                    Some(symbol) => *symbol,
+                    None => {
+                        let (names, label) = self.names_of(schema, declaration);
+                        let symbol = self.symbols.len() as u32;
+                        let declaration_id = self.declaration_id(schema, declaration);
+                        self.symbols.push(Symbol {
+                            matcher: Matcher::Names(names),
+                            label,
+                            process: None,
+                            exclusions: false,
+                            declaration: Some(declaration_id),
+                        });
+                        self.symbol_of.insert(std::ptr::from_ref(particle), symbol);
+                        symbol
+                    }
+                };
                 self.repeat(min, max, |builder| builder.symbol_fragment(symbol))
             }
             XsdParticle::Any(wildcard) => {
+                if let Some(symbol) = self.symbol_of.get(&std::ptr::from_ref(particle)) {
+                    let symbol = *symbol;
+                    return self.repeat(min, max, |builder| builder.symbol_fragment(symbol));
+                }
                 self.wildcards.push(wildcard.namespaces.clone());
                 let symbol = self.symbols.len() as u32;
+                self.symbol_of.insert(std::ptr::from_ref(particle), symbol);
                 self.symbols.push(Symbol {
                     matcher: Matcher::Wildcard(wildcard.namespaces.clone()),
+                    process: Some(wildcard.process_contents),
+                    exclusions: wildcard.has_exclusions,
+                    declaration: None,
                     label: match &wildcard.namespaces {
                         XsdWildcardNamespaces::Any => "*".to_owned(),
                         XsdWildcardNamespaces::Other(_) => "{other}*".to_owned(),
@@ -567,6 +915,10 @@ impl<'a> Builder<'a> {
                     self.link(start, end);
                 }
                 for particle in particles {
+                    // A prohibited particle (maxOccurs 0) is no alternative.
+                    if particle.occurs().1 == Some(0) {
+                        continue;
+                    }
                     let (first, last) = self.particle(schema, particle, depth + 1);
                     self.link(start, first);
                     self.link(last, end);
@@ -635,6 +987,7 @@ impl XsdModelSet {
             wildcards: Vec::new(),
             failed: false,
             expanding: Vec::new(),
+            symbol_of: HashMap::new(),
         };
         let kind = if particles.is_empty() {
             Kind::Empty

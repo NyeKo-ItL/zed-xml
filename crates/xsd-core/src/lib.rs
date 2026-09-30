@@ -1,5 +1,6 @@
 //! XSD model and parsing shared by the LSP server.
 
+mod component_check;
 pub(crate) mod content;
 pub mod datatypes;
 pub mod identity;
@@ -151,7 +152,12 @@ pub fn merge_schemas(schemas: impl IntoIterator<Item = XsdSchema>) -> XsdSchema 
             }
         }
     }
-    for problem in XsdModelSet::new(merged.models.clone()).identity_problems() {
+    let set = XsdModelSet::new(merged.models.clone());
+    for problem in set
+        .identity_problems()
+        .into_iter()
+        .chain(set.component_problems())
+    {
         if !merged.problems.contains(&problem) {
             merged.problems.push(problem);
         }
