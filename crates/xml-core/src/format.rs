@@ -155,6 +155,11 @@ pub struct FormatOptions {
     pub space_before_empty_close_tag: bool,
     /// Quote style of attribute values (`xml.format.enforceQuoteStyle`).
     pub quote_style: QuoteStyle,
+    /// Keeps the whitespace of an element whose content is only whitespace
+    /// (`<a>  </a>` stays on one line as written;
+    /// `xml.format.preserveEmptyContent`). Ignored when `empty_elements`
+    /// expands or collapses them.
+    pub preserve_empty_content: bool,
 }
 
 impl Default for FormatOptions {
@@ -174,6 +179,7 @@ impl Default for FormatOptions {
             preserve_attribute_line_breaks: true,
             space_before_empty_close_tag: false,
             quote_style: QuoteStyle::Preserve,
+            preserve_empty_content: false,
         }
     }
 }
@@ -654,6 +660,21 @@ impl<'a> Formatter<'a> {
                     }
                 }
                 Event::End(element) => {
+                    // Whitespace-only content kept as written.
+                    if self.options.preserve_empty_content
+                        && self.options.empty_elements == EmptyElements::Ignore
+                        && let Some(whitespace) = skipped.as_ref().filter(|text| !text.is_empty())
+                        && let Some((start, blank_lines)) = self.pending_start.take()
+                    {
+                        self.blank_lines = blank_lines;
+                        if !self.has_text() {
+                            self.write_indent()?;
+                        }
+                        self.write_start_tag(start.clone(), false)?;
+                        self.emit(Event::Text(BytesText::from_escaped(whitespace.as_str())))?;
+                        self.write_end_tag(&start)?;
+                        continue;
+                    }
                     // Element without content (or only whitespace).
                     if self.options.empty_elements != EmptyElements::Ignore
                         && let Some((start, blank_lines)) = self.pending_start.take()
@@ -1131,6 +1152,18 @@ mod tests {
         assert!(formatted.contains("<r a='1' b='x&apos;y'>"), "{formatted}");
         // Idempotent.
         assert_eq!(format_xml_with(&formatted, &single).unwrap(), formatted);
+        let preserve = FormatOptions {
+            preserve_empty_content: true,
+            ..FormatOptions::default()
+        };
+        assert_eq!(
+            format_xml_with("<r><a>  </a><b>\n</b><c></c></r>\n", &preserve).unwrap(),
+            "<r>\n  <a>  </a>\n  <b>\n</b>\n  <c>\n  </c>\n</r>\n"
+        );
+        assert_eq!(
+            format_xml_with("<r><a> </a></r>\n", &FormatOptions::default()).unwrap(),
+            "<r>\n  <a>\n  </a>\n</r>\n"
+        );
         // The closing bracket on its own line takes no space.
         let own_line = FormatOptions {
             split_attributes: SplitAttributes::SplitNewLine,

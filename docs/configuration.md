@@ -41,6 +41,7 @@ When validation settings, file associations or catalogs change (including a cata
 | `xml.format.closingBracketNewLine` | boolean | `false` | Put `>` / `/>` on its own line when `splitAttributes` spreads the attributes over several lines. |
 | `xml.format.emptyElements` | `"ignore"` \| `"expand"` \| `"collapse"` | `"ignore"` | Turn `<a/>` into `<a></a>` (`expand`), or empty/whitespace-only `<a></a>` into `<a/>` (`collapse`). Document formatting only: range formatting changes whitespace only. |
 | `xml.format.preserveAttributeLineBreaks` | boolean | `true` | Keep existing line breaks before attributes. With `splitAttributes: "preserve"` and no `maxLineWidth`, start tags are copied verbatim; `false` joins the attributes on the tag line with single spaces. (LemMinX defaults to `false`.) |
+| `xml.format.preserveEmptyContent` | boolean | `false` | Keep the whitespace of elements whose content is only whitespace (`<a>  </a>` stays on one line as written); by default such an element is reformatted like any other. Ignored when `emptyElements` is `expand` or `collapse`. |
 | `xml.format.spaceBeforeEmptyCloseTag` | boolean | `false` | Write `<a />` instead of `<a/>`. (LemMinX defaults to `true`.) |
 | `xml.format.enforceQuoteStyle` | `"ignore"` \| `"preferred"` | `"ignore"` | With `"preferred"`, attribute values are re-quoted with `xml.preferences.quoteStyle`; a quote character inside a value becomes `&quot;` / `&apos;`. |
 | `xml.preferences.quoteStyle` | `"double"` \| `"single"` | `"double"` | Quote used by `xml.format.enforceQuoteStyle`. |
