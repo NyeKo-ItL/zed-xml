@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
-use xml_core::{EmptyElements, FormatOptions, SplitAttributes};
+use xml_core::{EmptyElements, FormatOptions, QuoteStyle, SplitAttributes};
 
 /// `xml.*` settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +82,8 @@ pub struct FormatSettings {
     pub closing_bracket_new_line: bool,
     pub empty_elements: EmptyElements,
     pub preserve_attribute_line_breaks: bool,
+    pub space_before_empty_close_tag: bool,
+    pub quote_style: QuoteStyle,
     /// Fallback values when the request does not provide the matching LSP
     /// option.
     pub insert_spaces: Option<bool>,
@@ -102,6 +104,8 @@ impl Default for FormatSettings {
             closing_bracket_new_line: defaults.closing_bracket_new_line,
             empty_elements: defaults.empty_elements,
             preserve_attribute_line_breaks: defaults.preserve_attribute_line_breaks,
+            space_before_empty_close_tag: defaults.space_before_empty_close_tag,
+            quote_style: defaults.quote_style,
             insert_spaces: None,
             tab_size: None,
             trim_final_newlines: None,
@@ -121,6 +125,8 @@ impl FormatSettings {
         options.closing_bracket_new_line = self.closing_bracket_new_line;
         options.empty_elements = self.empty_elements;
         options.preserve_attribute_line_breaks = self.preserve_attribute_line_breaks;
+        options.space_before_empty_close_tag = self.space_before_empty_close_tag;
+        options.quote_style = self.quote_style;
         if let Some(value) = self.insert_spaces {
             options.insert_spaces = value;
         }
@@ -266,6 +272,17 @@ impl Settings {
         }
         if let Some(value) = flag("format.preserveAttributeLineBreaks") {
             format.preserve_attribute_line_breaks = value;
+        }
+        if let Some(value) = flag("format.spaceBeforeEmptyCloseTag") {
+            format.space_before_empty_close_tag = value;
+        }
+        // LemMinX: `enforceQuoteStyle` ("ignore" | "preferred") enforces
+        // `xml.preferences.quoteStyle` ("double" | "single").
+        if text("format.enforceQuoteStyle") == Some("preferred") {
+            format.quote_style = match text("preferences.quoteStyle") {
+                Some("single") => QuoteStyle::Single,
+                _ => QuoteStyle::Double,
+            };
         }
         format.insert_spaces = flag("format.insertSpaces");
         format.tab_size = number("format.tabSize").map(|size| size.min(16));

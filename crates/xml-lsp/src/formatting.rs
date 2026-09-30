@@ -149,7 +149,8 @@ mod tests {
         let settings = crate::settings::Settings::from_value(&json!({"xml": {"format": {
             "tabSize": 8, "insertSpaces": false, "trimFinalNewlines": false,
             "emptyElements": "expand", "maxLineWidth": 40,
-        }}}));
+            "spaceBeforeEmptyCloseTag": true, "enforceQuoteStyle": "preferred",
+        }, "preferences": {"quoteStyle": "single"}}}));
         let options = format_options(
             &json!({"options": {"tabSize": 3}}),
             "<a/>",
@@ -163,6 +164,8 @@ mod tests {
                 trim_final_newlines: false,
                 empty_elements: xml_core::EmptyElements::Expand,
                 max_line_width: 40,
+                space_before_empty_close_tag: true,
+                quote_style: xml_core::QuoteStyle::Single,
                 ..FormatOptions::default()
             }
         );
