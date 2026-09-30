@@ -39,8 +39,8 @@ Errors of the schema set a document uses (unresolved references, invalid derivat
 
 ## `dtd-grammar` (`data.kind`)
 
-`dtdSyntax`, `duplicateElement`, `duplicateNotation`, `multipleIdAttributes`, `idAttributeDefault`, `invalidDefaultValue`, `undeclaredParameterEntity`, `undeclaredNotation`, `entityRecursion`, `entityExpansionLimit`, `conditionalSection`, `externalLoad` (warning for a remote DTD), `externalGrammar` (summary of the errors of an external DTD).
+`dtdSyntax`, `duplicateElement`, `duplicateNotation`, `multipleIdAttributes`, `idAttributeDefault`, `invalidDefaultValue`, `defaultEntityReference`, `properNesting`, `undeclaredParameterEntity`, `undeclaredNotation`, `entityRecursion`, `entityExpansionLimit`, `conditionalSection`, `externalLoad` (warning for a remote DTD), `externalGrammar` (summary of the errors of an external DTD).
 
 ## `dtd-validation` and `xml-entity` (`data.kind`)
 
-`undefinedEntity`, `entityExpansion`, `unparsedEntityReference`, `externalEntityInAttribute`, `malformedEntity`, `externalEntity`, `expansionBudget`; `rootMismatch`, `undeclaredElement`, `undeclaredAttribute`, `missingAttribute`, `invalidAttributeValue`, `invalidEnumeration`, `fixedValue`, `duplicateId`, `unknownIdref`, `invalidEntityAttribute`, `emptyContent`, `unexpectedElement`, `incompleteContent`, `textNotAllowed`.
+`undefinedEntity`, `entityExpansion`, `unparsedEntityReference`, `externalEntityInAttribute`, `standaloneEntity`, `malformedEntity`, `externalEntity`, `expansionBudget`; `rootMismatch`, `undeclaredElement`, `undeclaredAttribute`, `missingAttribute`, `invalidAttributeValue`, `invalidEnumeration`, `fixedValue`, `duplicateId`, `unknownIdref`, `invalidEntityAttribute`, `emptyContent`, `unexpectedElement`, `incompleteContent`, `textNotAllowed`.

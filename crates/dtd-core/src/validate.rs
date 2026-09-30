@@ -25,7 +25,7 @@ use xml_core::tags::{
 
 use crate::{
     AttributeDecl, AttributeType, ContentAutomaton, ContentSpec, DefaultDecl, Dtd, EntityValue,
-    ExpansionError, PREDEFINED_ENTITIES, is_name, is_nmtoken, names::scan_name_chars,
+    ExpansionError, PREDEFINED_ENTITIES, SourceKind, is_name, is_nmtoken, names::scan_name_chars,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +40,9 @@ pub enum InstanceProblemKind {
     MalformedEntity,
     UnparsedEntityReference,
     ExternalEntityInAttribute,
+    /// A standalone document references an entity declared in the external
+    /// subset (Entity Declared, well-formedness constraint).
+    StandaloneEntity,
     RootMismatch {
         expected: String,
     },
@@ -85,6 +88,7 @@ impl InstanceProblemKind {
             InstanceProblemKind::EntityExpansion => "entityExpansion",
             InstanceProblemKind::UnparsedEntityReference => "unparsedEntityReference",
             InstanceProblemKind::ExternalEntityInAttribute => "externalEntityInAttribute",
+            InstanceProblemKind::StandaloneEntity => "standaloneEntity",
             InstanceProblemKind::RootMismatch { .. } => "rootMismatch",
             InstanceProblemKind::UndeclaredElement => "undeclaredElement",
             InstanceProblemKind::UndeclaredAttribute => "undeclaredAttribute",
@@ -239,11 +243,13 @@ pub fn general_entity_references(source: &str) -> Vec<EntityReference> {
 /// Checks the general entity references of the document (see the module).
 pub fn check_entity_references(source: &str, dtd: Option<&Dtd>) -> Vec<InstanceProblem> {
     let mut problems = Vec::new();
+    let standalone = is_standalone(source);
     for reference in general_entity_references(source) {
         check_reference(
             &mut problems,
             source,
             dtd,
+            standalone,
             reference.range,
             reference.name,
             reference.in_attribute,
@@ -252,10 +258,27 @@ pub fn check_entity_references(source: &str, dtd: Option<&Dtd>) -> Vec<InstanceP
     problems
 }
 
+/// Whether the XML declaration says `standalone="yes"`.
+fn is_standalone(source: &str) -> bool {
+    let source = source.trim_start_matches('\u{FEFF}');
+    let Some(declaration) = source
+        .strip_prefix("<?xml")
+        .and_then(|rest| rest.split_once("?>"))
+        .map(|(declaration, _)| declaration)
+    else {
+        return false;
+    };
+    declaration
+        .split_once("standalone")
+        .map(|(_, value)| value.trim_start().trim_start_matches('=').trim_start())
+        .is_some_and(|value| value.starts_with("\"yes\"") || value.starts_with("'yes'"))
+}
+
 fn check_reference(
     problems: &mut Vec<InstanceProblem>,
     source: &str,
     dtd: Option<&Dtd>,
+    standalone: bool,
     reference: Range<usize>,
     name: Range<usize>,
     in_attribute: bool,
@@ -265,6 +288,16 @@ fn check_reference(
         return;
     }
     let Some(entity) = dtd.and_then(|dtd| dtd.general_entity(name)) else {
+        if standalone && dtd.is_some() {
+            problems.push(InstanceProblem {
+                kind: InstanceProblemKind::StandaloneEntity,
+                range: reference,
+                message: format!(
+                    "the entity '{name}' is not declared in the internal subset of a standalone document"
+                ),
+            });
+            return;
+        }
         problems.push(InstanceProblem {
             kind: InstanceProblemKind::UndefinedEntity {
                 name: name.to_owned(),
@@ -275,6 +308,25 @@ fn check_reference(
         return;
     };
     let expansion = &entity.expansion;
+    if standalone
+        && dtd.is_some_and(|dtd| {
+            !matches!(
+                dtd.sources
+                    .get(entity.declaration.source)
+                    .map(|source| &source.kind),
+                Some(SourceKind::Document(_) | SourceKind::Replacement { .. }) | None
+            )
+        })
+    {
+        problems.push(InstanceProblem {
+            kind: InstanceProblemKind::StandaloneEntity,
+            range: reference,
+            message: format!(
+                "the entity '{name}' is declared in the external subset but the document is standalone"
+            ),
+        });
+        return;
+    }
     let (kind, message) = if expansion.unparsed {
         (
             InstanceProblemKind::UnparsedEntityReference,
@@ -285,6 +337,9 @@ fn check_reference(
             InstanceProblemKind::EntityExpansion,
             match error {
                 ExpansionError::Recursive => format!("the entity '{name}' is recursive"),
+                ExpansionError::Undeclared => format!(
+                    "the replacement text of the entity '{name}' references an undeclared entity"
+                ),
                 ExpansionError::TooLarge => format!(
                     "the expansion of the entity '{name}' exceeds the limit of {} bytes",
                     crate::MAX_ENTITY_EXPANSION

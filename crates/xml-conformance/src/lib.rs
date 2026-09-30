@@ -76,7 +76,15 @@ pub fn external_suite(name: &str, marker: &str) -> Option<PathBuf> {
 pub fn decode(bytes: &[u8]) -> Option<String> {
     if let Some((encoding, bom_length)) = encoding_rs::Encoding::for_bom(bytes) {
         let (text, had_errors) = encoding.decode_without_bom_handling(&bytes[bom_length..]);
-        return (!had_errors).then(|| text.into_owned());
+        let kind = if encoding == encoding_rs::UTF_16LE {
+            xml_core::text::TextEncoding::Utf16Le
+        } else if encoding == encoding_rs::UTF_16BE {
+            xml_core::text::TextEncoding::Utf16Be
+        } else {
+            xml_core::text::TextEncoding::Utf8
+        };
+        return (!had_errors && !xml_core::text::declared_encoding_conflicts(&text, kind, true))
+            .then(|| text.into_owned());
     }
     // UTF-16 without a byte order mark, recognised from `<?` (appendix F.1).
     let utf16 = match bytes {
@@ -182,6 +190,7 @@ pub fn server_errors(source: &str, path: Option<&Path>, validate: bool) -> Vec<S
                             | dtd_core::DtdProblemKind::MultipleIdAttributes
                             | dtd_core::DtdProblemKind::IdAttributeDefault
                             | dtd_core::DtdProblemKind::InvalidDefaultValue
+                            | dtd_core::DtdProblemKind::ProperNesting
                             | dtd_core::DtdProblemKind::UndeclaredNotation
                     )
                 })

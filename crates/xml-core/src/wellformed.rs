@@ -386,6 +386,15 @@ fn check_namespaces(
             // Character and predefined entity references are resolved before
             // namespaces are compared.
             let value = decode_references(raw_value);
+            if name == "xmlns:" {
+                problems.push(XmlProblem {
+                    kind: XmlProblemKind::InvalidQualifiedName,
+                    range: attribute.name.clone(),
+                    message: "xmlns: is not a valid namespace declaration (a prefix is required)"
+                        .to_owned(),
+                });
+                continue;
+            }
             if !prefix.is_empty() && !is_ncname(prefix) && is_name(name) {
                 problems.push(XmlProblem {
                     kind: XmlProblemKind::InvalidQualifiedName,
