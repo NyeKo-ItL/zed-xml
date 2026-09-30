@@ -90,7 +90,7 @@ dependencies = [
 
 [[package]]
 name = "dtd-core"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "xml-core",
 ]
@@ -862,7 +862,7 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "xml-conformance"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "encoding_rs",
  "roxmltree",
@@ -872,14 +872,14 @@ dependencies = [
 
 [[package]]
 name = "xml-core"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "quick-xml",
 ]
 
 [[package]]
 name = "xml-lsp"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "dtd-core",
  "lsp-server",
@@ -892,7 +892,7 @@ dependencies = [
 
 [[package]]
 name = "xsd-core"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "quick-xml",
  "regex",
@@ -923,7 +923,7 @@ dependencies = [
 
 [[package]]
 name = "zed-xml"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "zed_extension_api",
 ]
