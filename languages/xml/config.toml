@@ -1,6 +1,27 @@
 name = "XML"
 grammar = "xml"
-path_suffixes = ["xml", "xsd", "xsl", "xslt", "svg", "wsdl", "plist", "xjb", "axml"]
+# Keep in sync with XML_PATH_SUFFIXES in crates/xml-lsp/src/symbols.rs (a test
+# checks it). Suffixes claimed by extensions of the Zed registry are left out
+# on purpose (Zed picks an arbitrary language when two claim the same suffix):
+# `csproj`, `proj`, `props`, `targets` and `slnx` belong to the C# extension,
+# `html`/`htm` to HTML, `urdf` to URDF. Users can still map them to XML with
+# the `file_types` setting. See "File types" in README.md.
+path_suffixes = [
+    # XML, schemas and transformations
+    "xml", "xsd", "xsl", "xslt", "rng", "wsdl", "xjb",
+    # Web, documents and feeds
+    "svg", "xhtml", "xht", "rss", "atom", "opml", "opf", "dita", "ditamap", "xul",
+    # Apple
+    "plist", "entitlements", "storyboard", "xib", "xcscheme", "xcworkspacedata", "tmTheme", "tmLanguage",
+    # .NET, MSBuild and WiX
+    "xaml", "axaml", "fsproj", "vbproj", "vcxproj", "vcxproj.filters", "csproj.user", "nuspec", "resx", "pubxml", "wxs", "wxi", "wxl",
+    # Java and Android
+    "pom", "fxml", "iml", "tld", "axml",
+    # Localization
+    "xlf", "xliff", "tmx",
+    # Geography, graphs, music and processes
+    "kml", "gpx", "graphml", "musicxml", "bpmn",
+]
 first_line_pattern = '^<.*xml'
 block_comment = ["<!-- ", " -->"]
 autoclose_before = ">/])\"'"

@@ -103,6 +103,28 @@ fn every_request_handles_every_fixture() {
     );
 }
 
+/// Extensions of real-world fixtures that the extension's `XML` language
+/// deliberately does not claim (another Zed extension does, or the suffix is
+/// too generic): see "File types" in README.md.
+const NOT_CLAIMED_BY_THE_XML_LANGUAGE: &[&str] = &["config", "csproj", "props", "rdf"];
+
+#[test]
+fn the_xml_language_claims_the_real_world_fixtures() {
+    let mut files = Vec::new();
+    collect(&fixtures_dir().join("real-world"), &mut files);
+    let unclaimed = files
+        .iter()
+        .filter(|path| {
+            let name = path.file_name().and_then(|name| name.to_str()).unwrap();
+            !crate::symbols::is_xml_file_name(name)
+                && !path.extension().is_some_and(|extension| {
+                    NOT_CLAIMED_BY_THE_XML_LANGUAGE.contains(&extension.to_str().unwrap())
+                })
+        })
+        .collect::<Vec<_>>();
+    assert!(unclaimed.is_empty(), "{unclaimed:?}");
+}
+
 fn exercise(path: &Path, source: &str) -> Vec<String> {
     let uri = path_to_uri(path);
     let mut server = XmlLanguageServer::new();

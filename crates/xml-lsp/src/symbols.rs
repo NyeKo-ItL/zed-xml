@@ -42,12 +42,79 @@ pub(crate) mod kind {
     pub const STRUCT: u32 = 23;
 }
 
-/// Extensions indexed on disk (those of the extension's XML language).
-const INDEXED_EXTENSIONS: &[&str] = &[
-    "xml", "xsd", "xsl", "xslt", "svg", "wsdl", "plist", "xjb", "axml",
+/// File name suffixes of the extension's `XML` language (`path_suffixes` of
+/// `languages/xml/config.toml`, kept identical by a test): the files indexed
+/// on disk and watched.
+pub(crate) const XML_PATH_SUFFIXES: &[&str] = &[
+    "xml",
+    "xsd",
+    "xsl",
+    "xslt",
+    "rng",
+    "wsdl",
+    "xjb",
+    "svg",
+    "xhtml",
+    "xht",
+    "rss",
+    "atom",
+    "opml",
+    "opf",
+    "dita",
+    "ditamap",
+    "xul",
+    "plist",
+    "entitlements",
+    "storyboard",
+    "xib",
+    "xcscheme",
+    "xcworkspacedata",
+    "tmTheme",
+    "tmLanguage",
+    "xaml",
+    "axaml",
+    "fsproj",
+    "vbproj",
+    "vcxproj",
+    "vcxproj.filters",
+    "csproj.user",
+    "nuspec",
+    "resx",
+    "pubxml",
+    "wxs",
+    "wxi",
+    "wxl",
+    "pom",
+    "fxml",
+    "iml",
+    "tld",
+    "axml",
+    "xlf",
+    "xliff",
+    "tmx",
+    "kml",
+    "gpx",
+    "graphml",
+    "musicxml",
+    "bpmn",
 ];
+
+/// Whether a file name ends with `.<suffix>` for one of [`XML_PATH_SUFFIXES`]
+/// (ASCII case-insensitive, so `Foo.XML` and `a.tmtheme` are indexed too).
+pub(crate) fn is_xml_file_name(name: &str) -> bool {
+    XML_PATH_SUFFIXES.iter().any(|suffix| {
+        name.len()
+            .checked_sub(suffix.len() + 1)
+            .and_then(|dot| name.get(dot..))
+            .and_then(|tail| tail.strip_prefix('.'))
+            .is_some_and(|tail| tail.eq_ignore_ascii_case(suffix))
+    })
+}
+
 /// Pattern of the watched files (`workspace/didChangeWatchedFiles`).
-pub(crate) const WATCHED_FILES_GLOB: &str = "**/*.{xml,xsd,xsl,xslt,svg,wsdl,plist,xjb,axml}";
+pub(crate) fn watched_files_glob() -> String {
+    format!("**/*.{{{}}}", XML_PATH_SUFFIXES.join(","))
+}
 /// Directories never scanned (in addition to hidden directories).
 const SKIPPED_DIRECTORIES: &[&str] = &["target", "node_modules", "bower_components"];
 /// Maximum number of files indexed on disk.
@@ -620,15 +687,7 @@ pub(crate) fn scan_workspace(roots: &[PathBuf]) -> Vec<(PathBuf, SystemTime, u64
                 if !file_type.is_file() || name.starts_with('.') {
                     continue;
                 }
-                let indexed = Path::new(name.as_ref())
-                    .extension()
-                    .and_then(|extension| extension.to_str())
-                    .is_some_and(|extension| {
-                        INDEXED_EXTENSIONS
-                            .iter()
-                            .any(|indexed| extension.eq_ignore_ascii_case(indexed))
-                    });
-                if !indexed {
+                if !is_xml_file_name(&name) {
                     continue;
                 }
                 let Ok(metadata) = entry.metadata() else {
@@ -845,6 +904,90 @@ mod tests {
         files.sort();
         assert_eq!(files, vec!["a.xml", "b.xsd", "sub/d.svg"]);
         let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn the_indexed_suffixes_are_those_of_the_xml_language() {
+        let config = include_str!("../../../languages/xml/config.toml");
+        let start = config
+            .find("path_suffixes = [")
+            .expect("path_suffixes in languages/xml/config.toml");
+        let array = &config[start..];
+        let array = &array[..array.find("\n]").expect("end of path_suffixes")];
+        let suffixes = array
+            .lines()
+            .skip(1)
+            .map(|line| line.split('#').next().unwrap_or_default())
+            .flat_map(|line| line.split('"').skip(1).step_by(2))
+            .collect::<Vec<_>>();
+        assert_eq!(suffixes, XML_PATH_SUFFIXES);
+        let mut unique = suffixes.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), suffixes.len(), "duplicate path suffix");
+    }
+
+    #[test]
+    fn recognizes_the_file_names_of_the_xml_language() {
+        for name in [
+            "a.xml",
+            "Foo.XML",
+            "pom.xml",
+            "project.pom",
+            "MainWindow.xaml",
+            "App.axaml",
+            "Strings.resx",
+            "Main.storyboard",
+            "View.xib",
+            "Sample.fxml",
+            "schema.rng",
+            "messages.xlf",
+            "messages.xliff",
+            "places.kml",
+            "track.gpx",
+            "Library.fsproj",
+            "App.vcxproj.filters",
+            "App.csproj.user",
+            "Package.nuspec",
+            "Product.wxs",
+            "Dark.tmTheme",
+            "dark.tmtheme",
+            "page.xhtml",
+            "\u{e9}t\u{e9}.svg",
+        ] {
+            assert!(is_xml_file_name(name), "{name}");
+        }
+        for name in [
+            "xml",
+            "a.csproj",
+            "Directory.Build.props",
+            "Build.targets",
+            "App.slnx",
+            "index.html",
+            "a.filters",
+            "a.user",
+            "axml",
+            "\u{e9}xml",
+            "a.xml.bak",
+            "",
+        ] {
+            assert!(!is_xml_file_name(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn watches_every_file_of_the_xml_language() {
+        let glob = watched_files_glob();
+        assert!(glob.starts_with("**/*.{xml,xsd,"), "{glob}");
+        for path in [
+            "a.xml",
+            "src/MainWindow.xaml",
+            "vc/App.vcxproj.filters",
+            "maps/track.gpx",
+        ] {
+            assert!(crate::settings::glob_match(&glob, path), "{path}");
+        }
+        assert!(!crate::settings::glob_match(&glob, "a/App.csproj"));
     }
 
     #[test]

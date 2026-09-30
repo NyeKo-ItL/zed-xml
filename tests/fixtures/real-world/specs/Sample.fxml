@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- JavaFX FXML (https://openjfx.io/javadoc/21/javafx.fxml/javafx/fxml/doc-files/introduction_to_fxml.html):
+     import processing instructions, the fx: namespace, event handlers and
+     static properties. -->
+<?import javafx.scene.control.Button?>
+<?import javafx.scene.control.Label?>
+<?import javafx.scene.layout.GridPane?>
+<GridPane xmlns="http://javafx.com/javafx/21" xmlns:fx="http://javafx.com/fxml/1" fx:controller="fixtures.OrderController" hgap="8" vgap="8">
+    <fx:define>
+        <String fx:id="title" fx:value="Orders"/>
+    </fx:define>
+    <Label fx:id="heading" text="$title" GridPane.columnIndex="0" GridPane.rowIndex="0"/>
+    <Button fx:id="save" text="Save" onAction="#handleSave" GridPane.columnIndex="1" GridPane.rowIndex="0"/>
+</GridPane>

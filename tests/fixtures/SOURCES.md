@@ -22,7 +22,7 @@ covered by the repository licence (MIT).
 | `svg/lucide-*.svg` | [lucide-icons/lucide](https://github.com/lucide-icons/lucide) `icons/` | `5a92b9ba262d` | ISC |
 | `xslt/docbook-admon.xsl` | [docbook/xslt10-stylesheets](https://github.com/docbook/xslt10-stylesheets) `xsl/html/admon.xsl` | `efd62655c11c` | DocBook XSL licence (MIT-style, `licenses/docbook-xsl.txt`) |
 | `svg/libxml2-svg*.svg`, `webdav/libxml2-dav*.xml`, `feeds/libxml2-*.rdf`, `xhtml/libxml2-xhtml1.xhtml`, `misc/libxml2-*.xml`, `encodings/*` | [GNOME/libxml2](https://gitlab.gnome.org/GNOME/libxml2) `test/` (`svg1`, `dav*`, `slashdot.rdf`, `rdf1`, `xhtml1`, `wml.xml`, `p3p`, `dia1`, `utf16*.xml`, `utf8bom.xml`, `japancrlf.xml`, `isolat1`) | `c43dc98d27ac` | MIT |
-| `specs/*` | Written for this repository, each modelled on the specification cited in its leading comment (XML Schema Primer, RFC 4287, RSS 2.0, sitemaps.org, SOAP 1.2 Primer, RFC 3275, RFC 6120, RFC 4918, Apple property lists, XLIFF 2.0, KML 2.2, GPX 1.1, DocBook 5, XInclude, JUnit XML, XSLT 3.0, XML 1.0 §2.8, UBL 2.1, EPUB 3.3, XHTML with MathML and SVG) | | MIT |
+| `specs/*` | Written for this repository, each modelled on the specification cited in its leading comment (XML Schema Primer, RFC 4287, RSS 2.0, sitemaps.org, SOAP 1.2 Primer, RFC 3275, RFC 6120, RFC 4918, Apple property lists, XLIFF 2.0, KML 2.2, GPX 1.1, DocBook 5, XInclude, JUnit XML, XSLT 3.0, XML 1.0 §2.8, UBL 2.1, EPUB 3.3, XHTML with MathML and SVG, WPF XAML, .NET `.resx`, Interface Builder storyboards, JavaFX FXML, RELAX NG, NuGet `.nuspec`, WiX v4) | | MIT |
 
 ## `corpus/`
 

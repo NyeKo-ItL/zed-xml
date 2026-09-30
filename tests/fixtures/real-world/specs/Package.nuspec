@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- NuGet package manifest (https://learn.microsoft.com/nuget/reference/nuspec):
+     the 2013/05 schema namespace, dependency groups and files. -->
+<package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
+  <metadata minClientVersion="3.3.0">
+    <id>Fixtures.Orders</id>
+    <version>1.2.0</version>
+    <authors>zed-xml fixtures</authors>
+    <license type="expression">MIT</license>
+    <description>Orders sample package.</description>
+    <tags>orders sample</tags>
+    <dependencies>
+      <group targetFramework="net8.0">
+        <dependency id="System.Text.Json" version="8.0.0" exclude="Build,Analyzers"/>
+      </group>
+    </dependencies>
+  </metadata>
+  <files>
+    <file src="bin\Release\net8.0\Fixtures.Orders.dll" target="lib\net8.0"/>
+  </files>
+</package>

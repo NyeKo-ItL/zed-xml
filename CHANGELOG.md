@@ -6,6 +6,7 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- More XML file types: `xhtml`, `xht`, `rss`, `atom`, `opml`, `opf`, `dita`, `ditamap`, `xul`, `rng`, `entitlements`, `storyboard`, `xib`, `xcscheme`, `xcworkspacedata`, `tmTheme`, `tmLanguage`, `xaml`, `axaml`, `fsproj`, `vbproj`, `vcxproj`, `vcxproj.filters`, `csproj.user`, `nuspec`, `resx`, `pubxml`, `wxs`, `wxi`, `wxl`, `pom`, `fxml`, `iml`, `tld`, `xlf`, `xliff`, `tmx`, `kml`, `gpx`, `graphml`, `musicxml` and `bpmn`, also indexed for workspace symbols and watched on disk. Suffixes claimed by other Zed registry extensions (`csproj`, `props`, `targets`, …) are left to them; see the README "File types" section.
 - Zed queries for matching tag brackets, text objects, CSS/JavaScript injections in `<style>`/`<script>`, and comment/string overrides (#21).
 - Matching start/end tag highlight (`textDocument/documentHighlight`) (#22).
 - Linked editing of start and end tag names (`textDocument/linkedEditingRange`) (#23).
