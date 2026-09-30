@@ -1885,6 +1885,30 @@ fn validate(
                 ContentCheck::Run(run) => {
                     if let Err(error) = run.step(step.namespace.as_deref(), &step.local) {
                         element_diagnostics.push(unexpected_child(&error, &name, &parent.name));
+                    } else if resolved.is_none()
+                        && !parent
+                            .resolution
+                            .as_ref()
+                            .is_some_and(|parent| parent.skipped)
+                        && let Some(parent_type) = parent
+                            .resolution
+                            .as_ref()
+                            .and_then(|parent| parent.element_type)
+                        && models.strict_wildcard_applies(parent_type, step.namespace.as_deref())
+                        && !step.xsi_type.as_ref().is_some_and(|(namespace, local)| {
+                            models.global_type(namespace.as_deref(), local).is_some()
+                                || namespace.as_deref() == Some(model::XSD_NAMESPACE)
+                        })
+                    {
+                        // The wildcard is `processContents="strict"`: the
+                        // element must be declared.
+                        element_diagnostics.push(XsdDiagnostic {
+                            kind: XsdDiagnosticKind::UnexpectedElement,
+                            message: format!(
+                                "element <{name}> matches a strict wildcard of <{}> but has no declaration",
+                                parent.name
+                            ),
+                        });
                     }
                 }
                 ContentCheck::Unchecked => {}
