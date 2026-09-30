@@ -5,6 +5,7 @@ mod formatting;
 mod highlight;
 mod hover;
 mod linked_editing;
+mod links;
 mod rename;
 mod selection;
 
@@ -47,6 +48,7 @@ const PREPARE_RENAME_METHOD: &str = "textDocument/prepareRename";
 const RENAME_METHOD: &str = "textDocument/rename";
 const FOLDING_RANGE_METHOD: &str = "textDocument/foldingRange";
 const SELECTION_RANGE_METHOD: &str = "textDocument/selectionRange";
+const DOCUMENT_LINK_METHOD: &str = "textDocument/documentLink";
 
 type SchemaCache = HashMap<PathBuf, (SystemTime, XsdSchema)>;
 
@@ -63,6 +65,8 @@ struct XmlLanguageServer {
     schema_index: HashMap<String, Vec<PathBuf>>,
     model_cache: hover::ModelCache,
     folding_settings: folding::FoldingSettings,
+    /// Le client accepte des `LocationLink` en réponse à `textDocument/definition`.
+    definition_link_support: bool,
 }
 
 impl XmlLanguageServer {
@@ -73,6 +77,7 @@ impl XmlLanguageServer {
             schema_index: HashMap::new(),
             model_cache: HashMap::new(),
             folding_settings: folding::FoldingSettings::default(),
+            definition_link_support: false,
         }
     }
 
@@ -332,6 +337,9 @@ impl XmlLanguageServer {
         let line = position.get("line")?.as_u64()? as usize;
         let character = position.get("character")?.as_u64()? as usize;
         let offset = offset_at(&source, line, character);
+        if let Some(links) = links::definition(uri, &source, offset, self.definition_link_support) {
+            return Some(links);
+        }
         let name = element_name_at(&source, offset)?;
         if let Some((path, schema_source, offset)) = self.xsd_definition(uri, &source, &name) {
             return Some(json!([{
@@ -375,6 +383,12 @@ impl XmlLanguageServer {
             }
         }
         None
+    }
+
+    fn document_links(&self, params: &Value) -> Option<Value> {
+        let uri = params.get("textDocument")?.get("uri")?.as_str()?;
+        let source = self.documents.get(uri)?;
+        Some(links::document_links_json(uri, source))
     }
 
     fn hover(&mut self, params: &Value) -> Option<Value> {
@@ -885,6 +899,7 @@ fn server_capabilities() -> Value {
         "renameProvider": {"prepareProvider": true},
         "foldingRangeProvider": true,
         "selectionRangeProvider": true,
+        "documentLinkProvider": {"resolveProvider": false},
     })
 }
 
@@ -970,6 +985,10 @@ fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
     )?;
     let mut server = XmlLanguageServer::new();
     server.folding_settings = folding::FoldingSettings::from_initialize_params(&initialize_params);
+    server.definition_link_support = initialize_params
+        .pointer("/capabilities/textDocument/definition/linkSupport")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
 
     for message in &connection.receiver {
         match message {
@@ -1068,6 +1087,16 @@ fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
                     connection
                         .sender
                         .send(Response::new_ok(request.id, ranges).into())?;
+                    continue;
+                }
+
+                if request.method == DOCUMENT_LINK_METHOD {
+                    let links = server
+                        .document_links(&request.params)
+                        .unwrap_or_else(|| json!([]));
+                    connection
+                        .sender
+                        .send(Response::new_ok(request.id, links).into())?;
                     continue;
                 }
 
@@ -1787,6 +1816,163 @@ mod tests {
     }
 
     #[test]
+    fn serves_document_links_and_link_definitions() {
+        let directory =
+            std::env::temp_dir().join(format!("xml-lsp-document-links {}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(directory.join("schémas")).expect("directory should be created");
+        let schema_path = directory.join("schémas").join("a b.xsd");
+        std::fs::write(
+            &schema_path,
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"><xs:element name="root"/></xs:schema>"#,
+        )
+        .expect("schema should be written");
+        let stylesheet_path = directory.join("style.xsl");
+        std::fs::write(&stylesheet_path, "<xsl:stylesheet/>")
+            .expect("stylesheet should be written");
+        let uri = path_to_uri(&directory.join("document.xml"));
+        let source = "<?xml-stylesheet type=\"text/xsl\" href=\"style.xsl\"?>\r\n\
+<root xmlns:i=\"http://www.w3.org/2001/XMLSchema-instance\"\r\n      \
+i:schemaLocation=\"urn:😀 sch%C3%A9mas/a%20b.xsd urn:x https://example.com/x.xsd\"\r\n      \
+i:noNamespaceSchemaLocation=\"missing.xsd\">\r\n  \
+<child/>\r\n\
+</root>";
+
+        let (server, client) = Connection::memory();
+        let server_thread = thread::spawn(|| run(server).expect("server loop should succeed"));
+        let request = |id: i32, method: &str, params: Value| {
+            client
+                .sender
+                .send(
+                    Request {
+                        id: RequestId::from(id),
+                        method: method.to_owned(),
+                        params,
+                    }
+                    .into(),
+                )
+                .expect("request should be sent");
+            loop {
+                match client.receiver.recv().expect("a message should arrive") {
+                    Message::Response(response) => {
+                        assert_eq!(response.id, RequestId::from(id));
+                        return response.result;
+                    }
+                    Message::Notification(_) => {}
+                    message => panic!("unexpected message {message:?}"),
+                }
+            }
+        };
+        let notify = |method: &str, params: Value| {
+            client
+                .sender
+                .send(
+                    Notification {
+                        method: method.to_owned(),
+                        params,
+                    }
+                    .into(),
+                )
+                .expect("notification should be sent");
+        };
+        let range = |start: (u32, u32), end: (u32, u32)| {
+            json!({
+                "start": {"line": start.0, "character": start.1},
+                "end": {"line": end.0, "character": end.1},
+            })
+        };
+        let zero = range((0, 0), (0, 0));
+
+        let initialize = request(
+            1,
+            INITIALIZE_METHOD,
+            json!({"capabilities": {"textDocument": {"definition": {"linkSupport": true}}}}),
+        );
+        assert_eq!(
+            initialize.unwrap()["capabilities"]["documentLinkProvider"],
+            json!({"resolveProvider": false})
+        );
+        notify("initialized", json!({}));
+        notify(
+            DID_OPEN_METHOD,
+            json!({"textDocument": {"uri": uri, "text": source}}),
+        );
+
+        // Valeur en colonne 24 ; "urn:😀 " : l'emoji compte pour deux unités UTF-16.
+        let schema = 24 + 7;
+        let schema_range = range((2, schema), (2, schema + 22));
+        assert_eq!(
+            request(
+                2,
+                DOCUMENT_LINK_METHOD,
+                json!({"textDocument": {"uri": uri}})
+            ),
+            Some(json!([
+                {
+                    "range": range((0, 39), (0, 48)),
+                    "target": path_to_uri(&stylesheet_path),
+                    "tooltip": format!("Ouvrir la feuille de style : {}", stylesheet_path.display()),
+                },
+                {
+                    "range": schema_range,
+                    "target": path_to_uri(&schema_path),
+                    "tooltip": format!("Ouvrir le schéma XSD : {}", schema_path.display()),
+                },
+                {
+                    "range": range((2, schema + 29), (2, schema + 54)),
+                    "target": "https://example.com/x.xsd",
+                    "tooltip": "Ouvrir le schéma XSD : https://example.com/x.xsd",
+                },
+            ]))
+        );
+
+        let definition = |id: i32, line: u32, character: u32| {
+            request(
+                id,
+                DEFINITION_METHOD,
+                json!({
+                    "textDocument": {"uri": uri},
+                    "position": {"line": line, "character": character},
+                }),
+            )
+        };
+        assert_eq!(
+            definition(3, 2, schema + 4),
+            Some(json!([{
+                "originSelectionRange": schema_range,
+                "targetUri": path_to_uri(&schema_path),
+                "targetRange": zero,
+                "targetSelectionRange": zero,
+            }]))
+        );
+        assert_eq!(
+            definition(4, 0, 42).unwrap()[0]["targetUri"],
+            path_to_uri(&stylesheet_path)
+        );
+        // URL et fichier absent : pas d'emplacement (l'URL reste un lien).
+        assert_eq!(definition(5, 2, schema + 30), Some(json!([])));
+        assert_eq!(definition(6, 3, 36), Some(json!([])));
+        // Hors des valeurs de lien, la définition d'élément est conservée.
+        let element = definition(7, 1, 5).expect("element definition should be found");
+        assert_eq!(element[0]["uri"], uri);
+        assert_eq!(element[0]["range"], range((1, 0), (1, 5)));
+
+        assert_eq!(
+            request(
+                8,
+                DOCUMENT_LINK_METHOD,
+                json!({"textDocument": {"uri": "file:///missing.xml"}})
+            ),
+            Some(json!([]))
+        );
+
+        assert_eq!(request(9, "shutdown", json!(null)), Some(Value::Null));
+        notify(EXIT_METHOD, json!(null));
+        server_thread.join().expect("server thread should stop");
+        std::fs::remove_dir_all(directory).expect("directory should be removed");
+    }
+
+    #[test]
     fn serves_document_and_range_formatting_with_options() {
         let (server, client) = Connection::memory();
         let server_thread = thread::spawn(|| run(server).expect("server loop should succeed"));
@@ -2200,6 +2386,7 @@ mod tests {
                             "renameProvider": {"prepareProvider": true},
                             "foldingRangeProvider": true,
                             "selectionRangeProvider": true,
+                            "documentLinkProvider": {"resolveProvider": false},
                         },
                         "serverInfo": {
                             "name": "xml-lsp",
