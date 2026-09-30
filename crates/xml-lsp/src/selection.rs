@@ -19,6 +19,7 @@
 
 use std::ops::Range;
 
+use crate::positions::{PositionEncoding, floor_position_offset};
 use serde_json::{Value, json};
 use xml_core::tags::{
     XmlMarkup, XmlMarkupKind, XmlTag, XmlTagTree, qualified_name_parts, scan_attributes,
@@ -354,10 +355,12 @@ fn floor_char_boundary(source: &str, mut offset: usize) -> usize {
     offset
 }
 
-/// UTF-8 offset -> LSP position (line, UTF-16 code units) conversion in
-/// logarithmic time for the line.
+/// UTF-8 offset -> LSP position (line, code units of the negotiated
+/// [`crate::positions::PositionEncoding`]) conversion in logarithmic time
+/// for the line.
 pub(crate) struct LineIndex {
     starts: Vec<usize>,
+    encoding: PositionEncoding,
 }
 
 impl LineIndex {
@@ -365,16 +368,20 @@ impl LineIndex {
         let starts = std::iter::once(0)
             .chain(source.match_indices('\n').map(|(index, _)| index + 1))
             .collect();
-        Self { starts }
+        Self {
+            starts,
+            encoding: PositionEncoding::current(),
+        }
     }
 
     pub(crate) fn position(&self, source: &str, offset: usize) -> Value {
-        let offset = floor_char_boundary(source, offset);
-        let line = self.starts.partition_point(|&start| start <= offset) - 1;
-        let character: usize = source[self.starts[line]..offset]
-            .chars()
-            .map(char::len_utf16)
-            .sum();
+        let offset = floor_position_offset(source, offset);
+        let line = self
+            .starts
+            .partition_point(|&start| start <= offset)
+            .saturating_sub(1);
+        let start = self.starts.get(line).copied().unwrap_or(0).min(offset);
+        let character = self.encoding.len(&source[start..offset]);
         json!({"line": line, "character": character})
     }
 }

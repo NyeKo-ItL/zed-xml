@@ -3,6 +3,7 @@
 mod catalog;
 mod code_actions;
 mod colors;
+mod dispatch;
 mod dtd;
 #[cfg(test)]
 mod fixture_smoke;
@@ -13,10 +14,12 @@ mod hover;
 mod identity;
 mod linked_editing;
 mod links;
+mod positions;
 mod rename;
 mod selection;
 mod settings;
 mod symbols;
+mod worker;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -26,7 +29,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use lsp_server::{Connection, Message, Notification, RequestId, Response};
+use lsp_server::{Connection, ErrorCode, Message, Notification, RequestId, Response};
 use quick_xml::{Reader, events::Event};
 use serde_json::{Value, json};
 #[cfg(test)]
@@ -115,6 +118,9 @@ struct XmlLanguageServer {
     catalog_registrations: u64,
     /// Texts of the external DTDs read from disk.
     dtd_cache: dtd::DtdCache,
+    /// Thread computing and publishing the diagnostics (`None` in the
+    /// worker's own replica and in unit tests).
+    diagnostics_worker: Option<worker::DiagnosticsWorker>,
 }
 
 impl XmlLanguageServer {
@@ -138,6 +144,38 @@ impl XmlLanguageServer {
             catalog_registration: None,
             catalog_registrations: 0,
             dtd_cache: HashMap::new(),
+            diagnostics_worker: None,
+        }
+    }
+
+    /// Server configured from the `initialize` parameters: client
+    /// capabilities, workspace folders, settings and catalogs.
+    fn from_initialize_params(initialize_params: &Value) -> Self {
+        let mut server = Self::new();
+        server.folding_settings =
+            folding::FoldingSettings::from_initialize_params(initialize_params);
+        server.definition_link_support = initialize_params
+            .pointer("/capabilities/textDocument/definition/linkSupport")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        server.hierarchical_document_symbols = initialize_params
+            .pointer("/capabilities/textDocument/documentSymbol/hierarchicalDocumentSymbolSupport")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        server.watched_files_registration = initialize_params
+            .pointer("/capabilities/workspace/didChangeWatchedFiles/dynamicRegistration")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        server.workspace = symbols::WorkspaceIndex::from_initialize_params(initialize_params);
+        server.initialize_settings(initialize_params);
+        server.update_catalogs();
+        server
+    }
+
+    /// Sends `job` to the diagnostics worker.
+    fn send_to_worker(&self, job: worker::Job) {
+        if let Some(worker) = &self.diagnostics_worker {
+            worker.send(job);
         }
     }
 
@@ -173,19 +211,7 @@ impl XmlLanguageServer {
         }
         self.log_catalog_errors();
         self.register_catalog_watchers(connection)?;
-        self.publish_all_diagnostics(connection)
-    }
-
-    /// Republishes the diagnostics of all open documents.
-    fn publish_all_diagnostics(
-        &mut self,
-        connection: &Connection,
-    ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let mut uris = self.documents.keys().cloned().collect::<Vec<_>>();
-        uris.sort();
-        for uri in uris {
-            self.publish_diagnostics(connection, &uri)?;
-        }
+        self.send_to_worker(worker::Job::ValidateAll);
         Ok(())
     }
 
@@ -335,6 +361,7 @@ impl XmlLanguageServer {
         }
         let settings = settings::Settings::from_value(&merged);
         let previous = std::mem::replace(&mut self.settings, settings);
+        self.send_to_worker(worker::Job::Settings(Box::new(self.settings.clone())));
         let catalogs_changed = self.update_catalogs();
         if catalogs_changed {
             self.register_catalog_watchers(connection)?;
@@ -342,26 +369,7 @@ impl XmlLanguageServer {
         if previous.same_validation(&self.settings) && !catalogs_changed {
             return Ok(());
         }
-        self.publish_all_diagnostics(connection)
-    }
-
-    /// Publishes the diagnostics of the open document `uri`.
-    fn publish_diagnostics(
-        &mut self,
-        connection: &Connection,
-        uri: &str,
-    ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let Some(source) = self.documents.get(uri).cloned() else {
-            return Ok(());
-        };
-        let params = self.diagnostics(uri, &source);
-        connection.sender.send(
-            Notification {
-                method: PUBLISH_DIAGNOSTICS_METHOD.to_owned(),
-                params,
-            }
-            .into(),
-        )?;
+        self.send_to_worker(worker::Job::ValidateAll);
         Ok(())
     }
 
@@ -498,89 +506,65 @@ impl XmlLanguageServer {
         }
     }
 
+    /// Handles a notification other than `exit`. Diagnostics are computed
+    /// and published by the diagnostics worker, which receives the document
+    /// and settings changes.
     fn handle_notification(
         &mut self,
         connection: &Connection,
         notification: Notification,
-    ) -> Result<bool, Box<dyn Error + Send + Sync>> {
-        if notification.method == EXIT_METHOD {
-            return Ok(true);
-        }
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let params = &notification.params;
         match notification.method.as_str() {
-            DID_CHANGE_CONFIGURATION_METHOD => {
-                self.configuration_changed(connection, &notification.params)?;
-                return Ok(false);
-            }
+            DID_CHANGE_CONFIGURATION_METHOD => self.configuration_changed(connection, params)?,
             DID_CHANGE_WORKSPACE_FOLDERS_METHOD => {
-                self.workspace.change_folders(&notification.params);
+                self.workspace.change_folders(params);
+                self.send_to_worker(worker::Job::WorkspaceFolders(params.clone()));
                 if self.update_catalogs() {
                     self.register_catalog_watchers(connection)?;
-                    self.publish_all_diagnostics(connection)?;
+                    self.send_to_worker(worker::Job::ValidateAll);
                 }
-                return Ok(false);
             }
             DID_CHANGE_WATCHED_FILES_METHOD => {
                 // Modified catalogs are reread by `refresh_catalogs`
                 // before each message.
-                self.workspace.files_changed(&notification.params);
-                return Ok(false);
+                self.workspace.files_changed(params);
+            }
+            DID_CLOSE_METHOD => {
+                if let Some(uri) = document_uri(params) {
+                    self.documents.remove(uri);
+                    self.send_to_worker(worker::Job::Document {
+                        uri: uri.to_owned(),
+                        version: None,
+                        text: None,
+                    });
+                }
+            }
+            DID_OPEN_METHOD | DID_CHANGE_METHOD => {
+                let changed = if notification.method == DID_OPEN_METHOD {
+                    Self::opened_document(params)
+                } else {
+                    document_uri(params)
+                        .and_then(|uri| Self::changed_document(params, self.documents.get(uri)))
+                };
+                let Some((uri, text)) = changed else {
+                    return Ok(());
+                };
+                let version = params
+                    .pointer("/textDocument/version")
+                    .and_then(Value::as_i64);
+                if self.diagnostics_worker.is_some() {
+                    self.send_to_worker(worker::Job::Document {
+                        uri: uri.clone(),
+                        version,
+                        text: Some(text.clone()),
+                    });
+                }
+                self.documents.insert(uri, text);
             }
             _ => {}
         }
-        if notification.method == DID_CLOSE_METHOD {
-            if let Some(uri) = notification
-                .params
-                .get("textDocument")
-                .and_then(|document| document.get("uri"))
-                .and_then(Value::as_str)
-            {
-                self.documents.remove(uri);
-                connection.sender.send(
-                    Notification {
-                        method: PUBLISH_DIAGNOSTICS_METHOD.to_owned(),
-                        params: json!({"uri": uri, "diagnostics": []}),
-                    }
-                    .into(),
-                )?;
-            }
-            return Ok(false);
-        }
-
-        let Some((uri, text)) = (match notification.method.as_str() {
-            DID_OPEN_METHOD => Self::opened_document(&notification.params),
-            DID_CHANGE_METHOD => {
-                let Some(uri) = notification
-                    .params
-                    .get("textDocument")
-                    .and_then(|document| document.get("uri"))
-                    .and_then(Value::as_str)
-                else {
-                    return Ok(false);
-                };
-                Self::changed_document(&notification.params, self.documents.get(uri))
-            }
-            _ => None,
-        }) else {
-            return Ok(false);
-        };
-
-        self.documents.insert(uri.clone(), text);
-        self.publish_diagnostics(connection, &uri)?;
-
-        if is_xsd_uri(&uri) {
-            let dependent_uris = self
-                .documents
-                .keys()
-                .filter(|document_uri| *document_uri != &uri)
-                .filter(|document_uri| self.references_schema(document_uri, &uri))
-                .cloned()
-                .collect::<Vec<_>>();
-            for dependent_uri in dependent_uris {
-                self.publish_diagnostics(connection, &dependent_uri)?;
-            }
-        }
-
-        Ok(false)
+        Ok(())
     }
 
     /// Asks the client to report XML files modified on disk
@@ -881,7 +865,7 @@ impl XmlLanguageServer {
             if !visited.insert(reference.path.clone()) {
                 continue;
             }
-            let schema_source = fs::read_to_string(&reference.path).ok()?;
+            let schema_source = xml_core::text::read_text_file(&reference.path).ok()?;
             if let Some(offset) = xsd_element_name_offset(&schema_source, name) {
                 return Some((reference.path, schema_source, offset));
             }
@@ -1178,6 +1162,11 @@ impl XmlLanguageServer {
     }
 }
 
+/// `textDocument.uri` of request or notification parameters.
+fn document_uri(params: &Value) -> Option<&str> {
+    params.get("textDocument")?.get("uri")?.as_str()
+}
+
 fn is_xsd_uri(uri: &str) -> bool {
     uri_to_path(uri)
         .extension()
@@ -1302,7 +1291,7 @@ fn load_schema_graph(
             });
             continue;
         }
-        let schema_source = match fs::read_to_string(&path) {
+        let schema_source = match xml_core::text::read_text_file(&path) {
             Ok(source) => source,
             Err(error) => {
                 errors.push(SchemaLoadError {
@@ -1546,8 +1535,9 @@ fn symbol_value(name: &str, start: usize, end: usize, source: &str) -> Value {
     })
 }
 
-fn server_capabilities() -> Value {
+fn server_capabilities(encoding: positions::PositionEncoding) -> Value {
     json!({
+        "positionEncoding": encoding.as_str(),
         "textDocumentSync": {"openClose": true, "change": 2},
         "completionProvider": {"triggerCharacters": ["<", " ", "/", ">", "=", "\"", "?", "&", "%"]},
         "documentFormattingProvider": true,
@@ -1569,43 +1559,30 @@ fn server_capabilities() -> Value {
     })
 }
 
-fn offset_at(source: &str, line: usize, character: usize) -> usize {
-    let mut current_line = 0;
-    let mut current_character = 0;
-
-    for (index, value) in source.char_indices() {
-        if current_line == line {
-            if current_character >= character {
-                return index;
-            }
-            current_character += value.len_utf16();
+/// UTF-8 offset of the LSP position (`line`, `character` in the negotiated
+/// [`positions::PositionEncoding`]); the end of the line beyond it, the end
+/// of the document beyond the last line.
+pub(crate) fn offset_at(source: &str, line: usize, character: usize) -> usize {
+    let start = if line == 0 {
+        0
+    } else {
+        match source.match_indices('\n').nth(line - 1) {
+            Some((index, _)) => index + 1,
+            None => return source.len(),
         }
-        if value == '\n' {
-            current_line += 1;
-            current_character = 0;
-        }
-    }
-
-    source.len()
+    };
+    let content = positions::line_content(source, start);
+    start + positions::PositionEncoding::current().offset_in_line(content, character)
 }
 
-fn position_at(source: &str, offset: usize) -> Value {
-    let mut line = 0;
-    let mut character = 0;
-    let bounded_offset = offset.min(source.len());
-
-    for (index, value) in source.char_indices() {
-        if index >= bounded_offset {
-            break;
-        }
-        if value == '\n' {
-            line += 1;
-            character = 0;
-        } else {
-            character += value.len_utf16();
-        }
-    }
-
+/// LSP position of the UTF-8 `offset` (clamped to the document, floored to a
+/// character boundary outside a CRLF).
+pub(crate) fn position_at(source: &str, offset: usize) -> Value {
+    let offset = positions::floor_position_offset(source, offset);
+    let before = &source[..offset];
+    let line = before.bytes().filter(|&byte| byte == b'\n').count();
+    let line_start = before.rfind('\n').map_or(0, |index| index + 1);
+    let character = positions::PositionEncoding::current().len(&source[line_start..offset]);
     json!({ "line": line, "character": character })
 }
 
@@ -1640,236 +1617,153 @@ fn diagnostics_params(
     })
 }
 
-fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
+impl XmlLanguageServer {
+    /// Result of the request `method` (`MethodNotFound` for an unknown one).
+    fn handle_request(
+        &mut self,
+        method: &str,
+        params: &Value,
+    ) -> Result<Value, dispatch::RequestError> {
+        let empty = || json!([]);
+        Ok(match method {
+            COMPLETION_METHOD => self
+                .completion(params)
+                .unwrap_or_else(|| json!({"isIncomplete": false, "items": []})),
+            SYMBOL_METHOD => self.symbols(params).unwrap_or_else(empty),
+            WORKSPACE_SYMBOL_METHOD => self.workspace_symbols(params),
+            DEFINITION_METHOD => self.definition(params).unwrap_or_else(empty),
+            REFERENCES_METHOD => self.references(params).unwrap_or_else(empty),
+            DOCUMENT_HIGHLIGHT_METHOD => self.document_highlight(params).unwrap_or_else(empty),
+            LINKED_EDITING_RANGE_METHOD => self.linked_editing_range(params).unwrap_or(Value::Null),
+            PREPARE_RENAME_METHOD => self.prepare_rename(params).unwrap_or(Value::Null),
+            RENAME_METHOD => self
+                .rename(params)
+                .map_err(|error| dispatch::RequestError {
+                    code: error.code,
+                    message: error.message,
+                })?
+                .unwrap_or(Value::Null),
+            FOLDING_RANGE_METHOD => self.folding_range(params).unwrap_or_else(empty),
+            SELECTION_RANGE_METHOD => self.selection_range(params).unwrap_or(Value::Null),
+            CODE_ACTION_METHOD => self.code_action(params).unwrap_or_else(empty),
+            DOCUMENT_COLOR_METHOD => self.document_colors(params).unwrap_or_else(empty),
+            COLOR_PRESENTATION_METHOD => self.color_presentations(params).unwrap_or_else(empty),
+            DOCUMENT_LINK_METHOD => self.document_links(params).unwrap_or_else(empty),
+            HOVER_METHOD => self.hover(params).unwrap_or(Value::Null),
+            FORMATTING_METHOD => self.formatting(params).unwrap_or_else(empty),
+            RANGE_FORMATTING_METHOD => self.range_formatting(params).unwrap_or_else(empty),
+            #[cfg(test)]
+            method if method.starts_with(tests::TEST_METHOD_PREFIX) => {
+                return tests::handle_test_request(self, method, params);
+            }
+            _ => {
+                return Err(dispatch::RequestError::new(
+                    ErrorCode::MethodNotFound,
+                    format!("unsupported request: {method}"),
+                ));
+            }
+        })
+    }
+}
+
+/// Serves one client connection; returns the process exit code: 0 when
+/// `exit` follows `shutdown`, 1 otherwise (LSP 3.17).
+fn run(connection: Connection) -> Result<i32, Box<dyn Error + Send + Sync>> {
     let (initialize_id, initialize_params) = connection.initialize_start()?;
+    let encoding = positions::PositionEncoding::negotiate(&initialize_params);
     connection.initialize_finish(
         initialize_id,
         json!({
-            "capabilities": server_capabilities(),
+            "capabilities": server_capabilities(encoding),
             "serverInfo": {
                 "name": "xml-lsp",
                 "version": env!("CARGO_PKG_VERSION"),
             },
         }),
     )?;
-    let mut server = XmlLanguageServer::new();
-    server.folding_settings = folding::FoldingSettings::from_initialize_params(&initialize_params);
-    server.definition_link_support = initialize_params
-        .pointer("/capabilities/textDocument/definition/linkSupport")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    server.hierarchical_document_symbols = initialize_params
-        .pointer("/capabilities/textDocument/documentSymbol/hierarchicalDocumentSymbolSupport")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    server.watched_files_registration = initialize_params
-        .pointer("/capabilities/workspace/didChangeWatchedFiles/dynamicRegistration")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    server.workspace = symbols::WorkspaceIndex::from_initialize_params(&initialize_params);
-    server.initialize_settings(&initialize_params);
-    server.update_catalogs();
+    encoding.install();
+    let mut server = XmlLanguageServer::from_initialize_params(&initialize_params);
+    let publisher = connection.sender.clone();
+    server.diagnostics_worker = Some(worker::DiagnosticsWorker::spawn(
+        XmlLanguageServer::from_initialize_params(&initialize_params),
+        encoding,
+        move |params| {
+            publisher
+                .send(
+                    Notification {
+                        method: PUBLISH_DIAGNOSTICS_METHOD.to_owned(),
+                        params,
+                    }
+                    .into(),
+                )
+                .is_ok()
+        },
+    ));
     // `initialize_finish` has already consumed the `initialized` notification.
     server.register_watched_files(&connection)?;
     server.register_catalog_watchers(&connection)?;
     server.request_configuration(&connection)?;
 
-    for message in &connection.receiver {
-        if !matches!(message, Message::Response(_)) {
-            server.refresh_catalogs(&connection)?;
+    let mut incoming = dispatch::Incoming::default();
+    let mut shutdown = false;
+    let exit_code = loop {
+        let Some(message) = incoming.next(&connection) else {
+            // The client went away without `exit`.
+            break 1;
+        };
+        if !shutdown && !matches!(message, Message::Response(_)) {
+            dispatch::guarded_notification("catalog refresh", || {
+                server.refresh_catalogs(&connection)
+            })
+            .transpose()?;
         }
         match message {
             Message::Request(request) => {
-                if request.method == COMPLETION_METHOD {
-                    let result = server
-                        .completion(&request.params)
-                        .unwrap_or_else(|| json!({"isIncomplete": false, "items": []}));
-                    connection
-                        .sender
-                        .send(Response::new_ok(request.id, result).into())?;
-                    continue;
-                }
-
-                if request.method == SYMBOL_METHOD {
-                    let symbols = server.symbols(&request.params).unwrap_or_else(|| json!([]));
-                    connection
-                        .sender
-                        .send(Response::new_ok(request.id, symbols).into())?;
-                    continue;
-                }
-
-                if request.method == WORKSPACE_SYMBOL_METHOD {
-                    let symbols = server.workspace_symbols(&request.params);
-                    connection
-                        .sender
-                        .send(Response::new_ok(request.id, symbols).into())?;
-                    continue;
-                }
-
-                if request.method == DEFINITION_METHOD {
-                    let definition = server
-                        .definition(&request.params)
-                        .unwrap_or_else(|| json!([]));
-                    connection
-                        .sender
-                        .send(Response::new_ok(request.id, definition).into())?;
-                    continue;
-                }
-
-                if request.method == REFERENCES_METHOD {
-                    let references = server
-                        .references(&request.params)
-                        .unwrap_or_else(|| json!([]));
-                    connection
-                        .sender
-                        .send(Response::new_ok(request.id, references).into())?;
-                    continue;
-                }
-
-                if request.method == DOCUMENT_HIGHLIGHT_METHOD {
-                    let highlights = server
-                        .document_highlight(&request.params)
-                        .unwrap_or_else(|| json!([]));
-                    connection
-                        .sender
-                        .send(Response::new_ok(request.id, highlights).into())?;
-                    continue;
-                }
-
-                if request.method == LINKED_EDITING_RANGE_METHOD {
-                    let ranges = server
-                        .linked_editing_range(&request.params)
-                        .unwrap_or(Value::Null);
-                    connection
-                        .sender
-                        .send(Response::new_ok(request.id, ranges).into())?;
-                    continue;
-                }
-
-                if request.method == PREPARE_RENAME_METHOD {
-                    let result = server
-                        .prepare_rename(&request.params)
-                        .unwrap_or(Value::Null);
-                    connection
-                        .sender
-                        .send(Response::new_ok(request.id, result).into())?;
-                    continue;
-                }
-
-                if request.method == RENAME_METHOD {
-                    let response = match server.rename(&request.params) {
-                        Ok(edit) => Response::new_ok(request.id, edit.unwrap_or(Value::Null)),
-                        Err(error) => Response::new_err(request.id, error.code, error.message),
-                    };
-                    connection.sender.send(response.into())?;
-                    continue;
-                }
-
-                if request.method == FOLDING_RANGE_METHOD {
-                    let ranges = server
-                        .folding_range(&request.params)
-                        .unwrap_or_else(|| json!([]));
-                    connection
-                        .sender
-                        .send(Response::new_ok(request.id, ranges).into())?;
-                    continue;
-                }
-
-                if request.method == SELECTION_RANGE_METHOD {
-                    let ranges = server
-                        .selection_range(&request.params)
-                        .unwrap_or(Value::Null);
-                    connection
-                        .sender
-                        .send(Response::new_ok(request.id, ranges).into())?;
-                    continue;
-                }
-
-                if request.method == CODE_ACTION_METHOD {
-                    let actions = server
-                        .code_action(&request.params)
-                        .unwrap_or_else(|| json!([]));
-                    connection
-                        .sender
-                        .send(Response::new_ok(request.id, actions).into())?;
-                    continue;
-                }
-
-                if request.method == DOCUMENT_COLOR_METHOD {
-                    let colors = server
-                        .document_colors(&request.params)
-                        .unwrap_or_else(|| json!([]));
-                    connection
-                        .sender
-                        .send(Response::new_ok(request.id, colors).into())?;
-                    continue;
-                }
-
-                if request.method == COLOR_PRESENTATION_METHOD {
-                    let presentations = server
-                        .color_presentations(&request.params)
-                        .unwrap_or_else(|| json!([]));
-                    connection
-                        .sender
-                        .send(Response::new_ok(request.id, presentations).into())?;
-                    continue;
-                }
-
-                if request.method == DOCUMENT_LINK_METHOD {
-                    let links = server
-                        .document_links(&request.params)
-                        .unwrap_or_else(|| json!([]));
-                    connection
-                        .sender
-                        .send(Response::new_ok(request.id, links).into())?;
-                    continue;
-                }
-
-                if request.method == HOVER_METHOD {
-                    let hover = server.hover(&request.params).unwrap_or(Value::Null);
-                    connection
-                        .sender
-                        .send(Response::new_ok(request.id, hover).into())?;
-                    continue;
-                }
-
-                if matches!(
-                    request.method.as_str(),
-                    FORMATTING_METHOD | RANGE_FORMATTING_METHOD
-                ) {
-                    let edits = if request.method == FORMATTING_METHOD {
-                        server.formatting(&request.params)
-                    } else {
-                        server.range_formatting(&request.params)
-                    }
-                    .unwrap_or_else(|| json!([]));
-                    connection
-                        .sender
-                        .send(Response::new_ok(request.id, edits).into())?;
-                    continue;
-                }
-
-                if connection.handle_shutdown(&request)? {
-                    break;
-                }
-
-                let response = Response::new_err(
-                    request.id,
-                    -32601,
-                    format!("unsupported request: {}", request.method),
-                );
+                let response = if shutdown {
+                    Response::new_err(
+                        request.id,
+                        ErrorCode::InvalidRequest as i32,
+                        "the server is shutting down".to_owned(),
+                    )
+                } else if incoming.take_cancelled(&request.id) {
+                    Response::new_err(
+                        request.id,
+                        ErrorCode::RequestCanceled as i32,
+                        "request cancelled".to_owned(),
+                    )
+                } else if request.method == dispatch::SHUTDOWN_METHOD {
+                    shutdown = true;
+                    Response::new_ok(request.id, Value::Null)
+                } else {
+                    dispatch::guarded_request(&request, || {
+                        server.handle_request(&request.method, &request.params)
+                    })
+                };
                 connection.sender.send(response.into())?;
             }
-            Message::Notification(notification) => {
-                if server.handle_notification(&connection, notification)? {
-                    break;
-                }
+            Message::Notification(notification) if notification.method == EXIT_METHOD => {
+                break if shutdown { 0 } else { 1 };
             }
-            Message::Response(response) => server.handle_response(&connection, response)?,
+            Message::Notification(_) if shutdown => {}
+            Message::Notification(notification) => {
+                let method = notification.method.clone();
+                dispatch::guarded_notification(&method, || {
+                    server.handle_notification(&connection, notification)
+                })
+                .transpose()?;
+            }
+            Message::Response(response) => {
+                dispatch::guarded_notification("response", || {
+                    server.handle_response(&connection, response)
+                })
+                .transpose()?;
+            }
         }
-    }
-
-    Ok(())
+    };
+    // Stops the diagnostics worker (and its clone of the sender) so that
+    // the transport can close.
+    drop(server);
+    Ok(exit_code)
 }
 
 fn main() {
@@ -1880,13 +1774,15 @@ fn main() {
 
     let (connection, io_threads) = Connection::stdio();
 
-    if let Err(error) = run(connection) {
+    let exit_code = run(connection).unwrap_or_else(|error| {
         eprintln!("xml-lsp stopped: {error}");
-    }
+        1
+    });
 
     if let Err(error) = io_threads.join() {
         eprintln!("xml-lsp transport stopped: {error}");
     }
+    std::process::exit(exit_code);
 }
 
 #[cfg(test)]
@@ -1894,6 +1790,43 @@ mod tests {
     use super::*;
     use lsp_server::{Request, RequestId};
     use std::thread;
+
+    /// Requests only the tests send, to observe the server deterministically.
+    pub(super) const TEST_METHOD_PREFIX: &str = "xml-lsp/test/";
+    /// Answers once the diagnostics of the changes sent so far are published.
+    const SYNC_DIAGNOSTICS_METHOD: &str = "xml-lsp/test/syncDiagnostics";
+    /// Panics in the handler.
+    const PANIC_METHOD: &str = "xml-lsp/test/panic";
+    /// Keeps the request loop busy for `params.milliseconds`.
+    const SLEEP_METHOD: &str = "xml-lsp/test/sleep";
+
+    pub(super) fn handle_test_request(
+        server: &mut XmlLanguageServer,
+        method: &str,
+        params: &Value,
+    ) -> Result<Value, dispatch::RequestError> {
+        match method {
+            SYNC_DIAGNOSTICS_METHOD => {
+                if let Some(worker) = &server.diagnostics_worker {
+                    assert!(
+                        worker.flush(std::time::Duration::from_secs(20)),
+                        "the diagnostics worker should become idle"
+                    );
+                }
+            }
+            PANIC_METHOD => panic!("test panic in a request handler"),
+            SLEEP_METHOD => thread::sleep(std::time::Duration::from_millis(
+                params["milliseconds"].as_u64().unwrap_or(100),
+            )),
+            _ => {
+                return Err(dispatch::RequestError::new(
+                    ErrorCode::MethodNotFound,
+                    method,
+                ));
+            }
+        }
+        Ok(Value::Null)
+    }
 
     #[test]
     fn preserves_a_user_change_from_self_closing_to_explicit_empty_element() {
@@ -2041,7 +1974,7 @@ mod tests {
 
     #[test]
     fn completion_triggers_cover_xml_typing_contexts() {
-        let capabilities = server_capabilities();
+        let capabilities = server_capabilities(positions::PositionEncoding::default());
         assert_eq!(
             capabilities["completionProvider"]["triggerCharacters"],
             json!(["<", " ", "/", ">", "=", "\"", "?", "&", "%"])
@@ -2602,10 +2535,10 @@ mod tests {
             }
         }
 
-        /// Diagnostics published so far, then cleared. An intermediate
+        /// Diagnostics published so far, then cleared. The synchronisation
         /// request guarantees that previous publications have been received.
         fn take_diagnostics(&self, id: i32) -> Vec<Value> {
-            self.request(id, WORKSPACE_SYMBOL_METHOD, json!({"query": "\u{0}"}));
+            self.request(id, SYNC_DIAGNOSTICS_METHOD, Value::Null);
             std::mem::take(&mut *self.diagnostics.borrow_mut())
         }
     }
@@ -4704,6 +4637,7 @@ i:noNamespaceSchemaLocation=\"missing.xsd\">\r\n  \
                     response.result,
                     Some(json!({
                         "capabilities": {
+                            "positionEncoding": "utf-16",
                             "textDocumentSync": {"openClose": true, "change": 2},
                             "completionProvider": {"triggerCharacters": ["<", " ", "/", ">", "=", "\"", "?", "&", "%"]},
                             "documentFormattingProvider": true,
@@ -5019,6 +4953,32 @@ i:noNamespaceSchemaLocation=\"missing.xsd\">\r\n  \
             message => panic!("expected shutdown response, got {message:?}"),
         }
 
+        // After `shutdown`, requests are rejected and notifications ignored.
+        client
+            .sender
+            .send(
+                Request {
+                    id: RequestId::from(6),
+                    method: HOVER_METHOD.to_owned(),
+                    params: json!({
+                        "textDocument": {"uri": "file:///document.xml"},
+                        "position": {"line": 0, "character": 1},
+                    }),
+                }
+                .into(),
+            )
+            .expect("request after shutdown should be sent");
+        match client.receiver.recv().expect("an error should be received") {
+            Message::Response(response) => {
+                assert_eq!(response.id, RequestId::from(6));
+                assert_eq!(
+                    response.error.map(|error| error.code),
+                    Some(ErrorCode::InvalidRequest as i32)
+                );
+            }
+            message => panic!("expected an error response, got {message:?}"),
+        }
+
         client
             .sender
             .send(
@@ -5030,7 +4990,8 @@ i:noNamespaceSchemaLocation=\"missing.xsd\">\r\n  \
             )
             .expect("exit should be sent");
 
-        server_thread.join().expect("server thread should stop");
+        let exit_code = server_thread.join().expect("server thread should stop");
+        assert_eq!(exit_code, 0, "exit after shutdown is a clean exit");
     }
 
     #[test]
@@ -5389,6 +5350,40 @@ i:noNamespaceSchemaLocation=\"missing.xsd\">\r\n  \
     }
 
     #[test]
+    fn converts_positions_in_every_encoding_outside_crlf_line_breaks() {
+        let source = "é\r\n😀<r>\r\n";
+        let index = selection::LineIndex::new(source);
+        // Offset 3 is between `\r` and `\n`: the end of the first line.
+        assert_eq!(position_at(source, 3), json!({"line": 0, "character": 1}));
+        assert_eq!(index.position(source, 3), position_at(source, 3));
+        // A character beyond the line is its end, before the line break.
+        assert_eq!(offset_at(source, 0, 40), 2);
+        assert_eq!(offset_at(source, 1, 40), 11);
+        assert_eq!(offset_at(source, 9, 0), source.len());
+        for (encoding, character) in [
+            (positions::PositionEncoding::Utf8, 5),
+            (positions::PositionEncoding::Utf16, 3),
+            (positions::PositionEncoding::Utf32, 2),
+        ] {
+            // Each thread has its own encoding: this one is left unchanged
+            // for the other tests.
+            thread::spawn(move || {
+                encoding.install();
+                let offset = source.find("r>").unwrap();
+                let expected = json!({"line": 1, "character": character});
+                assert_eq!(position_at(source, offset), expected, "{encoding:?}");
+                assert_eq!(
+                    selection::LineIndex::new(source).position(source, offset),
+                    expected
+                );
+                assert_eq!(offset_at(source, 1, character), offset, "{encoding:?}");
+            })
+            .join()
+            .expect("conversions should succeed");
+        }
+    }
+
+    #[test]
     fn locates_xsd_parse_errors() {
         let source = r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"><xs:element name="root"></xs:schema>"#;
         let offset = xsd_parse_error_offset(source);
@@ -5456,5 +5451,311 @@ i:noNamespaceSchemaLocation=\"missing.xsd\">\r\n  \
         );
 
         std::fs::remove_file(schema_path).expect("schema should be removed");
+    }
+
+    /// Starts a server and sends `initialize` (with `params`) and
+    /// `initialized`; returns the client, the `initialize` result and the
+    /// server thread (its exit code).
+    fn start_server(params: Value) -> (TestClient, Value, thread::JoinHandle<i32>) {
+        let (server, connection) = Connection::memory();
+        let server_thread = thread::spawn(|| run(server).expect("server loop should succeed"));
+        let client = TestClient {
+            connection,
+            diagnostics: Default::default(),
+        };
+        let initialize = client.request(0, INITIALIZE_METHOD, params);
+        client.notify("initialized", json!({}));
+        (client, initialize, server_thread)
+    }
+
+    /// Response (result or error) to the request `id`.
+    fn response(client: &TestClient, id: i32) -> Response {
+        match client.next() {
+            Message::Response(response) => {
+                assert_eq!(response.id, RequestId::from(id));
+                response
+            }
+            message => panic!("unexpected message {message:?}"),
+        }
+    }
+
+    fn send_request(client: &TestClient, id: i32, method: &str, params: Value) {
+        client.send(
+            Request {
+                id: RequestId::from(id),
+                method: method.to_owned(),
+                params,
+            }
+            .into(),
+        );
+    }
+
+    fn error_code(response: &Response) -> Option<i32> {
+        response.error.as_ref().map(|error| error.code)
+    }
+
+    #[test]
+    fn answers_requests_cancelled_while_queued() {
+        let (client, _, server_thread) = start_server(json!({}));
+        let uri = "file:///cancel.xml";
+        client.notify(
+            DID_OPEN_METHOD,
+            json!({"textDocument": {"uri": uri, "version": 1, "text": "<root/>"}}),
+        );
+        let hover = json!({"textDocument": {"uri": uri}, "position": {"line": 0, "character": 2}});
+        // The loop is busy while the hover and its cancellation are queued.
+        send_request(&client, 1, SLEEP_METHOD, json!({"milliseconds": 300}));
+        send_request(&client, 2, HOVER_METHOD, hover.clone());
+        send_request(&client, 3, HOVER_METHOD, hover.clone());
+        client.notify(dispatch::CANCEL_REQUEST_METHOD, json!({"id": 2}));
+        // Unknown requests: ignored.
+        client.notify(dispatch::CANCEL_REQUEST_METHOD, json!({"id": 99}));
+        assert_eq!(error_code(&response(&client, 1)), None);
+        assert_eq!(
+            error_code(&response(&client, 2)),
+            Some(ErrorCode::RequestCanceled as i32)
+        );
+        // Already answered: ignored.
+        client.notify(dispatch::CANCEL_REQUEST_METHOD, json!({"id": 1}));
+        assert_eq!(error_code(&response(&client, 3)), None);
+        // String ids are cancelled as well.
+        send_request(&client, 4, SLEEP_METHOD, json!({"milliseconds": 300}));
+        client.send(
+            Request {
+                id: RequestId::from("five".to_owned()),
+                method: HOVER_METHOD.to_owned(),
+                params: hover,
+            }
+            .into(),
+        );
+        client.notify(dispatch::CANCEL_REQUEST_METHOD, json!({"id": "five"}));
+        assert_eq!(error_code(&response(&client, 4)), None);
+        match client.next() {
+            Message::Response(response) => {
+                assert_eq!(response.id, RequestId::from("five".to_owned()));
+                assert_eq!(
+                    error_code(&response),
+                    Some(ErrorCode::RequestCanceled as i32)
+                );
+            }
+            message => panic!("unexpected message {message:?}"),
+        }
+        assert_eq!(client.request(6, "shutdown", Value::Null), Value::Null);
+        client.notify(EXIT_METHOD, Value::Null);
+        assert_eq!(server_thread.join().expect("server should stop"), 0);
+    }
+
+    #[test]
+    fn a_panicking_handler_answers_an_internal_error_and_the_server_keeps_running() {
+        let (client, _, server_thread) = start_server(json!({}));
+        let uri = "file:///panic.xml";
+        client.notify(
+            DID_OPEN_METHOD,
+            json!({"textDocument": {"uri": uri, "version": 1, "text": "<root><a/>"}}),
+        );
+        send_request(&client, 1, PANIC_METHOD, Value::Null);
+        let failed = response(&client, 1);
+        assert_eq!(error_code(&failed), Some(ErrorCode::InternalError as i32));
+        assert!(
+            failed
+                .error
+                .as_ref()
+                .is_some_and(|error| error.message.contains("test panic")),
+            "{failed:?}"
+        );
+        // The server still answers and validates.
+        let symbols = client.request(2, SYMBOL_METHOD, json!({"textDocument": {"uri": uri}}));
+        assert_eq!(symbols.as_array().map(Vec::len), Some(1));
+        let published = client.take_diagnostics(3);
+        assert_eq!(
+            codes(published.last().expect("diagnostics")),
+            ["xml-structure"]
+        );
+        // Unknown requests are still `MethodNotFound`.
+        send_request(&client, 4, "xml/unknown", Value::Null);
+        assert_eq!(
+            error_code(&response(&client, 4)),
+            Some(ErrorCode::MethodNotFound as i32)
+        );
+        assert_eq!(client.request(5, "shutdown", Value::Null), Value::Null);
+        client.notify(EXIT_METHOD, Value::Null);
+        assert_eq!(server_thread.join().expect("server should stop"), 0);
+    }
+
+    #[test]
+    fn exit_without_shutdown_ends_with_code_1() {
+        let (client, _, server_thread) = start_server(json!({}));
+        client.notify(EXIT_METHOD, Value::Null);
+        assert_eq!(server_thread.join().expect("server should stop"), 1);
+
+        // A client that goes away without `exit`.
+        let (client, _, server_thread) = start_server(json!({}));
+        drop(client);
+        assert_eq!(server_thread.join().expect("server should stop"), 1);
+    }
+
+    #[test]
+    fn negotiates_utf8_positions() {
+        let (client, initialize, server_thread) = start_server(json!({
+            "capabilities": {"general": {"positionEncodings": ["utf-16", "utf-8"]}},
+        }));
+        assert_eq!(initialize["capabilities"]["positionEncoding"], "utf-8");
+        let uri = "file:///utf8.xml";
+        // `é` is 2 bytes, `𝄞` 4 bytes: UTF-8 columns differ from UTF-16.
+        let text = "<é𝄞 a=\"1\">\r\n  <b></c>\r\n</é𝄞>";
+        client.notify(
+            DID_OPEN_METHOD,
+            json!({"textDocument": {"uri": uri, "version": 1, "text": text}}),
+        );
+        let published = client.take_diagnostics(1);
+        let diagnostic = &published.last().expect("diagnostics")["diagnostics"][0];
+        assert_eq!(
+            diagnostic["range"]["start"],
+            json!({"line": 1, "character": 7})
+        );
+        let highlights = client.request(
+            2,
+            DOCUMENT_HIGHLIGHT_METHOD,
+            json!({"textDocument": {"uri": uri}, "position": {"line": 2, "character": 3}}),
+        );
+        assert_eq!(
+            highlights,
+            json!([
+                {"range": {"start": {"line": 0, "character": 1}, "end": {"line": 0, "character": 7}}, "kind": 2},
+                {"range": {"start": {"line": 2, "character": 2}, "end": {"line": 2, "character": 8}}, "kind": 2},
+            ])
+        );
+        // Incremental change in UTF-8 columns: `</c>` becomes `</b>`.
+        client.notify(
+            DID_CHANGE_METHOD,
+            json!({
+                "textDocument": {"uri": uri, "version": 2},
+                "contentChanges": [{
+                    "range": {"start": {"line": 1, "character": 7}, "end": {"line": 1, "character": 8}},
+                    "text": "b",
+                }],
+            }),
+        );
+        let published = client.take_diagnostics(3);
+        let last = published.last().expect("diagnostics");
+        assert_eq!(last["diagnostics"], json!([]));
+        assert_eq!(last["version"], 2);
+        assert_eq!(client.request(4, "shutdown", Value::Null), Value::Null);
+        client.notify(EXIT_METHOD, Value::Null);
+        assert_eq!(server_thread.join().expect("server should stop"), 0);
+    }
+
+    #[test]
+    fn serves_documents_with_a_byte_order_mark_and_utf16_schemas() {
+        let directory = std::env::temp_dir().join(format!("xml-lsp-bom-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("directory should be created");
+        // UTF-16 LE schema with a byte order mark, as Windows tools write it.
+        let schema = "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\r\n<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\">\r\n  <xs:element name=\"root\"><xs:complexType><xs:sequence>\r\n    <xs:element name=\"item\" minOccurs=\"0\"/>\r\n  </xs:sequence></xs:complexType></xs:element>\r\n</xs:schema>\r\n";
+        let bytes = [0xFF, 0xFE]
+            .into_iter()
+            .chain(schema.encode_utf16().flat_map(u16::to_le_bytes))
+            .collect::<Vec<u8>>();
+        std::fs::write(directory.join("schema.xsd"), bytes).expect("schema should be written");
+        let uri = path_to_uri(&directory.join("document.xml"));
+        let text = "\u{FEFF}<root xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:noNamespaceSchemaLocation=\"schema.xsd\"><wrong/></root>";
+
+        let (client, _, server_thread) = start_server(json!({}));
+        client.notify(
+            DID_OPEN_METHOD,
+            json!({"textDocument": {"uri": uri, "version": 1, "text": text}}),
+        );
+        let published = client.take_diagnostics(1);
+        let publication = published.last().expect("diagnostics");
+        assert_eq!(codes(publication), ["xsd-validation"], "{publication}");
+        assert!(
+            publication["diagnostics"][0]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("wrong")),
+            "{publication}"
+        );
+        // The mark is one UTF-16 code unit before `<root`.
+        let symbols = client.request(2, SYMBOL_METHOD, json!({"textDocument": {"uri": uri}}));
+        let root = symbols
+            .as_array()
+            .and_then(|symbols| symbols.iter().find(|symbol| symbol["name"] == "root"))
+            .expect("root symbol");
+        assert_eq!(root["range"]["start"], json!({"line": 0, "character": 1}));
+        // Formatting keeps the mark.
+        let edits = client.request(
+            3,
+            FORMATTING_METHOD,
+            json!({"textDocument": {"uri": uri}, "options": {"tabSize": 2, "insertSpaces": true}}),
+        );
+        let formatted = formatting::apply_edits(text, &edits);
+        assert!(formatted.starts_with("\u{FEFF}<root"), "{formatted:?}");
+        assert!(formatted.contains("\n  <wrong/>\n"), "{formatted:?}");
+        // Completion reads the UTF-16 schema.
+        client.notify(
+            DID_CHANGE_METHOD,
+            json!({
+                "textDocument": {"uri": uri, "version": 2},
+                "contentChanges": [{"text": text.replace("<wrong/>", "<")}],
+            }),
+        );
+        let character = text.find("<wrong/>").expect("element") + 1 - 2;
+        let completion = client.request(
+            4,
+            COMPLETION_METHOD,
+            json!({"textDocument": {"uri": uri}, "position": {"line": 0, "character": character}}),
+        );
+        assert!(
+            completion["items"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item["label"] == "item")),
+            "{completion}"
+        );
+        assert_eq!(client.request(5, "shutdown", Value::Null), Value::Null);
+        client.notify(EXIT_METHOD, Value::Null);
+        assert_eq!(server_thread.join().expect("server should stop"), 0);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn publishes_the_diagnostics_of_the_latest_version_only_last() {
+        let (client, _, server_thread) = start_server(json!({}));
+        let uri = "file:///typing.xml";
+        client.notify(
+            DID_OPEN_METHOD,
+            json!({"textDocument": {"uri": uri, "version": 1, "text": "<root>"}}),
+        );
+        let mut text = "<root>".to_owned();
+        for version in 2..=40 {
+            text.push_str("<a/>");
+            if version == 40 {
+                text.push_str("</root>");
+            }
+            client.notify(
+                DID_CHANGE_METHOD,
+                json!({
+                    "textDocument": {"uri": uri, "version": version},
+                    "contentChanges": [{"text": text}],
+                }),
+            );
+        }
+        let published = client.take_diagnostics(1);
+        let versions = published
+            .iter()
+            .map(|publication| publication["version"].as_i64().expect("version"))
+            .collect::<Vec<_>>();
+        assert!(
+            versions.windows(2).all(|pair| pair[0] < pair[1]),
+            "{versions:?}"
+        );
+        let last = published.last().expect("diagnostics");
+        assert_eq!(last["version"], 40);
+        assert_eq!(last["diagnostics"], json!([]));
+        // Closing clears the diagnostics.
+        client.notify(DID_CLOSE_METHOD, json!({"textDocument": {"uri": uri}}));
+        let published = client.take_diagnostics(2);
+        assert_eq!(published, [json!({"uri": uri, "diagnostics": []})]);
+        assert_eq!(client.request(3, "shutdown", Value::Null), Value::Null);
+        client.notify(EXIT_METHOD, Value::Null);
+        assert_eq!(server_thread.join().expect("server should stop"), 0);
     }
 }

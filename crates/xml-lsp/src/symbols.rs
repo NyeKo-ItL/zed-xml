@@ -574,7 +574,7 @@ impl WorkspaceIndex {
                 .get(&path)
                 .is_some_and(|cached| cached.modified == modified && cached.len == len);
             if !fresh {
-                let Ok(source) = fs::read_to_string(&path) else {
+                let Ok(source) = xml_core::text::read_text_file(&path) else {
                     continue;
                 };
                 let location = path.to_string_lossy();

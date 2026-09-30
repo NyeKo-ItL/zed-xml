@@ -32,16 +32,6 @@ const HUGE_DOCUMENT: usize = 64 * 1024;
 /// Problems known today, as `(fixture path suffix, problem)`. The test fails
 /// when one of them no longer occurs, so fixes are recorded here.
 const KNOWN_PROBLEMS: &[(&str, &str)] = &[
-    // A blank line ending in CRLF after an LF line: the server counts the
-    // `\r` as a character, LSP counts CRLF as one line break.
-    (
-        "real-world/svg/libxml2-svg1.svg",
-        "formatting returned an invalid range (4, 0)..(162, 1)",
-    ),
-    (
-        "real-world/svg/libxml2-svg2.svg",
-        "formatting returned an invalid range (4, 0)..(57, 1)",
-    ),
     // `<!DOCTYPE doc>[]>` is not well-formed but raises no diagnostic, and
     // formatting it twice gives two different results.
     (
@@ -126,6 +116,11 @@ fn the_xml_language_claims_the_real_world_fixtures() {
 }
 
 fn exercise(path: &Path, source: &str) -> Vec<String> {
+    exercise_offsets(path, source, sample_offsets(source))
+}
+
+/// Runs every request on `source`, the positional ones at `offsets`.
+fn exercise_offsets(path: &Path, source: &str, offsets: Vec<usize>) -> Vec<String> {
     let uri = path_to_uri(path);
     let mut server = XmlLanguageServer::new();
     server.documents.insert(uri.clone(), source.to_owned());
@@ -177,7 +172,7 @@ fn exercise(path: &Path, source: &str) -> Vec<String> {
         })),
     );
 
-    let positions = sample_offsets(source)
+    let positions = offsets
         .into_iter()
         .map(|offset| position_at(source, offset))
         .collect::<Vec<_>>();
@@ -224,6 +219,47 @@ fn exercise(path: &Path, source: &str) -> Vec<String> {
         }
     }
     problems
+}
+
+/// Small documents mixing what usually breaks offset arithmetic: a byte
+/// order mark, CRLF, characters outside the BMP, truncated markup, DTD
+/// internal subsets and namespaces.
+const TRICKY_DOCUMENTS: &[&str] = &[
+    "\u{FEFF}<?xml version=\"1.0\"?>\r\n<é𝄞 a=\"1\" b='2'>\r\n  <x:y xmlns:x=\"urn:x\">t&amp;𝄞</x:y>\r\n</é𝄞>",
+    "<!DOCTYPE r [\r\n<!ELEMENT r (a|b)*>\r\n<!ATTLIST r id ID #IMPLIED>\r\n<!ENTITY e \"é\">\r\n]>\r\n<r id=\"1\">&e;<a/><",
+    "<r><!-- 𝄞 --><![CDATA[<é>]]><?pi 𝄞?><a b=\"\r\n",
+    "<a\r\n  b=\"𝄞\"\r\n  c",
+    "</é><é/>< é>&;&#xZ;<a:b:c/>\r\n",
+    "\r\n\r\n",
+    "<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\"><xs:element name=\"é\" type=\"xs:str",
+    "<?xml-model href=\"missing.rng\"?><r xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"urn:a missing.xsd urn:b\"><",
+    "<!DOCTYPE r [<!ENTITY a \"&b;\"><!ENTITY b \"&a;\"><!ENTITY % p \"<!ELEMENT\"> %p; r ANY>é]><r>&a;</r>",
+    "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect fill=\"#fé0\" stroke=\"rgb(1,2,\"/></svg>",
+];
+
+#[test]
+fn every_request_handles_every_offset_of_tricky_documents() {
+    for source in TRICKY_DOCUMENTS {
+        for extension in ["xml", "xsd", "dtd"] {
+            let path = std::env::temp_dir().join(format!("xml-lsp-tricky/document.{extension}"));
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                exercise_offsets(&path, source, all_offsets(source))
+            }));
+            match result {
+                Ok(problems) => assert!(problems.is_empty(), "{source:?}: {problems:?}"),
+                Err(_) => panic!("a request panicked on {source:?} ({extension})"),
+            }
+        }
+    }
+}
+
+/// Every character boundary of `source`.
+fn all_offsets(source: &str) -> Vec<usize> {
+    source
+        .char_indices()
+        .map(|(offset, _)| offset)
+        .chain([source.len()])
+        .collect()
 }
 
 /// Offsets on character boundaries spread over the document, plus its ends

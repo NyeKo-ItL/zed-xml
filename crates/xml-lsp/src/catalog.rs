@@ -418,7 +418,7 @@ pub fn catalog_paths(configured: &[String], roots: &[PathBuf], auto_detect: bool
         for root in roots {
             let path = root.join(AUTO_DETECTED_CATALOG);
             if !paths.contains(&path)
-                && fs::read_to_string(&path).is_ok_and(|source| is_catalog(&source))
+                && xml_core::text::read_text_file(&path).is_ok_and(|source| is_catalog(&source))
             {
                 paths.push(path);
             }
@@ -555,7 +555,7 @@ impl Catalogs {
                 .get(&path)
                 .is_some_and(|loaded| loaded.stamp == current);
             if !up_to_date {
-                let catalog = match fs::read_to_string(&path) {
+                let catalog = match xml_core::text::read_text_file(&path) {
                     Ok(source) => parse_catalog(&source, &path_to_uri(&path)).map(Arc::new),
                     Err(error) => Err(format!("unreadable catalog: {error}")),
                 };

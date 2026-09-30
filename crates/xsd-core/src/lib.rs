@@ -1085,14 +1085,14 @@ fn apply_model_group_references(source: &str, schema: &mut XsdSchema) -> Result<
                     }
                 } else if current_group.is_some() && name == "sequence" {
                     group_depth += 1;
-                } else if current_group.is_some()
+                } else if let Some(group) = &current_group
                     && group_depth > 0
                     && name == "element"
                     && let Some(element_name) = attribute(&element, "name")
                 {
                     schema
                         .model_groups
-                        .entry(current_group.clone().unwrap())
+                        .entry(group.clone())
                         .or_default()
                         .push(element_name);
                 }
@@ -1104,14 +1104,14 @@ fn apply_model_group_references(source: &str, schema: &mut XsdSchema) -> Result<
                     && let Some(group) = attribute(&element, "name")
                 {
                     schema.model_groups.entry(group).or_default();
-                } else if current_group.is_some()
+                } else if let Some(group) = &current_group
                     && group_depth > 0
                     && name == "element"
                     && let Some(element_name) = attribute(&element, "name")
                 {
                     schema
                         .model_groups
-                        .entry(current_group.clone().unwrap())
+                        .entry(group.clone())
                         .or_default()
                         .push(element_name);
                 }

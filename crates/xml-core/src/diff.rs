@@ -106,6 +106,18 @@ fn refine(old: &str, range: Range<usize>, text: &str) -> TextChange {
     {
         suffix -= 1;
     }
+    // An LSP position cannot designate the point between the `\r` and the
+    // `\n` of a CRLF: the change is widened to the whole line break.
+    let splits_crlf = |offset: usize| {
+        old.as_bytes().get(offset.wrapping_sub(1)) == Some(&b'\r')
+            && old.as_bytes().get(offset) == Some(&b'\n')
+    };
+    while prefix > 0 && splits_crlf(range.start + prefix) {
+        prefix -= 1;
+    }
+    while suffix > 0 && splits_crlf(range.end - suffix) {
+        suffix -= 1;
+    }
     TextChange {
         range: range.start + prefix..range.end - suffix,
         text: text[prefix..text.len() - suffix].to_owned(),
@@ -245,6 +257,30 @@ mod tests {
         check("<é/>\r\n<b/>", "<é/>\r\n  <b/>\r\n");
         let changes = check("😀a", "😀b");
         assert_eq!(changes[0].range, 4..5);
+    }
+
+    #[test]
+    fn never_splits_a_crlf_line_break() {
+        let splits = |old: &str, changes: &[TextChange]| {
+            changes.iter().any(|change| {
+                [change.range.start, change.range.end]
+                    .iter()
+                    .any(|&offset| {
+                        offset > 0
+                            && old.as_bytes().get(offset - 1) == Some(&b'\r')
+                            && old.as_bytes().get(offset) == Some(&b'\n')
+                    })
+            })
+        };
+        for (old, new) in [
+            ("<a>\n\r\n</a>\n", "<a>\n</a>\n"),
+            ("<a>\r\n</a>", "<a>\n</a>"),
+            ("<a>\r\n\r\n<b/>\r\n</a>", "<a>\r\n  <b/>\n</a>\n"),
+            ("x\r\ny", "x\r\r\ny"),
+        ] {
+            let changes = check(old, new);
+            assert!(!splits(old, &changes), "{old:?} -> {new:?}: {changes:?}");
+        }
     }
 
     #[test]
