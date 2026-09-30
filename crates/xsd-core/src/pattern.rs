@@ -516,7 +516,9 @@ impl Parser {
             }
             Some('-') => {
                 // A hyphen is literal at the start or the end of a class.
-                let at_end = self.peek() == Some(']');
+                // ... or just before a subtraction (`[a-z--[b]]`).
+                let at_end = self.peek() == Some(']')
+                    || (self.peek() == Some('-') && self.peek_at(1) == Some('['));
                 if !first && !at_end {
                     return Err(format!(
                         "'-' at position {position} must be escaped in a character class"

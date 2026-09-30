@@ -1116,6 +1116,11 @@ pub fn check_schema_document(source: &str) -> Vec<SchemaProblem> {
         check_constraints(&document, element, &mut problems);
         stack.extend(document.children[element].iter().rev().copied());
     }
+    // Checks that resolve the types the document itself defines.
+    if let Ok(model) = crate::model::parse_xsd_model(source) {
+        let models = crate::model::XsdModelSet::new(vec![std::sync::Arc::new(model)]);
+        crate::simple_type_check::check_simple_types(&document, &models, &mut problems);
+    }
     problems.sort_by_key(|problem| (problem.range.start, problem.range.end));
     problems
 }
