@@ -1340,10 +1340,12 @@ pub struct XsdModelSet {
 
 type SubstitutionIndex = HashMap<(Option<String>, String), Vec<(usize, usize)>>;
 
-/// Namespaces are compared strictly, then on the local name alone as a
-/// fallback ("chameleon" schemas, documents without a namespace...).
+/// Namespaces are compared strictly, then a component without namespace
+/// matches any namespace as a fallback ("chameleon" schemas, which adopt the
+/// namespace of the schema including them). A component in another
+/// namespace never matches.
 fn namespace_matches(strict: bool, expected: Option<&str>, actual: Option<&str>) -> bool {
-    !strict || expected == actual
+    expected == actual || (!strict && actual.is_none())
 }
 
 impl XsdModelSet {
@@ -1404,17 +1406,69 @@ impl XsdModelSet {
         items: impl Fn(&'a XsdModel) -> &'a [T],
         name_of: impl Fn(&T) -> (&str, Option<&str>),
     ) -> Option<Located<'a, T>> {
+        self.find_where(namespace, local, items, name_of, |_| true)
+    }
+
+    fn find_where<'a, T>(
+        &'a self,
+        namespace: Option<&str>,
+        local: &str,
+        items: impl Fn(&'a XsdModel) -> &'a [T],
+        name_of: impl Fn(&T) -> (&str, Option<&str>),
+        accept: impl Fn(&T) -> bool,
+    ) -> Option<Located<'a, T>> {
         [true, false].into_iter().find_map(|strict| {
             self.models.iter().enumerate().find_map(|(schema, model)| {
                 items(model)
                     .iter()
                     .find(|item| {
                         let (name, item_namespace) = name_of(item);
-                        name == local && namespace_matches(strict, namespace, item_namespace)
+                        name == local
+                            && namespace_matches(strict, namespace, item_namespace)
+                            && accept(item)
                     })
                     .map(|item| Located { schema, item })
             })
         })
+    }
+
+    /// The global type `local` other than `exclude`: a type redefined
+    /// (`xs:redefine`) refers to itself for the definition it replaces.
+    pub(crate) fn global_type_other_than(
+        &self,
+        namespace: Option<&str>,
+        local: &str,
+        exclude: &XsdTypeDef,
+    ) -> Option<Located<'_, XsdTypeDef>> {
+        self.find_where(
+            namespace,
+            local,
+            |model| &model.types,
+            |item| {
+                (
+                    item.name.as_deref().unwrap_or_default(),
+                    item.namespace.as_deref(),
+                )
+            },
+            |item| !std::ptr::eq(item, exclude),
+        )
+    }
+
+    /// The named model group other than `exclude` (see
+    /// [`Self::global_type_other_than`]).
+    pub(crate) fn group_other_than(
+        &self,
+        namespace: Option<&str>,
+        local: &str,
+        exclude: &XsdGroupDef,
+    ) -> Option<Located<'_, XsdGroupDef>> {
+        self.find_where(
+            namespace,
+            local,
+            |model| &model.groups,
+            |item| (item.name.as_str(), item.namespace.as_deref()),
+            |item| !std::ptr::eq(item, exclude),
+        )
     }
 
     /// Global element declaration.
@@ -1581,7 +1635,21 @@ impl XsdModelSet {
     pub fn base_type<'a>(&'a self, reference: XsdTypeRef<'a>) -> Option<XsdTypeRef<'a>> {
         let definition = reference.definition?;
         if let Some(base) = &definition.base {
-            return Some(self.resolve_type(reference.schema, base));
+            let resolved = self.resolve_type(reference.schema, base);
+            // A redefinition derives from the definition it replaces.
+            if resolved
+                .definition
+                .is_some_and(|found| std::ptr::eq(found, definition))
+                && let Some(original) =
+                    self.global_type_other_than(base.namespace.as_deref(), &base.local, definition)
+            {
+                return Some(XsdTypeRef {
+                    schema: original.schema,
+                    name: Some(base),
+                    definition: Some(original.item),
+                });
+            }
+            return Some(resolved);
         }
         // Restriction of an anonymous simple type (`<xs:restriction><xs:simpleType>`).
         (definition.derivation == Some(XsdDerivation::Restriction))

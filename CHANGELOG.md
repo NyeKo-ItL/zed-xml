@@ -49,6 +49,10 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Fixed
 
+- `xs:redefine` and `xs:override` schemas are loaded as dependencies (their `schemaLocation` was ignored), and a redefined type or group extends the definition it replaces instead of itself.
+- A schema that only defines types, groups or attributes (as included by other schemas) is no longer rejected for containing no `xs:element`; only a document that is not an `xs:schema` is.
+- Elements and types no longer resolve to a same-named component of another namespace: only components without namespace ("chameleon" schemas) match any namespace. An unqualified child where the schema requires qualified ones is reported as being in the wrong namespace, with the expected expanded name.
+- Documents declaring XML 1.1 accept its control characters and references.
 - A DOCTYPE whose literals or comments contain `<` or `>` (`<!ENTITY e "<foo/&#62;">`) no longer breaks the XML reader: the declaration is masked before reading, and checked by the strict check and the DTD parser.
 - Formatting no longer drops the whitespace between inline elements of mixed content (`<code>jar</code> <code>war</code>` lost its space, changing the text).
 - XSD content models are now checked with an automaton built from the component model (sequences, choices, `xs:all`, group references, wildcards with their namespace constraint, occurrence ranges on groups, extension, substitution groups) instead of name-keyed lists: valid documents are no longer rejected when several elements share a name (`<xs:element ref="comment" minOccurs="0"/>`), a `choice` accepts exactly one alternative, nested groups and extensions are honoured, abstract elements are refused, and empty elements (`<a/>`) are checked for missing children. Misplaced and surplus children are reported on the child (`unexpectedOrder`, `tooManyElements`, with the expected names), missing ones on the parent (`missingElement`).
