@@ -186,14 +186,78 @@ pub enum XsdCompositor {
 /// Particle of a content model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum XsdParticle {
+    /// Element declaration or `ref`, with its own occurrence constraints.
     Element(Box<XsdElementDecl>),
     Group {
         compositor: XsdCompositor,
         particles: Vec<XsdParticle>,
+        min_occurs: usize,
+        max_occurs: Option<usize>,
     },
-    GroupRef(XsdQName),
+    /// `xs:group ref`.
+    GroupRef {
+        name: XsdQName,
+        min_occurs: usize,
+        max_occurs: Option<usize>,
+    },
     /// `xs:any` wildcard.
-    Any(XsdProcessContents),
+    Any(XsdWildcard),
+}
+
+/// `xs:any` wildcard of a content model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct XsdWildcard {
+    pub process_contents: XsdProcessContents,
+    pub namespaces: XsdWildcardNamespaces,
+    pub min_occurs: usize,
+    pub max_occurs: Option<usize>,
+}
+
+/// `namespace` constraint of a wildcard, with `##targetNamespace` and
+/// `##local` resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum XsdWildcardNamespaces {
+    /// `##any` (the default).
+    Any,
+    /// `##other`: any namespace but the target namespace of the schema
+    /// (`None` when it has none) and the absent namespace.
+    Other(Option<String>),
+    /// An explicit list; `None` is the absent namespace (`##local`).
+    Set(Vec<Option<String>>),
+}
+
+impl XsdWildcardNamespaces {
+    /// Whether an element in `namespace` (`None` when it has none) is
+    /// allowed.
+    pub fn allows(&self, namespace: Option<&str>) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Other(target) => namespace.is_some() && namespace != target.as_deref(),
+            Self::Set(namespaces) => namespaces
+                .iter()
+                .any(|allowed| allowed.as_deref() == namespace),
+        }
+    }
+}
+
+impl XsdParticle {
+    /// `(minOccurs, maxOccurs)` of the particle (`None` is unbounded).
+    pub fn occurs(&self) -> (usize, Option<usize>) {
+        match self {
+            Self::Element(declaration) => (declaration.min_occurs, declaration.max_occurs),
+            Self::Group {
+                min_occurs,
+                max_occurs,
+                ..
+            }
+            | Self::GroupRef {
+                min_occurs,
+                max_occurs,
+                ..
+            } => (*min_occurs, *max_occurs),
+            Self::Any(wildcard) => (wildcard.min_occurs, wildcard.max_occurs),
+        }
+    }
 }
 
 /// `processContents` of a wildcard.
@@ -698,6 +762,7 @@ impl Context<'_> {
             None if global => self.target_namespace.clone(),
             None => self.form_namespace(node, self.element_form_qualified),
         };
+        let (min_occurs, max_occurs) = occurs(node);
         let anonymous_type = node
             .xsd_children("complexType")
             .next()
@@ -714,15 +779,8 @@ impl Context<'_> {
             namespace,
             type_name: self.qname_attribute(node, "type"),
             anonymous_type,
-            min_occurs: node
-                .attribute("minOccurs")
-                .and_then(|value| value.trim().parse().ok())
-                .unwrap_or(1),
-            max_occurs: match node.attribute("maxOccurs").as_deref().map(str::trim) {
-                Some("unbounded") => None,
-                Some(value) => Some(value.parse().unwrap_or(1)),
-                None => Some(1),
-            },
+            min_occurs,
+            max_occurs,
             default: node.attribute("default"),
             fixed: node.attribute("fixed"),
             nillable: is_true(node.attribute("nillable")),
@@ -1013,6 +1071,27 @@ impl Context<'_> {
         }
     }
 
+    fn wildcard_namespaces(&self, node: &Node) -> XsdWildcardNamespaces {
+        let Some(value) = node.attribute("namespace") else {
+            return XsdWildcardNamespaces::Any;
+        };
+        let tokens = value.split_whitespace().collect::<Vec<_>>();
+        match tokens.as_slice() {
+            [] | ["##any"] => XsdWildcardNamespaces::Any,
+            ["##other"] => XsdWildcardNamespaces::Other(self.target_namespace.clone()),
+            _ => XsdWildcardNamespaces::Set(
+                tokens
+                    .into_iter()
+                    .map(|token| match token {
+                        "##local" => None,
+                        "##targetNamespace" => self.target_namespace.clone(),
+                        namespace => Some(namespace.to_owned()),
+                    })
+                    .collect(),
+            ),
+        }
+    }
+
     /// First model group (`sequence`, `choice`, `all`) of `node`.
     fn content_of(&self, node: &Node) -> Option<XsdParticle> {
         node.elements()
@@ -1030,26 +1109,60 @@ impl Context<'_> {
                     .element(node, false)
                     .map(|declaration| XsdParticle::Element(Box::new(declaration)));
             }
-            "group" => return self.qname_attribute(node, "ref").map(XsdParticle::GroupRef),
+            "group" => {
+                let (min_occurs, max_occurs) = occurs(node);
+                return self
+                    .qname_attribute(node, "ref")
+                    .map(|name| XsdParticle::GroupRef {
+                        name,
+                        min_occurs,
+                        max_occurs,
+                    });
+            }
             "any" => {
-                return Some(XsdParticle::Any(
-                    match node.attribute("processContents").as_deref().map(str::trim) {
+                let (min_occurs, max_occurs) = occurs(node);
+                return Some(XsdParticle::Any(XsdWildcard {
+                    process_contents: match node
+                        .attribute("processContents")
+                        .as_deref()
+                        .map(str::trim)
+                    {
                         Some("skip") => XsdProcessContents::Skip,
                         Some("lax") => XsdProcessContents::Lax,
                         _ => XsdProcessContents::Strict,
                     },
-                ));
+                    namespaces: self.wildcard_namespaces(node),
+                    min_occurs,
+                    max_occurs,
+                }));
             }
             _ => return None,
         };
+        let (min_occurs, max_occurs) = occurs(node);
         Some(XsdParticle::Group {
             compositor,
+            min_occurs,
+            max_occurs,
             particles: node
                 .elements()
                 .filter_map(|child| self.particle(child))
                 .collect(),
         })
     }
+}
+
+/// `minOccurs` and `maxOccurs` of a particle (`None` is unbounded).
+fn occurs(node: &Node) -> (usize, Option<usize>) {
+    let min = node
+        .attribute("minOccurs")
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(1);
+    let max = match node.attribute("maxOccurs").as_deref().map(str::trim) {
+        Some("unbounded") => None,
+        Some(value) => Some(value.parse().unwrap_or(1)),
+        None => Some(1),
+    };
+    (min, max)
 }
 
 /// XHTML layout blocks separated by a paragraph in the text.
@@ -1220,7 +1333,12 @@ pub struct XsdSimpleTypeInfo {
 #[derive(Debug, Clone, Default)]
 pub struct XsdModelSet {
     models: Vec<Arc<XsdModel>>,
+    /// Members of the substitution groups by head (namespace, local name),
+    /// as `(schema, index of the global element)`; built on first use.
+    substitutions: std::sync::OnceLock<SubstitutionIndex>,
 }
+
+type SubstitutionIndex = HashMap<(Option<String>, String), Vec<(usize, usize)>>;
 
 /// Namespaces are compared strictly, then on the local name alone as a
 /// fallback ("chameleon" schemas, documents without a namespace...).
@@ -1230,7 +1348,49 @@ fn namespace_matches(strict: bool, expected: Option<&str>, actual: Option<&str>)
 
 impl XsdModelSet {
     pub fn new(models: Vec<Arc<XsdModel>>) -> Self {
-        Self { models }
+        Self {
+            models,
+            substitutions: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Non-abstract members of the substitution group headed by `head`,
+    /// transitively (a member can head another group). The head itself is
+    /// not included.
+    pub(crate) fn substitution_members<'a>(
+        &'a self,
+        head: Located<'a, XsdElementDecl>,
+    ) -> Vec<Located<'a, XsdElementDecl>> {
+        let index = self.substitutions.get_or_init(|| {
+            let mut index = SubstitutionIndex::new();
+            for (schema, model) in self.models.iter().enumerate() {
+                for (position, element) in model.elements.iter().enumerate() {
+                    for group in &element.substitution_groups {
+                        index
+                            .entry((group.namespace.clone(), group.local.clone()))
+                            .or_default()
+                            .push((schema, position));
+                    }
+                }
+            }
+            index
+        });
+        let mut members = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut pending = vec![(head.item.namespace.clone(), head.item.name.clone())];
+        while let Some(key) = pending.pop() {
+            for &(schema, position) in index.get(&key).map(Vec::as_slice).unwrap_or_default() {
+                if !seen.insert((schema, position)) {
+                    continue;
+                }
+                let item = &self.models[schema].elements[position];
+                pending.push((item.namespace.clone(), item.name.clone()));
+                if !item.is_abstract {
+                    members.push(Located { schema, item });
+                }
+            }
+        }
+        members
     }
 
     pub fn models(&self) -> &[Arc<XsdModel>] {
@@ -1516,11 +1676,11 @@ impl XsdModelSet {
             return false;
         }
         match particle {
-            XsdParticle::Any(process_contents) => *process_contents == XsdProcessContents::Skip,
+            XsdParticle::Any(wildcard) => wildcard.process_contents == XsdProcessContents::Skip,
             XsdParticle::Group { particles, .. } => particles
                 .iter()
                 .any(|particle| self.particle_has_skip_wildcard(particle, depth + 1)),
-            XsdParticle::GroupRef(name) => self
+            XsdParticle::GroupRef { name, .. } => self
                 .group(name.namespace.as_deref(), &name.local)
                 .and_then(|group| group.item.content.as_ref())
                 .is_some_and(|content| self.particle_has_skip_wildcard(content, depth + 1)),
@@ -1529,7 +1689,7 @@ impl XsdModelSet {
     }
 
     /// Content particles of a type, including content inherited by extension.
-    fn content_particles<'a>(
+    pub(crate) fn content_particles<'a>(
         &'a self,
         reference: XsdTypeRef<'a>,
         depth: usize,
@@ -1631,7 +1791,7 @@ impl XsdModelSet {
             XsdParticle::Group { particles, .. } => particles.iter().find_map(|particle| {
                 self.find_in_particle(schema, particle, step, strict, substitutions, depth + 1)
             }),
-            XsdParticle::GroupRef(name) => {
+            XsdParticle::GroupRef { name, .. } => {
                 let group = self.group(name.namespace.as_deref(), &name.local)?;
                 self.find_in_particle(
                     group.schema,
@@ -1708,7 +1868,7 @@ impl XsdModelSet {
                     self.collect_child_elements(schema, particle, depth + 1, out);
                 }
             }
-            XsdParticle::GroupRef(name) => {
+            XsdParticle::GroupRef { name, .. } => {
                 if let Some(group) = self.group(name.namespace.as_deref(), &name.local)
                     && let Some(content) = &group.item.content
                 {

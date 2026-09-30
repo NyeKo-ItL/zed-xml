@@ -1,5 +1,6 @@
 //! XSD model and parsing shared by the LSP server.
 
+pub(crate) mod content;
 pub mod datatypes;
 pub mod identity;
 pub mod model;
@@ -9,6 +10,7 @@ use std::{
     collections::{HashMap, HashSet},
     ops::Range,
     path::{Component, Path, PathBuf},
+    rc::Rc,
     str,
     sync::Arc,
 };
@@ -1600,10 +1602,27 @@ struct XmlFrame<'s> {
     value: ValueCheck<'s>,
     /// Index of the element in the identity tree.
     node: usize,
+    /// How the child elements are checked.
+    content: ContentCheck,
     /// Range of the text content (first to last text, CDATA section or
     /// reference).
     text_range: Option<Range<usize>>,
 }
+
+/// How the child elements of an element are checked.
+enum ContentCheck {
+    /// Against the content model of its type.
+    Run(content::ContentRun),
+    /// No content model to check (undeclared element, `xs:anyType`,
+    /// wildcard, simple content...).
+    Unchecked,
+    /// The schema has no component model: name based checks of the flat
+    /// declarations.
+    Flat,
+}
+
+/// Content models by type definition, built once per validation.
+type ContentModels = HashMap<*const model::XsdTypeDef, Option<Rc<content::ContentModel>>>;
 
 /// How the text content of an element is checked.
 enum ValueCheck<'s> {
@@ -1643,6 +1662,7 @@ fn validate(
     schema: &XsdSchema,
 ) -> (Vec<LocatedXsdDiagnostic>, Vec<identity::IdentityLink>) {
     let models = XsdModelSet::new(schema.models.clone());
+    let mut content_models = ContentModels::new();
     let has_constraints = models
         .models()
         .iter()
@@ -1674,7 +1694,7 @@ fn validate(
             Ok(Event::End(_)) => {
                 if let Some(frame) = stack.pop() {
                     diagnostics.extend(located(
-                        validate_sequence_frame(&frame, schema),
+                        validate_content_end(&frame, schema),
                         &frame.location,
                     ));
                     diagnostics.extend(located(
@@ -1783,11 +1803,21 @@ fn validate(
             None => ValueCheck::Flat,
         };
         if let Some(parent) = stack.last_mut() {
-            if !is_allowed_child(schema, &parent.name, &name) {
-                element_diagnostics.push(XsdDiagnostic {
-                    kind: XsdDiagnosticKind::UnexpectedElement,
-                    message: format!("element <{name}> not allowed in <{}>", parent.name),
-                });
+            match &mut parent.content {
+                ContentCheck::Run(run) => {
+                    if let Err(error) = run.step(step.namespace.as_deref(), &step.local) {
+                        element_diagnostics.push(unexpected_child(&error, &name, &parent.name));
+                    }
+                }
+                ContentCheck::Unchecked => {}
+                ContentCheck::Flat => {
+                    if !is_allowed_child(schema, &parent.name, &name) {
+                        element_diagnostics.push(XsdDiagnostic {
+                            kind: XsdDiagnosticKind::UnexpectedElement,
+                            message: format!("element <{name}> not allowed in <{}>", parent.name),
+                        });
+                    }
+                }
             }
             parent.children.push(name.clone());
         }
@@ -1810,6 +1840,24 @@ fn validate(
             value: None,
             nil: matches!(value, ValueCheck::Model { nil: true, .. }),
         });
+        let content = if models.models().is_empty() {
+            ContentCheck::Flat
+        } else {
+            resolved
+                .as_ref()
+                .filter(|_| !is_nil(&element))
+                .and_then(|resolved| resolved.element_type)
+                .and_then(|reference| {
+                    let definition = reference.definition?;
+                    content_models
+                        .entry(std::ptr::from_ref(definition))
+                        .or_insert_with(|| models.content_model(reference).map(Rc::new))
+                        .clone()
+                })
+                .map_or(ContentCheck::Unchecked, |model| {
+                    ContentCheck::Run(content::ContentRun::new(model))
+                })
+        };
         let frame = XmlFrame {
             name,
             children: Vec::new(),
@@ -1820,11 +1868,14 @@ fn validate(
             resolution: chain,
             value,
             node,
+            content,
             text_range: None,
         };
         if empty {
-            // Content model rules are only checked on elements with an end
-            // tag; the (empty) value is checked here.
+            diagnostics.extend(located(
+                validate_content_end(&frame, schema),
+                &frame.location,
+            ));
             diagnostics.extend(located(
                 validate_text_content(&frame, &bindings, schema),
                 &frame.location,
@@ -2294,6 +2345,74 @@ fn borrowed_range(source: &str, slice: &[u8]) -> Option<Range<usize>> {
     let base = source.as_ptr() as usize;
     let start = (slice.as_ptr() as usize).checked_sub(base)?;
     (start + slice.len() <= source.len()).then(|| start..start + slice.len())
+}
+
+/// Diagnostic of a child element rejected by its parent's content model.
+fn unexpected_child(error: &content::ContentError, child: &str, parent: &str) -> XsdDiagnostic {
+    let content::ContentError::Unexpected {
+        expected,
+        known,
+        repeated,
+    } = error
+    else {
+        unreachable!("only unexpected children are reported per child");
+    };
+    let expected = if expected.is_empty() {
+        String::new()
+    } else {
+        format!(
+            ", expected {}",
+            expected
+                .iter()
+                .map(|name| format!("<{name}>"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    if !known {
+        XsdDiagnostic {
+            kind: XsdDiagnosticKind::UnexpectedElement,
+            message: format!("element <{child}> not allowed in <{parent}>"),
+        }
+    } else if *repeated {
+        XsdDiagnostic {
+            kind: XsdDiagnosticKind::TooManyElements,
+            message: format!("too many <{child}> elements in <{parent}>"),
+        }
+    } else {
+        XsdDiagnostic {
+            kind: XsdDiagnosticKind::UnexpectedOrder,
+            message: format!("unexpected order of <{child}> in <{parent}>{expected}"),
+        }
+    }
+}
+
+/// Content model rules checked when an element ends (or is empty): required
+/// children that are missing.
+fn validate_content_end(frame: &XmlFrame<'_>, schema: &XsdSchema) -> Vec<XsdDiagnostic> {
+    match &frame.content {
+        ContentCheck::Flat => validate_sequence_frame(frame, schema),
+        ContentCheck::Unchecked => Vec::new(),
+        ContentCheck::Run(run) => match run.finish() {
+            Ok(()) => Vec::new(),
+            Err(content::ContentError::Incomplete { expected }) => vec![XsdDiagnostic {
+                kind: XsdDiagnosticKind::MissingElement,
+                message: match expected.as_slice() {
+                    [only] => format!("element <{only}> required in <{}>", frame.name),
+                    _ => format!(
+                        "one of {} required in <{}>",
+                        expected
+                            .iter()
+                            .map(|name| format!("<{name}>"))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        frame.name
+                    ),
+                },
+            }],
+            Err(_) => Vec::new(),
+        },
+    }
 }
 
 fn validate_sequence_frame(frame: &XmlFrame<'_>, schema: &XsdSchema) -> Vec<XsdDiagnostic> {
@@ -2869,7 +2988,7 @@ mod tests {
         let schema = parse_xsd(
             r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
                 <xs:element name="root"><xs:complexType><xs:sequence>
-                    <xs:any/>
+                    <xs:any minOccurs="0" maxOccurs="2"/>
                 </xs:sequence><xs:anyAttribute/></xs:complexType></xs:element>
             </xs:schema>"#,
         )
@@ -2878,6 +2997,7 @@ mod tests {
         assert!(schema.any_children["root"]);
         assert!(schema.any_attributes["root"]);
         assert!(validate_document("<root><unknown/><other/></root>", &schema).is_empty());
+        assert!(!validate_document("<root><a/><b/><c/></root>", &schema).is_empty());
         assert!(validate_document("<root arbitrary=\"1\"/>", &schema).is_empty());
     }
 
@@ -3956,5 +4076,64 @@ mod tests {
         let open = "<a x='1'>".repeat(DEPTH);
         validate_document_located(&open, &schema);
         complete_elements(&open, open.len(), &schema);
+    }
+
+    #[test]
+    fn checks_the_content_model_of_each_type_not_of_each_name() {
+        // `note` is required in `a` and optional in `b`: the declarations
+        // sharing a name must not be mixed up.
+        let schema = parse_xsd(
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <xs:element name="note" type="xs:string"/>
+  <xs:element name="root"><xs:complexType><xs:sequence>
+    <xs:element name="a"><xs:complexType><xs:sequence><xs:element ref="note"/></xs:sequence></xs:complexType></xs:element>
+    <xs:element name="b"><xs:complexType><xs:sequence><xs:element ref="note" minOccurs="0"/><xs:element name="z"/></xs:sequence></xs:complexType></xs:element>
+  </xs:sequence></xs:complexType></xs:element>
+</xs:schema>"#,
+        )
+        .unwrap();
+        assert!(
+            validate_document("<root><a><note>x</note></a><b><z/></b></root>", &schema).is_empty()
+        );
+        let missing = messages("<root><a/><b><z/></b></root>", &schema);
+        assert_eq!(missing, ["element <note> required in <a>"]);
+    }
+
+    #[test]
+    fn reports_a_misplaced_or_repeated_child_once_on_the_child() {
+        let schema = parse_xsd(
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <xs:element name="root"><xs:complexType><xs:sequence>
+    <xs:element name="a"/><xs:element name="b" maxOccurs="2"/>
+  </xs:sequence></xs:complexType></xs:element>
+</xs:schema>"#,
+        )
+        .unwrap();
+        let source = "<root><b/><a/><a/></root>";
+        let diagnostics = validate_document_located(source, &schema);
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].kind, XsdDiagnosticKind::UnexpectedOrder);
+        assert_eq!(&source[diagnostics[0].offset..diagnostics[0].end], "<b");
+
+        let source = "<root><a/><b/><b/><b/></root>";
+        let diagnostics = validate_document_located(source, &schema);
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].kind, XsdDiagnosticKind::TooManyElements);
+        assert_eq!(diagnostics[0].offset, source.rfind("<b").unwrap());
+    }
+
+    #[test]
+    fn checks_the_content_of_empty_elements() {
+        let schema = parse_xsd(
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <xs:element name="root"><xs:complexType><xs:sequence><xs:element name="a"/></xs:sequence></xs:complexType></xs:element>
+</xs:schema>"#,
+        )
+        .unwrap();
+        assert_eq!(
+            messages("<root/>", &schema),
+            ["element <a> required in <root>"]
+        );
+        assert!(validate_document("<root><a/></root>", &schema).is_empty());
     }
 }
