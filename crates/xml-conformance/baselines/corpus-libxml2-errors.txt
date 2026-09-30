@@ -13,7 +13,6 @@ extra-content.xml
 invalid-start-tag-1.xml
 name3.xml
 ns-ent.xml
-ns-undeclared.xml
 rec_att_default.xml
 trailing-null-1.xml
 unsupported-encoding.xml

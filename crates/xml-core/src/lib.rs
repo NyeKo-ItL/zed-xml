@@ -67,6 +67,16 @@ impl XmlDiagnostic {
 }
 
 impl XmlDiagnostic {
+    /// Whether the problem makes the document unsafe to rewrite: namespace
+    /// constraints (undeclared prefixes...) do not, the markup is still
+    /// well formed.
+    pub fn blocks_formatting(&self) -> bool {
+        !matches!(
+            self.rule,
+            Some("undeclaredPrefix" | "invalidQualifiedName" | "invalidNamespaceDeclaration")
+        )
+    }
+
     pub fn code(&self) -> &'static str {
         match self.kind {
             XmlDiagnosticKind::Syntax => "xml-syntax",
