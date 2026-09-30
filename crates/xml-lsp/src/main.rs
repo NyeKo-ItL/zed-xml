@@ -1,5 +1,7 @@
 //! Serveur LSP XML natif.
 
+mod highlight;
+
 use std::{
     collections::{HashMap, HashSet},
     error::Error,
@@ -31,6 +33,7 @@ const HOVER_METHOD: &str = "textDocument/hover";
 const DEFINITION_METHOD: &str = "textDocument/definition";
 const REFERENCES_METHOD: &str = "textDocument/references";
 const COMPLETION_METHOD: &str = "textDocument/completion";
+const DOCUMENT_HIGHLIGHT_METHOD: &str = "textDocument/documentHighlight";
 
 type SchemaCache = HashMap<PathBuf, (SystemTime, XsdSchema)>;
 
@@ -385,6 +388,16 @@ impl XmlLanguageServer {
         Some(json!({
             "contents": {"kind": "markdown", "value": detail},
         }))
+    }
+
+    fn document_highlight(&self, params: &Value) -> Option<Value> {
+        let uri = params.get("textDocument")?.get("uri")?.as_str()?;
+        let source = self.documents.get(uri)?;
+        let position = params.get("position")?;
+        let line = position.get("line")?.as_u64()? as usize;
+        let character = position.get("character")?.as_u64()? as usize;
+        let offset = offset_at(source, line, character);
+        Some(Value::Array(highlight::document_highlights(source, offset)))
     }
 
     fn symbols(&self, params: &Value) -> Option<Value> {
@@ -766,6 +779,7 @@ fn server_capabilities() -> Value {
         "hoverProvider": true,
         "definitionProvider": true,
         "referencesProvider": true,
+        "documentHighlightProvider": true,
     })
 }
 
@@ -889,6 +903,16 @@ fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
                     connection
                         .sender
                         .send(Response::new_ok(request.id, references).into())?;
+                    continue;
+                }
+
+                if request.method == DOCUMENT_HIGHLIGHT_METHOD {
+                    let highlights = server
+                        .document_highlight(&request.params)
+                        .unwrap_or_else(|| json!([]));
+                    connection
+                        .sender
+                        .send(Response::new_ok(request.id, highlights).into())?;
                     continue;
                 }
 
@@ -1173,6 +1197,98 @@ mod tests {
     }
 
     #[test]
+    fn serves_document_highlight_requests() {
+        let (server, client) = Connection::memory();
+        let server_thread = thread::spawn(|| run(server).expect("server loop should succeed"));
+        let request = |id: i32, method: &str, params: Value| {
+            client
+                .sender
+                .send(
+                    Request {
+                        id: RequestId::from(id),
+                        method: method.to_owned(),
+                        params,
+                    }
+                    .into(),
+                )
+                .expect("request should be sent");
+            loop {
+                match client.receiver.recv().expect("a message should arrive") {
+                    Message::Response(response) => {
+                        assert_eq!(response.id, RequestId::from(id));
+                        return response.result;
+                    }
+                    Message::Notification(_) => {}
+                    message => panic!("unexpected message {message:?}"),
+                }
+            }
+        };
+        let notify = |method: &str, params: Value| {
+            client
+                .sender
+                .send(
+                    Notification {
+                        method: method.to_owned(),
+                        params,
+                    }
+                    .into(),
+                )
+                .expect("notification should be sent");
+        };
+
+        let initialize = request(1, INITIALIZE_METHOD, json!({}));
+        assert_eq!(
+            initialize.unwrap()["capabilities"]["documentHighlightProvider"],
+            true
+        );
+        notify("initialized", json!({}));
+        notify(
+            DID_OPEN_METHOD,
+            json!({
+                "textDocument": {
+                    "uri": "file:///document.xml",
+                    "text": "<ns:root>\r\n  <ns:item><ns:item/></ns:item>\r\n</ns:root>",
+                }
+            }),
+        );
+        let params = |line: u32, character: u32| {
+            json!({
+                "textDocument": {"uri": "file:///document.xml"},
+                "position": {"line": line, "character": character},
+            })
+        };
+
+        assert_eq!(
+            request(2, DOCUMENT_HIGHLIGHT_METHOD, params(2, 4)),
+            Some(json!([
+                {"range": {"start": {"line": 0, "character": 1}, "end": {"line": 0, "character": 8}}, "kind": 2},
+                {"range": {"start": {"line": 2, "character": 2}, "end": {"line": 2, "character": 9}}, "kind": 2},
+            ]))
+        );
+        assert_eq!(
+            request(3, DOCUMENT_HIGHLIGHT_METHOD, params(1, 5)),
+            Some(json!([
+                {"range": {"start": {"line": 1, "character": 3}, "end": {"line": 1, "character": 10}}, "kind": 2},
+                {"range": {"start": {"line": 1, "character": 23}, "end": {"line": 1, "character": 30}}, "kind": 2},
+            ]))
+        );
+        assert_eq!(
+            request(4, DOCUMENT_HIGHLIGHT_METHOD, params(1, 13)),
+            Some(json!([
+                {"range": {"start": {"line": 1, "character": 12}, "end": {"line": 1, "character": 19}}, "kind": 2},
+            ]))
+        );
+        assert_eq!(
+            request(5, DOCUMENT_HIGHLIGHT_METHOD, params(1, 0)),
+            Some(json!([]))
+        );
+
+        assert_eq!(request(6, "shutdown", json!(null)), Some(Value::Null));
+        notify(EXIT_METHOD, json!(null));
+        server_thread.join().expect("server thread should stop");
+    }
+
+    #[test]
     fn serves_initialize_diagnostics_shutdown_and_exit() {
         let (server, client) = Connection::memory();
         let server_thread = thread::spawn(|| run(server).expect("server loop should succeed"));
@@ -1208,6 +1324,7 @@ mod tests {
                             "hoverProvider": true,
                             "definitionProvider": true,
                             "referencesProvider": true,
+                            "documentHighlightProvider": true,
                         },
                         "serverInfo": {
                             "name": "xml-lsp",

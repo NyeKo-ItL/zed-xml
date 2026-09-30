@@ -1,5 +1,7 @@
 //! Modèle, analyse et formatage XML partagés par le serveur LSP.
 
+pub mod tags;
+
 use std::collections::BTreeSet;
 
 use quick_xml::{
