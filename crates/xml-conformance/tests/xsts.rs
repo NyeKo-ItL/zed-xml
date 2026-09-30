@@ -14,7 +14,8 @@ use std::{
 };
 
 use xml_conformance::{
-    Outcome, SuiteRun, decode, external_suite, guarded, load_schema_set, well_formedness_errors,
+    Outcome, SuiteRun, decode, external_suite, guarded, load_schema_set, schema_set,
+    well_formedness_errors,
 };
 use xsd_core::{XsdSchema, merge_schemas, validate_document_located};
 
@@ -136,7 +137,7 @@ fn guarded_load(documents: &[PathBuf]) -> Result<XsdSchema, String> {
     }
     match error {
         Some(error) => Err(error),
-        None => Ok(merge_schemas(schemas)),
+        None => schema_set(merge_schemas(schemas)),
     }
 }
 

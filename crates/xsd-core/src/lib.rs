@@ -1,6 +1,7 @@
 //! XSD model and parsing shared by the LSP server.
 
 pub mod datatypes;
+pub mod identity;
 pub mod model;
 pub mod pattern;
 
@@ -95,6 +96,10 @@ pub struct XsdSchema {
     /// Component models of the schema documents, used to check values
     /// against their simple types.
     pub models: Vec<Arc<XsdModel>>,
+    /// Errors of the schema components that do not prevent using the schema
+    /// (invalid identity constraints...): the schema is invalid, but
+    /// instances are still validated against what could be read.
+    pub problems: Vec<String>,
 }
 
 /// Merges several XSD schemas into a model usable by validation.
@@ -132,6 +137,16 @@ pub fn merge_schemas(schemas: impl IntoIterator<Item = XsdSchema>) -> XsdSchema 
         merged.includes.extend(schema.includes);
         merged.imports.extend(schema.imports);
         merged.models.extend(schema.models);
+        for problem in schema.problems {
+            if !merged.problems.contains(&problem) {
+                merged.problems.push(problem);
+            }
+        }
+    }
+    for problem in XsdModelSet::new(merged.models.clone()).identity_problems() {
+        if !merged.problems.contains(&problem) {
+            merged.problems.push(problem);
+        }
     }
     merged
 }
@@ -182,6 +197,18 @@ pub enum XsdDiagnosticKind {
     InvalidEnumeration,
     /// Attribute value invalid for its simple type.
     InvalidAttributeValue,
+    /// `xs:ID` value used twice in the document.
+    DuplicateId,
+    /// `xs:IDREF(S)` value naming no `xs:ID` of the document.
+    UnknownIdref,
+    /// Key sequence repeated for an `xs:unique` or `xs:key`.
+    DuplicateKey,
+    /// Field of an `xs:key` missing (or nil) on a selected element.
+    MissingKeyField,
+    /// Field selecting several nodes, or an element without simple value.
+    InvalidKeyField,
+    /// `xs:keyref` value matching no key in scope.
+    UnknownKeyref,
 }
 
 impl XsdDiagnosticKind {
@@ -201,6 +228,12 @@ impl XsdDiagnosticKind {
             Self::MissingAttribute => "missingAttribute",
             Self::InvalidEnumeration => "invalidEnumeration",
             Self::InvalidAttributeValue => "invalidAttributeValue",
+            Self::DuplicateId => "duplicateId",
+            Self::UnknownIdref => "unknownIdref",
+            Self::DuplicateKey => "duplicateKey",
+            Self::MissingKeyField => "missingKeyField",
+            Self::InvalidKeyField => "invalidKeyField",
+            Self::UnknownKeyref => "unknownKeyref",
         }
     }
 }
@@ -752,6 +785,11 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
         .ok()
         .map(Arc::new)
         .into_iter()
+        .collect();
+    schema.problems = schema
+        .models
+        .iter()
+        .flat_map(|model| model.problems.iter().cloned())
         .collect();
 
     Ok(schema)
@@ -1520,6 +1558,11 @@ struct XmlFrame<'s> {
     namespaces: Vec<(String, String)>,
     step: XsdInstanceStep,
     value: ValueCheck<'s>,
+    /// Index of the element in the identity tree.
+    node: usize,
+    /// Range of the text content (first to last text, CDATA section or
+    /// reference).
+    text_range: Option<Range<usize>>,
 }
 
 /// How the text content of an element is checked.
@@ -1546,9 +1589,27 @@ enum ValueCheck<'s> {
 /// types ([`datatypes`]) when the component model resolves their
 /// declarations.
 pub fn validate_document_located(source: &str, schema: &XsdSchema) -> Vec<LocatedXsdDiagnostic> {
+    validate(source, schema).0
+}
+
+/// Links of the `xs:IDREF(S)` and `xs:keyref` values of the document to the
+/// `xs:ID` and key values they designate.
+pub fn identity_links(source: &str, schema: &XsdSchema) -> Vec<identity::IdentityLink> {
+    validate(source, schema).1
+}
+
+fn validate(
+    source: &str,
+    schema: &XsdSchema,
+) -> (Vec<LocatedXsdDiagnostic>, Vec<identity::IdentityLink>) {
     let models = XsdModelSet::new(schema.models.clone());
+    let has_constraints = models
+        .models()
+        .iter()
+        .any(|model| !model.identity_constraints.is_empty());
     let mut reader = Reader::from_str(source);
     let mut stack: Vec<XmlFrame<'_>> = Vec::new();
+    let mut nodes: Vec<identity::InstanceNode<'_>> = Vec::new();
     let mut diagnostics = Vec::new();
     let mut root_checked = false;
     let located = |diagnostics: Vec<XsdDiagnostic>, location: &Range<usize>| {
@@ -1579,18 +1640,21 @@ pub fn validate_document_located(source: &str, schema: &XsdSchema) -> Vec<Locate
                         validate_text_content(&frame, &stack, schema),
                         &frame.location,
                     ));
+                    close_node(&mut nodes, &frame, &stack, has_constraints);
                 }
                 continue;
             }
             Ok(Event::Text(text)) => {
                 if let Some(frame) = stack.last_mut() {
                     frame.text.push_str(&String::from_utf8_lossy(text.as_ref()));
+                    extend_text_range(frame, borrowed_range(source, text.as_ref()));
                 }
                 continue;
             }
             Ok(Event::CData(data)) => {
                 if let Some(frame) = stack.last_mut() {
                     frame.text.push_str(&String::from_utf8_lossy(data.as_ref()));
+                    extend_text_range(frame, borrowed_range(source, data.as_ref()));
                 }
                 continue;
             }
@@ -1600,6 +1664,12 @@ pub fn validate_document_located(source: &str, schema: &XsdSchema) -> Vec<Locate
                         Some(character) => frame.text.push(character),
                         None => frame.unresolved_text = true,
                     }
+                    // `&name;` around the borrowed name.
+                    extend_text_range(
+                        frame,
+                        borrowed_range(source, reference.as_ref())
+                            .map(|range| range.start.saturating_sub(1)..range.end + 1),
+                    );
                 }
                 continue;
             }
@@ -1630,14 +1700,15 @@ pub fn validate_document_located(source: &str, schema: &XsdSchema) -> Vec<Locate
         let resolved = models
             .resolve_element_path(&path)
             .filter(|resolved| !resolved.skipped);
-        let (attribute_diagnostics, attribute_types) = validate_attribute_values(
-            source,
-            &location,
-            &models,
-            resolved.as_ref(),
-            &element,
-            &lookup,
-        );
+        let (attribute_diagnostics, attribute_types, instance_attributes) =
+            validate_attribute_values(
+                source,
+                &location,
+                &models,
+                resolved.as_ref(),
+                &element,
+                &lookup,
+            );
         diagnostics.extend(attribute_diagnostics);
         let same_value = |attribute: &str, value: &str, fixed: &str| {
             attribute_types
@@ -1676,6 +1747,24 @@ pub fn validate_document_located(source: &str, schema: &XsdSchema) -> Vec<Locate
             parent.children.push(name.clone());
         }
         diagnostics.extend(located(element_diagnostics, &location));
+        let node = nodes.len();
+        if let Some(parent) = stack.last() {
+            nodes[parent.node].children.push(node);
+        }
+        nodes.push(identity::InstanceNode {
+            children: Vec::new(),
+            last: node,
+            namespace: step.namespace.clone(),
+            local: step.local.clone(),
+            name: name.clone(),
+            location: location.clone(),
+            constraints: resolved.as_ref().map_or(&[], |resolved| {
+                resolved.declaration.item.identity_constraints.as_slice()
+            }),
+            attributes: instance_attributes,
+            value: None,
+            nil: matches!(value, ValueCheck::Model { nil: true, .. }),
+        });
         let frame = XmlFrame {
             name,
             children: Vec::new(),
@@ -1685,6 +1774,8 @@ pub fn validate_document_located(source: &str, schema: &XsdSchema) -> Vec<Locate
             namespaces,
             step,
             value,
+            node,
+            text_range: None,
         };
         if empty {
             // Content model rules are only checked on elements with an end
@@ -1693,6 +1784,7 @@ pub fn validate_document_located(source: &str, schema: &XsdSchema) -> Vec<Locate
                 validate_text_content(&frame, &stack, schema),
                 &frame.location,
             ));
+            close_node(&mut nodes, &frame, &stack, has_constraints);
         } else {
             stack.push(frame);
         }
@@ -1706,7 +1798,128 @@ pub fn validate_document_located(source: &str, schema: &XsdSchema) -> Vec<Locate
             end: 0,
         });
     }
-    diagnostics
+    // Elements left open by a malformed document.
+    let count = nodes.len();
+    for frame in &stack {
+        nodes[frame.node].last = count.saturating_sub(1).max(frame.node);
+    }
+    let (identity_diagnostics, links) = identity::check(source, &nodes);
+    diagnostics.extend(identity_diagnostics);
+    (diagnostics, links)
+}
+
+fn extend_text_range(frame: &mut XmlFrame<'_>, range: Option<Range<usize>>) {
+    if let Some(range) = range {
+        frame.text_range = Some(match frame.text_range.take() {
+            Some(current) => current.start.min(range.start)..current.end.max(range.end),
+            None => range,
+        });
+    }
+}
+
+/// Records the value of a closed element in the identity tree (when
+/// identity constraints or IDs need it) and the extent of its subtree.
+fn close_node(
+    nodes: &mut [identity::InstanceNode<'_>],
+    frame: &XmlFrame<'_>,
+    ancestors: &[XmlFrame<'_>],
+    has_constraints: bool,
+) {
+    let last = nodes.len().saturating_sub(1).max(frame.node);
+    let needed = has_constraints
+        || matches!(
+            &frame.value,
+            ValueCheck::Model { value_type: Some(value_type), .. } if value_type.id_kind().is_some()
+        );
+    let value = if needed {
+        element_value(frame, ancestors)
+    } else {
+        None
+    };
+    if let Some(node) = nodes.get_mut(frame.node) {
+        node.last = last;
+        node.value = value;
+    }
+}
+
+/// Simple value of a closed element (`None` for element content, nil or
+/// unknown entities).
+fn element_value(
+    frame: &XmlFrame<'_>,
+    ancestors: &[XmlFrame<'_>],
+) -> Option<identity::InstanceValue> {
+    if frame.unresolved_text || !frame.children.is_empty() {
+        return None;
+    }
+    let range = frame
+        .text_range
+        .clone()
+        .unwrap_or_else(|| frame.location.clone());
+    match &frame.value {
+        ValueCheck::Model {
+            value_type,
+            default,
+            fixed,
+            nil,
+            ..
+        } => {
+            if *nil {
+                return None;
+            }
+            let text = match (frame.text.is_empty(), default.or(*fixed)) {
+                (true, Some(value)) => value,
+                _ => frame.text.as_str(),
+            };
+            let lookup = |prefix: &str| lookup_prefix(ancestors, &frame.namespaces, prefix);
+            // Complex content has no simple value (§3.11.4, fields).
+            let value_type = value_type.as_ref()?;
+            Some(instance_value(value_type, text, range, &lookup).0)
+        }
+        ValueCheck::Flat => Some(untyped_value(&frame.text, range)),
+    }
+}
+
+fn untyped_value(text: &str, range: Range<usize>) -> identity::InstanceValue {
+    identity::InstanceValue {
+        value: datatypes::Value::String(text.to_owned()),
+        text: text.to_owned(),
+        range,
+        valid: true,
+        id: None,
+    }
+}
+
+/// Value of `raw` for its simple type, and the validation error.
+fn instance_value(
+    value_type: &SimpleType<'_>,
+    raw: &str,
+    range: Range<usize>,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> (identity::InstanceValue, Option<datatypes::ValueError>) {
+    let text = value_type.white_space().apply(raw).into_owned();
+    let id = value_type.id_kind();
+    match value_type.validate(raw, Some(lookup)) {
+        Ok(value) => (
+            identity::InstanceValue {
+                value,
+                text,
+                range,
+                valid: true,
+                id,
+            },
+            None,
+        ),
+        Err(error) => (
+            identity::InstanceValue {
+                value: datatypes::Value::String(text.clone()),
+                text,
+                range,
+                valid: false,
+                id,
+            },
+            Some(error),
+        ),
+    }
 }
 
 /// Checks the XML document against the elements declared by the schema.
@@ -1870,7 +2083,9 @@ fn is_nil(element: &quick_xml::events::BytesStart<'_>) -> bool {
 }
 
 /// Checks the attribute values whose declarations the model resolves, and
-/// returns the simple types found (by local name) for the `fixed` checks.
+/// returns the simple types found (by local name) for the `fixed` checks and
+/// the attributes of the element for the identity tree.
+#[allow(clippy::type_complexity)]
 fn validate_attribute_values<'s>(
     source: &str,
     location: &Range<usize>,
@@ -1878,12 +2093,14 @@ fn validate_attribute_values<'s>(
     resolved: Option<&model::ResolvedElement<'s>>,
     element: &quick_xml::events::BytesStart<'_>,
     lookup: &dyn Fn(&str) -> Option<String>,
-) -> (Vec<LocatedXsdDiagnostic>, Vec<(String, SimpleType<'s>)>) {
+) -> (
+    Vec<LocatedXsdDiagnostic>,
+    Vec<(String, SimpleType<'s>)>,
+    Vec<identity::InstanceAttribute>,
+) {
     let mut diagnostics = Vec::new();
     let mut types = Vec::new();
-    let Some(resolved) = resolved else {
-        return (diagnostics, types);
-    };
+    let mut attributes = Vec::new();
     let element_name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
     for attribute in element.attributes().flatten() {
         let Ok(key) = std::str::from_utf8(attribute.key.as_ref()) else {
@@ -1899,46 +2116,102 @@ fn validate_attribute_values<'s>(
         if namespace.as_deref() == Some(XSI_NAMESPACE) {
             continue;
         }
-        let declaration = models
-            .resolve_attribute(Some(resolved), namespace.as_deref(), local)
-            .map(|found| found.declaration)
-            .or_else(|| {
-                // An unqualified attribute matched by `xs:anyAttribute` is
-                // validated against a global attribute without namespace.
-                let wildcard = resolved
-                    .element_type
-                    .and_then(|reference| reference.definition)
-                    .is_some_and(|definition| definition.any_attribute);
-                (wildcard && namespace.is_none())
-                    .then(|| models.global_attribute(None, local))
-                    .flatten()
-                    .filter(|found| found.item.namespace.is_none())
-            });
-        let Some(value_type) = declaration
-            .and_then(|declaration| models.attribute_type(declaration))
-            .and_then(|reference| models.simple_type(reference))
-        else {
+        let Some(value) = model::normalized_attribute_value(&attribute) else {
             continue;
         };
-        if let Some(value) = model::normalized_attribute_value(&attribute)
-            && let Err(error) = value_type.validate(&value, Some(lookup))
-        {
-            let range = borrowed_range(source, attribute.value.as_ref())
-                .unwrap_or_else(|| location.clone());
-            diagnostics.push(LocatedXsdDiagnostic {
-                kind: if error.enumeration {
-                    XsdDiagnosticKind::InvalidEnumeration
-                } else {
-                    XsdDiagnosticKind::InvalidAttributeValue
-                },
-                message: format!("attribute @{key} of <{element_name}>: {}", error.message),
-                offset: range.start,
-                end: range.end,
+        let range =
+            borrowed_range(source, attribute.value.as_ref()).unwrap_or_else(|| location.clone());
+        let value_type = resolved.and_then(|resolved| {
+            let declaration = models
+                .resolve_attribute(Some(resolved), namespace.as_deref(), local)
+                .map(|found| found.declaration)
+                .or_else(|| {
+                    // An unqualified attribute matched by `xs:anyAttribute`
+                    // is validated against a global attribute without
+                    // namespace.
+                    let wildcard = resolved
+                        .element_type
+                        .and_then(|reference| reference.definition)
+                        .is_some_and(|definition| definition.any_attribute);
+                    (wildcard && namespace.is_none())
+                        .then(|| models.global_attribute(None, local))
+                        .flatten()
+                        .filter(|found| found.item.namespace.is_none())
+                });
+            declaration
+                .and_then(|declaration| models.attribute_type(declaration))
+                .and_then(|reference| models.simple_type(reference))
+        });
+        let instance = match &value_type {
+            Some(value_type) => {
+                let (instance, error) = instance_value(value_type, &value, range.clone(), lookup);
+                if let Some(error) = error {
+                    diagnostics.push(LocatedXsdDiagnostic {
+                        kind: if error.enumeration {
+                            XsdDiagnosticKind::InvalidEnumeration
+                        } else {
+                            XsdDiagnosticKind::InvalidAttributeValue
+                        },
+                        message: format!("attribute @{key} of <{element_name}>: {}", error.message),
+                        offset: range.start,
+                        end: range.end,
+                    });
+                }
+                instance
+            }
+            None => untyped_value(&value, range),
+        };
+        attributes.push(identity::InstanceAttribute {
+            namespace,
+            local: local.to_owned(),
+            value: instance,
+        });
+        if let Some(value_type) = value_type {
+            types.push((local.to_owned(), value_type));
+        }
+    }
+    // Absent attributes with a default or fixed value take it.
+    if let Some(resolved) = resolved
+        && let Some(element_type) = resolved.element_type
+    {
+        for usage in models.attribute_uses(element_type) {
+            let (namespace, local) = (usage.item.namespace.as_deref(), usage.item.name.as_str());
+            if attributes.iter().any(|attribute| {
+                attribute.local == local && attribute.namespace.as_deref() == namespace
+            }) {
+                continue;
+            }
+            let Some(found) = models.resolve_attribute(Some(resolved), namespace, local) else {
+                continue;
+            };
+            if found.usage.item.usage == model::XsdUse::Prohibited {
+                continue;
+            }
+            let Some(value) = [
+                &found.usage.item.default,
+                &found.usage.item.fixed,
+                &found.declaration.item.default,
+                &found.declaration.item.fixed,
+            ]
+            .into_iter()
+            .find_map(|value| value.as_deref()) else {
+                continue;
+            };
+            let instance = match models
+                .attribute_type(found.declaration)
+                .and_then(|reference| models.simple_type(reference))
+            {
+                Some(value_type) => instance_value(&value_type, value, location.clone(), lookup).0,
+                None => untyped_value(value, location.clone()),
+            };
+            attributes.push(identity::InstanceAttribute {
+                namespace: namespace.map(str::to_owned),
+                local: local.to_owned(),
+                value: instance,
             });
         }
-        types.push((local.to_owned(), value_type));
     }
-    (diagnostics, types)
+    (diagnostics, types, attributes)
 }
 
 /// Range in `source` of a slice borrowed from it.
@@ -2967,6 +3240,182 @@ mod tests {
             messages("<t:root xmlns:t=\"urn:other\"/>", &schema),
             vec!["root element <t:root> not declared in the XSD schema"]
         );
+    }
+
+    const IDENTITY: &str = r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+            xmlns:k="urn:k" targetNamespace="urn:k" elementFormDefault="qualified">
+        <xs:element name="catalog">
+            <xs:complexType>
+                <xs:sequence>
+                    <xs:element name="item" minOccurs="0" maxOccurs="unbounded">
+                        <xs:complexType>
+                            <xs:sequence>
+                                <xs:element name="code" type="xs:decimal" minOccurs="0"/>
+                            </xs:sequence>
+                            <xs:attribute name="id" type="xs:ID"/>
+                            <xs:attribute name="sku" type="xs:string"/>
+                            <xs:attribute name="kind" type="xs:string" default="plain"/>
+                        </xs:complexType>
+                    </xs:element>
+                    <xs:element name="link" minOccurs="0" maxOccurs="unbounded">
+                        <xs:complexType>
+                            <xs:attribute name="to" type="xs:IDREF"/>
+                            <xs:attribute name="all" type="xs:IDREFS"/>
+                            <xs:attribute name="code" type="xs:decimal"/>
+                        </xs:complexType>
+                    </xs:element>
+                </xs:sequence>
+            </xs:complexType>
+            <xs:key name="itemCode">
+                <xs:selector xpath="k:item"/>
+                <xs:field xpath="k:code"/>
+            </xs:key>
+            <xs:unique name="itemSku">
+                <xs:selector xpath=".//k:item"/>
+                <xs:field xpath="@sku"/>
+                <xs:field xpath="@kind"/>
+            </xs:unique>
+            <xs:keyref name="linkCode" refer="k:itemCode">
+                <xs:selector xpath="k:link"/>
+                <xs:field xpath="@code"/>
+            </xs:keyref>
+        </xs:element>
+    </xs:schema>"#;
+
+    fn catalog(body: &str) -> String {
+        format!("<k:catalog xmlns:k=\"urn:k\">{body}</k:catalog>")
+    }
+
+    #[test]
+    fn checks_ids_and_id_references() {
+        let schema = parse_xsd(IDENTITY).unwrap();
+        let source = catalog(
+            "<k:item id=\"a\"><k:code>1</k:code></k:item>\r\n<k:item id=\"é\"><k:code>2</k:code></k:item>\
+             <k:item id=\"a\"><k:code>3</k:code></k:item><k:link to=\"é\" all=\" a  b \"/>",
+        );
+        let diagnostics = validate_document_located(&source, &schema);
+        let found = diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.kind, &source[diagnostic.offset..diagnostic.end]))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            found,
+            [
+                (XsdDiagnosticKind::DuplicateId, "a"),
+                (XsdDiagnosticKind::UnknownIdref, "b"),
+            ],
+            "{diagnostics:?}"
+        );
+        assert_eq!(diagnostics[1].message, "no element has the ID 'b'");
+        let links = identity_links(&source, &schema)
+            .into_iter()
+            .map(|link| (&source[link.reference.clone()], link.target.start))
+            .collect::<Vec<_>>();
+        let first = source.find("\"a\"").unwrap() + 1;
+        let accented = source.find("\"é\"").unwrap() + 1;
+        assert_eq!(links, [("é", accented), ("a", first)]);
+    }
+
+    #[test]
+    fn checks_keys_uniques_and_keyrefs_in_the_value_space() {
+        let schema = parse_xsd(IDENTITY).unwrap();
+        assert!(schema.problems.is_empty(), "{:?}", schema.problems);
+        let valid = catalog(
+            "<k:item sku=\"x\"><k:code>1</k:code></k:item><k:item sku=\"x\" kind=\"gift\"><k:code>2</k:code></k:item>\
+             <k:link code=\"1.0\"/><k:link code=\"02\"/>",
+        );
+        assert_eq!(messages(&valid, &schema), Vec::<String>::new());
+        // `1.0` designates the key `1`: the link targets its value.
+        let links = identity_links(&valid, &schema);
+        assert_eq!(links.len(), 2);
+        assert_eq!(&valid[links[0].reference.clone()], "1.0");
+        assert_eq!(&valid[links[0].target.clone()], "1");
+
+        let source = catalog(
+            "<k:item sku=\"x\"><k:code>1</k:code></k:item><k:item sku=\"x\"><k:code> 1.00 </k:code></k:item>\
+             <k:item/><k:link code=\"7\"/>",
+        );
+        let diagnostics = validate_document_located(&source, &schema);
+        let found = diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.kind, diagnostic.message.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            found,
+            [
+                (
+                    XsdDiagnosticKind::MissingKeyField,
+                    "the field 'k:code' of the key 'itemCode' is missing in <k:item>"
+                ),
+                (
+                    XsdDiagnosticKind::DuplicateKey,
+                    "duplicate value '1.00' of the key 'itemCode'"
+                ),
+                (
+                    XsdDiagnosticKind::DuplicateKey,
+                    "duplicate value ('x', 'plain') of the unique constraint 'itemSku'"
+                ),
+                (
+                    XsdDiagnosticKind::UnknownKeyref,
+                    "the value '7' of the keyref 'linkCode' matches no 'itemCode' in scope"
+                ),
+            ]
+        );
+        assert_eq!(&source[diagnostics[1].offset..diagnostics[1].end], " 1.00 ");
+        assert_eq!(XsdDiagnosticKind::UnknownKeyref.id(), "unknownKeyref");
+    }
+
+    #[test]
+    fn reports_invalid_identity_constraints_as_schema_problems() {
+        let problems = |constraints: &str| {
+            let source = format!(
+                r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+                    <xs:element name="root">
+                        <xs:complexType><xs:attribute name="a"/></xs:complexType>
+                        {constraints}
+                    </xs:element>
+                </xs:schema>"#
+            );
+            merge_schemas([parse_xsd(&source).unwrap()]).problems
+        };
+        let key = r#"<xs:key name="k"><xs:selector xpath="."/><xs:field xpath="@a"/></xs:key>"#;
+        assert!(problems(key).is_empty());
+        assert_eq!(
+            problems(
+                r#"<xs:key name="k"><xs:selector xpath="a//b"/><xs:field xpath="@a"/></xs:key>"#
+            ),
+            ["xs:key 'k': invalid xpath 'a//b': '//' is only allowed at the start, as './/'"]
+        );
+        assert_eq!(
+            problems(&format!("{key}{key}")),
+            ["the identity constraint name 'k' is declared twice"]
+        );
+        assert_eq!(
+            problems(
+                r#"<xs:keyref name="r" refer="missing"><xs:selector xpath="."/><xs:field xpath="@a"/></xs:keyref>"#
+            ),
+            [
+                "the keyref 'r' refers to 'missing', which is not a declared key or unique constraint"
+            ]
+        );
+        assert_eq!(
+            problems(&format!(
+                r#"{key}<xs:keyref name="r" refer="k"><xs:selector xpath="."/><xs:field xpath="@a"/><xs:field xpath="@a"/></xs:keyref>"#
+            )),
+            ["the keyref 'r' has 2 field(s) but the key 'k' it refers to has 1"]
+        );
+        assert_eq!(
+            problems(r#"<xs:unique name="u"><xs:field xpath="@a"/></xs:unique>"#),
+            ["xs:unique 'u': unexpected xs:field"]
+        );
+        // The schema stays usable.
+        let source = r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+            <xs:element name="root"><xs:complexType><xs:attribute name="a" type="xs:int"/></xs:complexType>
+            <xs:key name="k"><xs:selector xpath="/"/><xs:field xpath="@a"/></xs:key></xs:element>
+        </xs:schema>"#;
+        let schema = parse_xsd(source).unwrap();
+        assert_eq!(schema.problems.len(), 1);
+        assert_eq!(messages("<root a=\"x\"/>", &schema).len(), 1);
     }
 
     #[test]

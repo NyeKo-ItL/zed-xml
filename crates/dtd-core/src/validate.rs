@@ -16,10 +16,7 @@
 //!   element referencing an entity that contains markup (or is external) is
 //!   not checked against its model.
 
-use std::{
-    collections::{HashMap, HashSet},
-    ops::Range,
-};
+use std::{collections::HashMap, ops::Range};
 
 use xml_core::tags::{
     XmlElement, XmlMarkup, XmlMarkupKind, XmlTagKind, XmlTagTree, scan_attributes, scan_markup,
@@ -309,22 +306,37 @@ fn check_reference(
 
 /// Validates the document `source` against `dtd` (see the module).
 pub fn validate_instance(source: &str, dtd: &Dtd) -> Vec<InstanceProblem> {
+    run_validator(source, dtd).0
+}
+
+/// Links of the `IDREF(S)` values of the document to the `ID` values they
+/// designate: (reference range, target range), UTF-8 offsets.
+pub fn id_links(source: &str, dtd: &Dtd) -> Vec<(Range<usize>, Range<usize>)> {
+    run_validator(source, dtd).1
+}
+
+#[allow(clippy::type_complexity)]
+fn run_validator(
+    source: &str,
+    dtd: &Dtd,
+) -> (Vec<InstanceProblem>, Vec<(Range<usize>, Range<usize>)>) {
     if !dtd.declares_elements() && dtd.attributes.is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
     let mut validator = Validator {
         source,
         dtd,
         problems: Vec::new(),
         automata: HashMap::new(),
-        ids: HashSet::new(),
+        ids: HashMap::new(),
         references: Vec::new(),
+        links: Vec::new(),
     };
     validator.run();
     validator
         .problems
         .sort_by_key(|problem| problem.range.start);
-    validator.problems
+    (validator.problems, validator.links)
 }
 
 fn list(names: &[String]) -> String {
@@ -355,8 +367,11 @@ struct Validator<'a> {
     dtd: &'a Dtd,
     problems: Vec<InstanceProblem>,
     automata: HashMap<&'a str, ContentAutomaton>,
-    ids: HashSet<String>,
+    /// IDs and the range of their first occurrence.
+    ids: HashMap<String, Range<usize>>,
     references: Vec<(String, Range<usize>)>,
+    /// (IDREF, ID) ranges.
+    links: Vec<(Range<usize>, Range<usize>)>,
 }
 
 impl<'a> Validator<'a> {
@@ -425,7 +440,9 @@ impl<'a> Validator<'a> {
             }
         }
         for (value, range) in std::mem::take(&mut self.references) {
-            if !self.ids.contains(&value) {
+            if let Some(target) = self.ids.get(&value) {
+                self.links.push((range, target.clone()));
+            } else {
                 self.push(
                     InstanceProblemKind::UnknownIdRef,
                     range,
@@ -543,12 +560,15 @@ impl<'a> Validator<'a> {
             AttributeType::Id => {
                 if !is_name(&value) {
                     self.invalid(range, &value, attribute, "an XML name (ID)");
-                } else if !self.ids.insert(value.clone()) {
+                } else if self.ids.contains_key(&value) {
                     self.push(
                         InstanceProblemKind::DuplicateId,
                         range,
                         format!("the ID '{value}' is already used in the document"),
                     );
+                } else {
+                    let target = self.token_range(&range, &value);
+                    self.ids.insert(value.clone(), target);
                 }
             }
             AttributeType::IdRef | AttributeType::IdRefs => {
@@ -949,6 +969,14 @@ mod tests {
         );
         assert!(document[..insert_at].ends_with("see=\"nowhere c1\""));
         assert_eq!(&document[insert_at..insert_at + 2], "/>");
+
+        // IDREF(S) tokens link to the first occurrence of their ID.
+        let links = id_links(&document, &dtd)
+            .into_iter()
+            .map(|(reference, target)| (&document[reference], target))
+            .collect::<Vec<_>>();
+        let target = document.find("id=\"c1\"").unwrap() + 4;
+        assert_eq!(links, [("c1", target..target + 2)]);
     }
 
     #[test]
