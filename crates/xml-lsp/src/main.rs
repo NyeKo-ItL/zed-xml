@@ -10,6 +10,7 @@ mod linked_editing;
 mod links;
 mod rename;
 mod selection;
+mod settings;
 mod symbols;
 
 use std::{
@@ -20,7 +21,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use lsp_server::{Connection, Message, Notification, Response};
+use lsp_server::{Connection, Message, Notification, RequestId, Response};
 use quick_xml::{Reader, events::Event};
 use serde_json::{Value, json};
 #[cfg(test)]
@@ -61,6 +62,8 @@ const COLOR_PRESENTATION_METHOD: &str = "textDocument/colorPresentation";
 const DID_CHANGE_WORKSPACE_FOLDERS_METHOD: &str = "workspace/didChangeWorkspaceFolders";
 const DID_CHANGE_WATCHED_FILES_METHOD: &str = "workspace/didChangeWatchedFiles";
 const REGISTER_CAPABILITY_METHOD: &str = "client/registerCapability";
+const DID_CHANGE_CONFIGURATION_METHOD: &str = "workspace/didChangeConfiguration";
+const CONFIGURATION_METHOD: &str = "workspace/configuration";
 
 type SchemaCache = HashMap<PathBuf, (SystemTime, XsdSchema)>;
 
@@ -85,6 +88,16 @@ struct XmlLanguageServer {
     /// `workspace/didChangeWatchedFiles`.
     watched_files_registration: bool,
     workspace: symbols::WorkspaceIndex,
+    /// Réglages `xml.*` effectifs.
+    settings: settings::Settings,
+    /// Section `xml` reçue dans `initializationOptions`, base sur laquelle
+    /// sont fusionnés les réglages de `workspace/configuration`.
+    initialization_settings: Value,
+    /// Le client répond à `workspace/configuration`.
+    configuration_support: bool,
+    /// Requête `workspace/configuration` en attente de réponse.
+    pending_configuration: Option<RequestId>,
+    configuration_requests: u64,
 }
 
 impl XmlLanguageServer {
@@ -99,6 +112,228 @@ impl XmlLanguageServer {
             hierarchical_document_symbols: false,
             watched_files_registration: false,
             workspace: symbols::WorkspaceIndex::default(),
+            settings: settings::Settings::default(),
+            initialization_settings: Value::Null,
+            configuration_support: false,
+            pending_configuration: None,
+            configuration_requests: 0,
+        }
+    }
+
+    /// Lit les réglages de `initializationOptions`.
+    fn initialize_settings(&mut self, initialize_params: &Value) {
+        self.initialization_settings = initialize_params
+            .get("initializationOptions")
+            .and_then(settings::xml_section)
+            .cloned()
+            .unwrap_or(Value::Null);
+        self.settings = settings::Settings::from_value(&self.initialization_settings);
+        self.configuration_support = initialize_params
+            .pointer("/capabilities/workspace/configuration")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+    }
+
+    /// Demande la section `xml` au client (`workspace/configuration`) ; la
+    /// réponse est traitée par [`Self::handle_response`].
+    fn request_configuration(
+        &mut self,
+        connection: &Connection,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        if !self.configuration_support {
+            return Ok(());
+        }
+        self.configuration_requests += 1;
+        let id = RequestId::from(format!(
+            "xml-lsp/configuration-{}",
+            self.configuration_requests
+        ));
+        self.pending_configuration = Some(id.clone());
+        connection.sender.send(
+            lsp_server::Request {
+                id,
+                method: CONFIGURATION_METHOD.to_owned(),
+                params: json!({"items": [{"section": "xml"}]}),
+            }
+            .into(),
+        )?;
+        Ok(())
+    }
+
+    fn handle_response(
+        &mut self,
+        connection: &Connection,
+        response: Response,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        if self.pending_configuration.as_ref() != Some(&response.id) {
+            return Ok(());
+        }
+        self.pending_configuration = None;
+        let section = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get(0))
+            .cloned()
+            .unwrap_or(Value::Null);
+        self.apply_settings(connection, &section)
+    }
+
+    /// `workspace/didChangeConfiguration` : utilise la section `xml` poussée
+    /// par le client, sinon la redemande.
+    fn configuration_changed(
+        &mut self,
+        connection: &Connection,
+        params: &Value,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let pushed = params
+            .get("settings")
+            .and_then(|settings| settings.get("xml"))
+            .filter(|section| section.is_object())
+            .cloned();
+        match pushed {
+            Some(section) => self.apply_settings(connection, &section),
+            None if self.configuration_support => self.request_configuration(connection),
+            None => {
+                let section = params
+                    .get("settings")
+                    .and_then(settings::xml_section)
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                self.apply_settings(connection, &section)
+            }
+        }
+    }
+
+    /// Remplace les réglages par `initializationOptions` + `section` et
+    /// republie les diagnostics des documents ouverts si la validation change.
+    fn apply_settings(
+        &mut self,
+        connection: &Connection,
+        section: &Value,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let mut merged = self.initialization_settings.clone();
+        if let Some(section) = settings::xml_section(section) {
+            settings::merge(&mut merged, section);
+        }
+        let settings = settings::Settings::from_value(&merged);
+        let previous = std::mem::replace(&mut self.settings, settings);
+        if previous.same_validation(&self.settings) {
+            return Ok(());
+        }
+        let mut uris = self.documents.keys().cloned().collect::<Vec<_>>();
+        uris.sort();
+        for uri in uris {
+            self.publish_diagnostics(connection, &uri)?;
+        }
+        Ok(())
+    }
+
+    /// Publie les diagnostics du document ouvert `uri`.
+    fn publish_diagnostics(
+        &mut self,
+        connection: &Connection,
+        uri: &str,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let Some(source) = self.documents.get(uri).cloned() else {
+            return Ok(());
+        };
+        let params = self.diagnostics(uri, &source);
+        connection.sender.send(
+            Notification {
+                method: PUBLISH_DIAGNOSTICS_METHOD.to_owned(),
+                params,
+            }
+            .into(),
+        )?;
+        Ok(())
+    }
+
+    /// Paramètres `publishDiagnostics` de `uri` selon `xml.validation.*`.
+    fn diagnostics(&mut self, uri: &str, source: &str) -> Value {
+        let validation = self.settings.validation.clone();
+        if !validation.enabled {
+            return json!({"uri": uri, "diagnostics": []});
+        }
+        let diagnostics = parse_xml(source).diagnostics;
+        let mut extra = Vec::new();
+        if validation.disallow_doc_type_decl {
+            extra.extend(doctype_diagnostics(source));
+        }
+        if validation.schema != settings::SchemaValidation::Never {
+            extra.extend(self.schema_diagnostics(uri, source));
+        }
+        if let Some(severity) = validation.no_grammar.severity()
+            && !self.has_grammar(uri, source)
+        {
+            extra.extend(no_grammar_diagnostic(source, severity));
+        }
+        diagnostics_params(uri, source, &diagnostics, &extra)
+    }
+
+    /// Le document est associé à une grammaire (XSD, DTD, `xml-model`,
+    /// `xml.fileAssociations`) ou est lui-même un schéma.
+    fn has_grammar(&self, uri: &str, source: &str) -> bool {
+        if is_xsd_uri(uri) || !self.associated_schemas(uri).is_empty() {
+            return true;
+        }
+        if !matches!(
+            resolve_schema_locations(schema_resolution_source(source), uri_to_path(uri)),
+            Ok(references) if references.is_empty()
+        ) {
+            return true;
+        }
+        xml_core::tags::scan_markup(source).iter().any(|markup| {
+            let content = &source[markup.content.clone()];
+            match markup.kind {
+                xml_core::tags::XmlMarkupKind::Declaration => content.starts_with("DOCTYPE"),
+                xml_core::tags::XmlMarkupKind::ProcessingInstruction => {
+                    content.starts_with("xml-model")
+                }
+                _ => false,
+            }
+        })
+    }
+
+    /// Schémas associés à `uri` par `xml.fileAssociations`.
+    fn associated_schemas(&self, uri: &str) -> Vec<PathBuf> {
+        if self.settings.file_associations.is_empty() || is_xsd_uri(uri) {
+            return Vec::new();
+        }
+        settings::associated_schemas(
+            &self.settings.file_associations,
+            self.workspace.roots(),
+            &uri_to_path(uri),
+        )
+    }
+
+    /// Schémas déclarés par le document, ou à défaut associés par
+    /// `xml.fileAssociations`.
+    fn schema_references(
+        &self,
+        uri: &str,
+        source: &str,
+    ) -> Result<Vec<xsd_core::SchemaReference>, String> {
+        let references =
+            resolve_schema_locations(schema_resolution_source(source), uri_to_path(uri))?;
+        if !references.is_empty() {
+            return Ok(references);
+        }
+        Ok(self
+            .associated_schemas(uri)
+            .into_iter()
+            .map(|path| xsd_core::SchemaReference {
+                namespace: None,
+                path,
+            })
+            .collect())
+    }
+
+    fn hover_context(&mut self, uri: &str) -> hover::HoverContext<'_> {
+        let associated_schemas = self.associated_schemas(uri);
+        hover::HoverContext {
+            documents: &self.documents,
+            cache: &mut self.model_cache,
+            associated_schemas,
         }
     }
 
@@ -111,6 +346,10 @@ impl XmlLanguageServer {
             return Ok(true);
         }
         match notification.method.as_str() {
+            DID_CHANGE_CONFIGURATION_METHOD => {
+                self.configuration_changed(connection, &notification.params)?;
+                return Ok(false);
+            }
             DID_CHANGE_WORKSPACE_FOLDERS_METHOD => {
                 self.workspace.change_folders(&notification.params);
                 return Ok(false);
@@ -158,16 +397,8 @@ impl XmlLanguageServer {
             return Ok(false);
         };
 
-        self.documents.insert(uri.clone(), text.clone());
-        let diagnostics = parse_xml(&text).diagnostics;
-        let schema_diagnostics = self.schema_diagnostics(&uri, &text);
-        connection.sender.send(
-            Notification {
-                method: PUBLISH_DIAGNOSTICS_METHOD.to_owned(),
-                params: diagnostics_params(&uri, &text, &diagnostics, &schema_diagnostics),
-            }
-            .into(),
-        )?;
+        self.documents.insert(uri.clone(), text);
+        self.publish_diagnostics(connection, &uri)?;
 
         if is_xsd_uri(&uri) {
             let dependent_uris = self
@@ -178,24 +409,7 @@ impl XmlLanguageServer {
                 .cloned()
                 .collect::<Vec<_>>();
             for dependent_uri in dependent_uris {
-                let Some(dependent_source) = self.documents.get(&dependent_uri).cloned() else {
-                    continue;
-                };
-                let dependent_xml_diagnostics = parse_xml(&dependent_source).diagnostics;
-                let dependent_xsd_diagnostics =
-                    self.schema_diagnostics(&dependent_uri, &dependent_source);
-                connection.sender.send(
-                    Notification {
-                        method: PUBLISH_DIAGNOSTICS_METHOD.to_owned(),
-                        params: diagnostics_params(
-                            &dependent_uri,
-                            &dependent_source,
-                            &dependent_xml_diagnostics,
-                            &dependent_xsd_diagnostics,
-                        ),
-                    }
-                    .into(),
-                )?;
+                self.publish_diagnostics(connection, &dependent_uri)?;
             }
         }
 
@@ -250,7 +464,9 @@ impl XmlLanguageServer {
                 })
             })
             .collect::<Vec<_>>();
-        if let Some(completion) = auto_close_tag(&source, offset) {
+        if self.settings.auto_close_tags
+            && let Some(completion) = auto_close_tag(&source, offset)
+        {
             items.push(json!({
                 "label": completion.label,
                 "insertText": completion.insert_text,
@@ -264,9 +480,7 @@ impl XmlLanguageServer {
     }
 
     fn load_schema(&mut self, uri: &str, source: &str) -> Option<XsdSchema> {
-        let document_path = uri_to_path(uri);
-        let references = resolve_schema_locations(schema_resolution_source(source), document_path)
-            .unwrap_or_default();
+        let references = self.schema_references(uri, source).unwrap_or_default();
         let (schemas, _) =
             load_schema_graph(references, &mut self.schema_cache, &mut self.schema_index);
         (!schemas.is_empty()).then(|| merge_schemas(schemas))
@@ -315,9 +529,8 @@ impl XmlLanguageServer {
         let Some(source) = self.documents.get(document_uri) else {
             return false;
         };
-        let document_path = uri_to_path(document_uri);
         let schema_path = uri_to_path(schema_uri);
-        resolve_schema_locations(schema_resolution_source(source), document_path)
+        self.schema_references(document_uri, source)
             .map(|references| {
                 references
                     .into_iter()
@@ -327,18 +540,22 @@ impl XmlLanguageServer {
     }
 
     fn schema_diagnostics(&mut self, uri: &str, source: &str) -> Vec<Value> {
-        let document_path = uri_to_path(uri);
-        let references =
-            match resolve_schema_locations(schema_resolution_source(source), &document_path) {
-                Ok(references) => references,
-                Err(error) => return vec![xsd_error_diagnostic(error)],
-            };
+        let references = match self.schema_references(uri, source) {
+            Ok(references) => references,
+            Err(error) => return vec![xsd_error_diagnostic(error)],
+        };
         let (schemas, errors) =
             load_schema_graph(references, &mut self.schema_cache, &mut self.schema_index);
+        let schema_errors = !errors.is_empty();
         let mut diagnostics = errors
             .into_iter()
             .map(xsd_schema_error_diagnostic)
             .collect::<Vec<_>>();
+        if schema_errors
+            && self.settings.validation.schema == settings::SchemaValidation::OnValidSchema
+        {
+            return diagnostics;
+        }
         if !schemas.is_empty() {
             let schema = merge_schemas(schemas);
             diagnostics.extend(
@@ -346,10 +563,7 @@ impl XmlLanguageServer {
                     .iter()
                     .map(|diagnostic| xsd_error_diagnostic_at(diagnostic, source)),
             );
-            let mut context = hover::HoverContext {
-                documents: &self.documents,
-                cache: &mut self.model_cache,
-            };
+            let mut context = self.hover_context(uri);
             diagnostics.extend(code_actions::enumeration_diagnostics(
                 &mut context,
                 uri,
@@ -462,10 +676,7 @@ impl XmlLanguageServer {
         };
         let start = offset(range.get("start")?)?;
         let end = offset(range.get("end")?)?;
-        let mut context = hover::HoverContext {
-            documents: &self.documents,
-            cache: &mut self.model_cache,
-        };
+        let mut context = self.hover_context(uri);
         Some(Value::Array(code_actions::code_actions(
             &mut context,
             uri,
@@ -478,6 +689,9 @@ impl XmlLanguageServer {
     fn document_colors(&self, params: &Value) -> Option<Value> {
         let uri = params.get("textDocument")?.get("uri")?.as_str()?;
         let source = self.documents.get(uri)?;
+        if !self.settings.colors_enabled {
+            return Some(json!([]));
+        }
         Some(colors::document_colors(uri, source))
     }
 
@@ -515,11 +729,9 @@ impl XmlLanguageServer {
         let line = position.get("line")?.as_u64()? as usize;
         let character = position.get("character")?.as_u64()? as usize;
         let offset = offset_at(source, line, character);
-        let mut context = hover::HoverContext {
-            documents: &self.documents,
-            cache: &mut self.model_cache,
-        };
-        hover::hover(&mut context, uri, source, offset)
+        let source = source.clone();
+        let mut context = self.hover_context(uri);
+        hover::hover(&mut context, uri, &source, offset)
     }
 
     fn document_highlight(&self, params: &Value) -> Option<Value> {
@@ -626,10 +838,21 @@ impl XmlLanguageServer {
     fn symbols(&self, params: &Value) -> Option<Value> {
         let uri = params.get("textDocument")?.get("uri")?.as_str()?;
         let source = self.documents.get(uri)?;
-        if self.hierarchical_document_symbols {
-            return Some(Value::Array(symbols::document_symbols(source)));
+        if !self.settings.symbols_enabled {
+            return Some(json!([]));
         }
-        Some(xml_symbols(source))
+        let mut symbols = if self.hierarchical_document_symbols {
+            symbols::document_symbols(source)
+        } else {
+            match xml_symbols(source) {
+                Value::Array(symbols) => symbols,
+                _ => Vec::new(),
+            }
+        };
+        if let Some(limit) = self.settings.symbols_max_items {
+            settings::limit_symbols(&mut symbols, limit);
+        }
+        Some(Value::Array(symbols))
     }
 
     fn workspace_symbols(&mut self, params: &Value) -> Value {
@@ -640,7 +863,10 @@ impl XmlLanguageServer {
     fn formatting(&self, params: &Value) -> Option<Value> {
         let uri = params.get("textDocument")?.get("uri")?.as_str()?;
         let source = self.documents.get(uri)?;
-        let options = formatting::format_options(params, source);
+        if !self.settings.format.enabled {
+            return Some(json!([]));
+        }
+        let options = formatting::format_options(params, source, &self.settings.format);
         formatting::document_edits(source, &options)
     }
 
@@ -655,7 +881,10 @@ impl XmlLanguageServer {
         };
         let start = offset(range.get("start")?)?;
         let end = offset(range.get("end")?)?;
-        let options = formatting::format_options(params, source);
+        if !self.settings.format.enabled {
+            return Some(json!([]));
+        }
+        let options = formatting::format_options(params, source, &self.settings.format);
         formatting::range_edits(source, start.min(end)..start.max(end), &options)
     }
 
@@ -926,6 +1155,48 @@ fn xsd_schema_error_diagnostic(error: SchemaLoadError) -> Value {
     })
 }
 
+/// Erreur `xml.validation.disallowDocTypeDecl` sur chaque `<!DOCTYPE>`.
+fn doctype_diagnostics(source: &str) -> Vec<Value> {
+    xml_core::tags::scan_markup(source)
+        .into_iter()
+        .filter(|markup| {
+            markup.kind == xml_core::tags::XmlMarkupKind::Declaration
+                && source[markup.content.clone()].starts_with("DOCTYPE")
+        })
+        .map(|markup| {
+            json!({
+                "range": {
+                    "start": position_at(source, markup.range.start),
+                    "end": position_at(source, markup.range.end),
+                },
+                "severity": 1,
+                "source": "xml-lsp",
+                "code": "doctype-disallowed",
+                "data": {"category": "xml", "kind": "doctypeDisallowed"},
+                "message": "La déclaration DOCTYPE est interdite (xml.validation.disallowDocTypeDecl).",
+            })
+        })
+        .collect()
+}
+
+/// Diagnostic `xml.validation.noGrammar` sur le nom de l'élément racine.
+fn no_grammar_diagnostic(source: &str, severity: u8) -> Option<Value> {
+    let tree = xml_core::tags::XmlTagTree::parse(source);
+    let root = tree.elements().first()?;
+    let name = root.start_tag.name.clone();
+    Some(json!({
+        "range": {
+            "start": position_at(source, name.start),
+            "end": position_at(source, name.end),
+        },
+        "severity": severity,
+        "source": "xml-lsp",
+        "code": "no-grammar",
+        "data": {"category": "xml", "kind": "noGrammar"},
+        "message": "Aucune grammaire (XSD, DTD) n'est associée à ce document.",
+    }))
+}
+
 fn xsd_error_diagnostic(diagnostic: impl Into<String>) -> Value {
     json!({
         "range": {
@@ -1132,8 +1403,10 @@ fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
         .and_then(Value::as_bool)
         .unwrap_or(false);
     server.workspace = symbols::WorkspaceIndex::from_initialize_params(&initialize_params);
+    server.initialize_settings(&initialize_params);
     // `initialize_finish` a déjà consommé la notification `initialized`.
     server.register_watched_files(&connection)?;
+    server.request_configuration(&connection)?;
 
     for message in &connection.receiver {
         match message {
@@ -1323,7 +1596,7 @@ fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
                     break;
                 }
             }
-            Message::Response(_) => {}
+            Message::Response(response) => server.handle_response(&connection, response)?,
         }
     }
 
@@ -1996,6 +2269,360 @@ mod tests {
         assert_eq!(request(4, "shutdown", json!(null)), Some(Value::Null));
         notify(EXIT_METHOD, json!(null));
         server_thread.join().expect("server thread should stop");
+    }
+
+    /// Client LSP de test : envoie des messages et collecte les
+    /// notifications `publishDiagnostics` reçues.
+    struct TestClient {
+        connection: Connection,
+        diagnostics: std::cell::RefCell<Vec<Value>>,
+    }
+
+    impl TestClient {
+        fn send(&self, message: Message) {
+            self.connection
+                .sender
+                .send(message)
+                .expect("message should be sent");
+        }
+
+        fn notify(&self, method: &str, params: Value) {
+            self.send(
+                Notification {
+                    method: method.to_owned(),
+                    params,
+                }
+                .into(),
+            );
+        }
+
+        /// Prochain message qui n'est pas une publication de diagnostics.
+        fn next(&self) -> Message {
+            loop {
+                match self
+                    .connection
+                    .receiver
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .expect("a message should arrive")
+                {
+                    Message::Notification(notification)
+                        if notification.method == PUBLISH_DIAGNOSTICS_METHOD =>
+                    {
+                        self.diagnostics.borrow_mut().push(notification.params);
+                    }
+                    message => return message,
+                }
+            }
+        }
+
+        fn request(&self, id: i32, method: &str, params: Value) -> Value {
+            self.send(
+                Request {
+                    id: RequestId::from(id),
+                    method: method.to_owned(),
+                    params,
+                }
+                .into(),
+            );
+            match self.next() {
+                Message::Response(response) => {
+                    assert_eq!(response.id, RequestId::from(id));
+                    response.result.expect("request should succeed")
+                }
+                message => panic!("unexpected message {message:?}"),
+            }
+        }
+
+        /// Diagnostics publiés jusqu'ici, puis vidés. Une requête
+        /// intermédiaire garantit que les publications précédentes sont reçues.
+        fn take_diagnostics(&self, id: i32) -> Vec<Value> {
+            self.request(id, WORKSPACE_SYMBOL_METHOD, json!({"query": "\u{0}"}));
+            std::mem::take(&mut *self.diagnostics.borrow_mut())
+        }
+    }
+
+    fn codes(publication: &Value) -> Vec<String> {
+        publication["diagnostics"]
+            .as_array()
+            .expect("diagnostics should be an array")
+            .iter()
+            .map(|diagnostic| diagnostic["code"].as_str().unwrap_or_default().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn applies_initialization_option_settings() {
+        let directory =
+            std::env::temp_dir().join(format!("xml-lsp-settings {}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(directory.join("schemas")).expect("directory should be created");
+        std::fs::write(
+            directory.join("schemas/project.xsd"),
+            "<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\">\n  <xs:element name=\"project\">\n    <xs:complexType><xs:sequence><xs:element name=\"name\" type=\"xs:string\"/></xs:sequence></xs:complexType>\n  </xs:element>\n</xs:schema>",
+        )
+        .expect("schema should be written");
+        let associated_uri = path_to_uri(&directory.join("app/build.project"));
+        let plain_uri = path_to_uri(&directory.join("plain.xml"));
+        let doctype_uri = path_to_uri(&directory.join("doctype.xml"));
+
+        let (server, connection) = Connection::memory();
+        let server_thread = thread::spawn(|| run(server).expect("server loop should succeed"));
+        let client = TestClient {
+            connection,
+            diagnostics: Default::default(),
+        };
+        client.request(
+            1,
+            INITIALIZE_METHOD,
+            json!({
+                "rootUri": path_to_uri(&directory),
+                "capabilities": {},
+                "initializationOptions": {"settings": {"xml": {
+                    "format": {"splitAttributes": "splitNewLine", "emptyElements": "collapse", "enabled": true},
+                    "validation": {"noGrammar": "warning", "disallowDocTypeDecl": true},
+                    "completion": {"autoCloseTags": false},
+                    "symbols": {"maxItemsComputed": 2},
+                    "colors": {"enabled": false},
+                    "fileAssociations": [{"pattern": "**/*.project", "systemId": "schemas/project.xsd"}],
+                }}},
+            }),
+        );
+        client.notify("initialized", json!({}));
+
+        client.notify(
+            DID_OPEN_METHOD,
+            json!({"textDocument": {"uri": associated_uri, "text": "<project><other/></project>"}}),
+        );
+        client.notify(
+            DID_OPEN_METHOD,
+            json!({"textDocument": {"uri": plain_uri, "text": "<svg a=\"1\" b=\"2\"><rect fill=\"red\"></rect><g><c/></g></svg>"}}),
+        );
+        client.notify(
+            DID_OPEN_METHOD,
+            json!({"textDocument": {"uri": doctype_uri, "text": "<!DOCTYPE r [<!ELEMENT r ANY>]>\n<r/>"}}),
+        );
+        let published = client.take_diagnostics(2);
+        assert_eq!(published.len(), 3);
+        // Association de fichier : validation XSD sans xsi:schemaLocation.
+        assert_eq!(published[0]["uri"], associated_uri);
+        assert!(
+            codes(&published[0]).contains(&"xsd-validation".to_owned()),
+            "{published:?}"
+        );
+        assert_eq!(codes(&published[1]), vec!["no-grammar"]);
+        assert_eq!(published[1]["diagnostics"][0]["severity"], 2);
+        assert_eq!(
+            published[1]["diagnostics"][0]["range"],
+            json!({"start": {"line": 0, "character": 1}, "end": {"line": 0, "character": 4}})
+        );
+        // Une DTD est une grammaire, mais la déclaration est interdite.
+        assert_eq!(codes(&published[2]), vec!["doctype-disallowed"]);
+
+        // Complétion guidée par le schéma associé, sans fermeture automatique.
+        let labels = |id: i32, character: u32| {
+            let completion = client.request(
+                id,
+                COMPLETION_METHOD,
+                json!({"textDocument": {"uri": associated_uri}, "position": {"line": 0, "character": character}}),
+            );
+            completion["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item["label"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        let after_start_tag = labels(30, 9);
+        assert!(
+            !after_start_tag.iter().any(|label| label.starts_with("</")),
+            "{after_start_tag:?}"
+        );
+        let children = labels(3, 10);
+        assert!(children.contains(&"name".to_owned()), "{children:?}");
+
+        let edits = client.request(
+            4,
+            FORMATTING_METHOD,
+            json!({"textDocument": {"uri": plain_uri}, "options": {"tabSize": 2, "insertSpaces": true}}),
+        );
+        assert_eq!(
+            formatting::apply_edits(
+                "<svg a=\"1\" b=\"2\"><rect fill=\"red\"></rect><g><c/></g></svg>",
+                &edits
+            ),
+            "<svg\n  a=\"1\"\n  b=\"2\">\n  <rect fill=\"red\"/>\n  <g>\n    <c/>\n  </g>\n</svg>\n"
+        );
+        assert_eq!(
+            client.request(
+                5,
+                DOCUMENT_COLOR_METHOD,
+                json!({"textDocument": {"uri": plain_uri}})
+            ),
+            json!([])
+        );
+        let symbols = client.request(
+            6,
+            SYMBOL_METHOD,
+            json!({"textDocument": {"uri": plain_uri}}),
+        );
+        assert_eq!(symbols.as_array().map(Vec::len), Some(2));
+
+        assert_eq!(client.request(7, "shutdown", json!(null)), Value::Null);
+        client.notify(EXIT_METHOD, json!(null));
+        server_thread.join().expect("server thread should stop");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn pulls_and_reacts_to_configuration_changes() {
+        let uri = "file:///configuration/broken.xml";
+        let (server, connection) = Connection::memory();
+        let server_thread = thread::spawn(|| run(server).expect("server loop should succeed"));
+        let client = TestClient {
+            connection,
+            diagnostics: Default::default(),
+        };
+        client.request(
+            1,
+            INITIALIZE_METHOD,
+            json!({
+                "capabilities": {"workspace": {"configuration": true}},
+                "initializationOptions": {"xml": {"format": {"tabSize": 4}}},
+            }),
+        );
+        client.notify("initialized", json!({}));
+        let answer_configuration = |section: Value| match client.next() {
+            Message::Request(request) => {
+                assert_eq!(request.method, CONFIGURATION_METHOD);
+                assert_eq!(request.params, json!({"items": [{"section": "xml"}]}));
+                client.send(Response::new_ok(request.id, json!([section])).into());
+            }
+            message => panic!("unexpected message {message:?}"),
+        };
+        // Le client ne renvoie rien : les options d'initialisation restent.
+        answer_configuration(Value::Null);
+
+        let source = "<root><a></root>";
+        client.notify(
+            DID_OPEN_METHOD,
+            json!({"textDocument": {"uri": uri, "text": source}}),
+        );
+        let published = client.take_diagnostics(2);
+        assert_eq!(published.len(), 1);
+        assert!(!codes(&published[0]).is_empty());
+
+        // Réglages poussés : la validation est désactivée, diagnostics vidés.
+        client.notify(
+            DID_CHANGE_CONFIGURATION_METHOD,
+            json!({"settings": {"xml": {"validation": {"enabled": false}}}}),
+        );
+        let published = client.take_diagnostics(3);
+        assert_eq!(published, vec![json!({"uri": uri, "diagnostics": []})]);
+
+        // Un changement sans effet sur la validation ne republie rien, et les
+        // options d'initialisation restent la base.
+        client.notify(
+            DID_CHANGE_CONFIGURATION_METHOD,
+            json!({"settings": {"xml": {"validation": {"enabled": false}, "format": {"insertSpaces": false}}}}),
+        );
+        assert!(client.take_diagnostics(4).is_empty());
+        let edits = client.request(5, FORMATTING_METHOD, json!({"textDocument": {"uri": uri}}));
+        assert_eq!(edits, json!([]), "malformed documents are not formatted");
+
+        // Sans section poussée, le serveur redemande la configuration.
+        client.notify(DID_CHANGE_CONFIGURATION_METHOD, json!({"settings": null}));
+        answer_configuration(json!({"validation": {"enabled": true}}));
+        let published = client.take_diagnostics(6);
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0]["uri"], uri);
+        assert!(!codes(&published[0]).is_empty());
+
+        // Formatage désactivé.
+        client.notify(
+            DID_CHANGE_CONFIGURATION_METHOD,
+            json!({"settings": {"xml": {"format": {"enabled": false}}}}),
+        );
+        client.notify(
+            DID_OPEN_METHOD,
+            json!({"textDocument": {"uri": "file:///configuration/ok.xml", "text": "<a><b/></a>"}}),
+        );
+        assert_eq!(
+            client.request(
+                7,
+                FORMATTING_METHOD,
+                json!({"textDocument": {"uri": "file:///configuration/ok.xml"}, "options": {"tabSize": 2, "insertSpaces": true}}),
+            ),
+            json!([])
+        );
+
+        assert_eq!(client.request(8, "shutdown", json!(null)), Value::Null);
+        client.notify(EXIT_METHOD, json!(null));
+        server_thread.join().expect("server thread should stop");
+    }
+
+    #[test]
+    fn validation_settings_select_schema_diagnostics() {
+        let directory =
+            std::env::temp_dir().join(format!("xml-lsp-schema-setting {}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("directory should be created");
+        std::fs::write(
+            directory.join("valid.xsd"),
+            "<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\"><xs:element name=\"root\"/></xs:schema>",
+        )
+        .expect("schema should be written");
+        let document_path = directory.join("doc.xml");
+        let uri = path_to_uri(&document_path);
+        let source = "<other xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:noNamespaceSchemaLocation=\"valid.xsd\"/>";
+        let broken = "<other xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:noNamespaceSchemaLocation=\"missing.xsd\"/>";
+        let mut server = XmlLanguageServer::new();
+        server.documents.insert(uri.clone(), source.to_owned());
+        let codes_for = |server: &mut XmlLanguageServer, source: &str, settings: Value| {
+            server.settings = settings::Settings::from_value(&settings);
+            codes(&server.diagnostics(&uri, source))
+        };
+        assert_eq!(
+            codes_for(&mut server, source, json!({})),
+            vec!["xsd-validation"]
+        );
+        assert!(
+            codes_for(
+                &mut server,
+                source,
+                json!({"validation": {"schema": {"enabled": "never"}}})
+            )
+            .is_empty()
+        );
+        let on_valid = json!({"validation": {"schema": {"enabled": "onValidSchema"}}});
+        assert_eq!(
+            codes_for(&mut server, source, on_valid.clone()),
+            vec!["xsd-validation"]
+        );
+        // Schéma introuvable : seule l'erreur de chargement est signalée.
+        let diagnostics = {
+            server.settings = settings::Settings::from_value(&on_valid);
+            server.diagnostics(&uri, broken)
+        };
+        assert_eq!(diagnostics["diagnostics"].as_array().map(Vec::len), Some(1));
+        assert_eq!(diagnostics["diagnostics"][0]["data"]["kind"], "loading");
+        // Un document lié à un schéma n'est pas signalé par noGrammar.
+        assert_eq!(
+            codes_for(
+                &mut server,
+                source,
+                json!({"validation": {"noGrammar": "hint"}})
+            ),
+            vec!["xsd-validation"]
+        );
+        assert_eq!(
+            codes_for(
+                &mut server,
+                "<?xml-model href=\"x.rng\"?><r/>",
+                json!({"validation": {"noGrammar": "hint"}})
+            ),
+            Vec::<String>::new()
+        );
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]

@@ -6,7 +6,8 @@ pub mod tags;
 pub mod wellformed;
 
 pub use format::{
-    FormatOptions, FormattedRange, LineEnding, format_xml, format_xml_range, format_xml_with,
+    EmptyElements, FormatOptions, FormattedRange, LineEnding, SplitAttributes, format_xml,
+    format_xml_range, format_xml_with,
 };
 
 use std::collections::BTreeSet;

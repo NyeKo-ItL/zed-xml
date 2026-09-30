@@ -1,4 +1,4 @@
-use zed_extension_api as zed;
+use zed_extension_api::{self as zed, serde_json::Value, settings::LspSettings};
 
 const LANGUAGE_SERVER_ID: &str = "xml-lsp";
 const EXPECTED_LSP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -48,6 +48,36 @@ impl XmlExtension {
         };
 
         output.status == Some(0) && Self::version_output_matches(&output.stdout)
+    }
+
+    /// Configuration `workspace/configuration` : la section `xml` des
+    /// réglages Zed `lsp.xml-lsp.settings`, écrits avec ou sans la clé `xml`
+    /// (`{"xml": {"format": …}}` ou `{"format": …}`).
+    fn workspace_configuration(settings: Option<Value>) -> Option<Value> {
+        let settings = settings.filter(|settings| !settings.is_null())?;
+        if settings.get("xml").is_some() {
+            return Some(settings);
+        }
+        Some(zed::serde_json::json!({ "xml": settings }))
+    }
+
+    /// `initializationOptions` : celles de `lsp.xml-lsp.initialization_options`
+    /// si elles existent, sinon les réglages (convention LemMinX
+    /// `{"settings": {"xml": …}}`) pour que le serveur les applique dès
+    /// l'initialisation.
+    fn initialization_options(
+        initialization_options: Option<Value>,
+        settings: Option<Value>,
+    ) -> Option<Value> {
+        if let Some(options) = initialization_options.filter(|options| !options.is_null()) {
+            return Some(options);
+        }
+        Self::workspace_configuration(settings)
+            .map(|configuration| zed::serde_json::json!({ "settings": configuration }))
+    }
+
+    fn lsp_settings(worktree: &zed::Worktree) -> LspSettings {
+        LspSettings::for_worktree(LANGUAGE_SERVER_ID, worktree).unwrap_or_default()
     }
 
     fn release_asset(
@@ -168,6 +198,34 @@ impl zed::Extension for XmlExtension {
 
         Self::native_command(language_server_id, worktree)
     }
+
+    fn language_server_initialization_options(
+        &mut self,
+        language_server_id: &zed::LanguageServerId,
+        worktree: &zed::Worktree,
+    ) -> zed::Result<Option<Value>> {
+        if language_server_id.as_ref() != LANGUAGE_SERVER_ID {
+            return Ok(None);
+        }
+        let settings = Self::lsp_settings(worktree);
+        Ok(Self::initialization_options(
+            settings.initialization_options,
+            settings.settings,
+        ))
+    }
+
+    fn language_server_workspace_configuration(
+        &mut self,
+        language_server_id: &zed::LanguageServerId,
+        worktree: &zed::Worktree,
+    ) -> zed::Result<Option<Value>> {
+        if language_server_id.as_ref() != LANGUAGE_SERVER_ID {
+            return Ok(None);
+        }
+        Ok(Self::workspace_configuration(
+            Self::lsp_settings(worktree).settings,
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -219,6 +277,44 @@ mod tests {
     fn rejects_malformed_version_output() {
         assert!(!XmlExtension::version_output_matches(b"xml-lsp\n"));
         assert!(!XmlExtension::version_output_matches(b""));
+    }
+
+    #[test]
+    fn wraps_lsp_settings_in_the_xml_section() {
+        use zed::serde_json::json;
+        assert_eq!(XmlExtension::workspace_configuration(None), None);
+        assert_eq!(
+            XmlExtension::workspace_configuration(Some(Value::Null)),
+            None
+        );
+        assert_eq!(
+            XmlExtension::workspace_configuration(Some(json!({"format": {"enabled": false}}))),
+            Some(json!({"xml": {"format": {"enabled": false}}}))
+        );
+        assert_eq!(
+            XmlExtension::workspace_configuration(Some(json!({"xml": {"catalogs": ["c.xml"]}}))),
+            Some(json!({"xml": {"catalogs": ["c.xml"]}}))
+        );
+    }
+
+    #[test]
+    fn prefers_explicit_initialization_options() {
+        use zed::serde_json::json;
+        assert_eq!(XmlExtension::initialization_options(None, None), None);
+        assert_eq!(
+            XmlExtension::initialization_options(
+                Some(json!({"xml": {"validation": {"enabled": false}}})),
+                Some(json!({"format": {"enabled": false}})),
+            ),
+            Some(json!({"xml": {"validation": {"enabled": false}}}))
+        );
+        assert_eq!(
+            XmlExtension::initialization_options(
+                Some(Value::Null),
+                Some(json!({"format": {"enabled": false}}))
+            ),
+            Some(json!({"settings": {"xml": {"format": {"enabled": false}}}}))
+        );
     }
 
     #[test]

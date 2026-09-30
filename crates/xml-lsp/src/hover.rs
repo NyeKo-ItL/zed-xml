@@ -64,6 +64,9 @@ pub struct HoverContext<'a> {
     /// Documents ouverts (URI -> contenu), prioritaires sur le disque.
     pub documents: &'a HashMap<String, String>,
     pub cache: &'a mut ModelCache,
+    /// Schémas associés au document de la requête par
+    /// `xml.fileAssociations`, utilisés lorsqu'il n'en déclare aucun.
+    pub associated_schemas: Vec<PathBuf>,
 }
 
 /// Répond à `textDocument/hover` pour le document `uri` au curseur `offset`.
@@ -392,7 +395,7 @@ pub(crate) fn instance_models(
     uri: &str,
     document: &Document<'_>,
 ) -> LoadedModels {
-    let roots =
+    let roots: Vec<PathBuf> =
         match resolve_schema_locations(schema_resolution_source(document.source), uri_to_path(uri))
         {
             Ok(references) => references
@@ -402,6 +405,11 @@ pub(crate) fn instance_models(
             // Document en cours de saisie : lecture tolérante des attributs xsi.
             Err(_) => document.schema_locations(&uri_to_path(uri)),
         };
+    let roots = if roots.is_empty() {
+        context.associated_schemas.clone()
+    } else {
+        roots
+    };
     load_models(context, Vec::new(), roots)
 }
 
@@ -1140,6 +1148,7 @@ mod tests {
             let mut context = HoverContext {
                 documents: &self.documents,
                 cache: &mut self.cache,
+                associated_schemas: Vec::new(),
             };
             hover(&mut context, uri, &source, offset)
         }

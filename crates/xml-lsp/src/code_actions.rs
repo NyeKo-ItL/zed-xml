@@ -1073,6 +1073,7 @@ mod tests {
             let mut hover = HoverContext {
                 documents: &self.documents,
                 cache: &mut self.cache,
+                associated_schemas: Vec::new(),
             };
             code_actions(&mut hover, &uri, source, range, &context)
         }
@@ -1082,6 +1083,7 @@ mod tests {
             let mut hover = HoverContext {
                 documents: &self.documents,
                 cache: &mut self.cache,
+                associated_schemas: Vec::new(),
             };
             enumeration_diagnostics(&mut hover, &uri, source)
         }
