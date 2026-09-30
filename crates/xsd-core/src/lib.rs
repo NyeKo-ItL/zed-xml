@@ -6,7 +6,7 @@ pub mod model;
 pub mod pattern;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ops::Range,
     path::{Component, Path, PathBuf},
     str,
@@ -21,6 +21,10 @@ use crate::{
 };
 
 const MAX_XSD_SOURCE_BYTES: usize = 16 * 1024 * 1024;
+/// Maximum number of schema documents loaded for one document (through
+/// `xsi:schemaLocation`, `xs:include`, `xs:import`...), to bound the work
+/// done for a hostile or runaway schema graph.
+pub const MAX_SCHEMA_DOCUMENTS: usize = 256;
 
 /// Cardinality of an XSD element.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -273,10 +277,22 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
     let mut complex_content_depth = 0usize;
     let mut simple_content_depth = 0usize;
     let mut simple_type_stack: Vec<Option<String>> = Vec::new();
+    // `(parent, child)` pairs already in `schema.children`: a child is
+    // listed once, and a schema repeating it (nested elements of the same
+    // name) keeps the list and the validation linear.
+    let mut listed_children: HashSet<(String, String)> = HashSet::new();
+    let mut depth = 0usize;
 
     loop {
         match reader.read_event() {
             Ok(Event::Start(element)) => {
+                depth += 1;
+                if depth > model::MAX_SCHEMA_DEPTH {
+                    return Err(format!(
+                        "the schema is nested more than {} levels deep",
+                        model::MAX_SCHEMA_DEPTH
+                    ));
+                }
                 let element_name = element.name();
                 let current_name = local_name(element_name.as_ref());
                 let simple_name = if current_name == "simpleType" {
@@ -475,7 +491,8 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                     }
                 }
                 if let (Some(parent), Some(child)) = (model_stack.last(), declared_name.as_ref()) {
-                    if sequence_depth > 0 {
+                    if sequence_depth > 0 && listed_children.insert((parent.clone(), child.clone()))
+                    {
                         schema
                             .children
                             .entry(parent.clone())
@@ -699,7 +716,9 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                     })
                 {
                     if let Some(parent) = model_stack.last() {
-                        if sequence_depth > 0 {
+                        if sequence_depth > 0
+                            && listed_children.insert((parent.clone(), name.clone()))
+                        {
                             schema
                                 .children
                                 .entry(parent.clone())
@@ -747,6 +766,7 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                 }
             }
             Ok(Event::End(element)) => {
+                depth = depth.saturating_sub(1);
                 simple_type_stack.pop();
                 let element_name = element.name();
                 let current_name = local_name(element_name.as_ref());
@@ -862,32 +882,50 @@ pub fn resolve_location(base_directory: &Path, location: &str) -> PathBuf {
         return PathBuf::from(location);
     }
     let raw = resolve_path(base_directory, location);
-    if !location.contains('%') || raw.exists() {
+    if !location.contains('%') || xml_core::resource::is_network_path(&raw) || raw.exists() {
         return raw;
     }
     resolve_path(base_directory, &percent_decode(location))
 }
 
 /// The path is actually a non-local URL (`http:`, `https:`, `urn:`…) kept
-/// by [`resolve_location`].
+/// by [`resolve_location`], or a network share (`\\server\share`,
+/// `file://server/share`): neither is ever read.
 pub fn is_remote_location(path: &Path) -> bool {
     path.to_str()
         .and_then(uri_scheme)
         .is_some_and(|scheme| !scheme.eq_ignore_ascii_case("file"))
+        || xml_core::resource::is_network_path(path)
 }
 
 /// Local path of a `file:` URI (`file:///a%20b.xsd` -> `/a b.xsd`); query
-/// and fragment ignored.
+/// and fragment ignored. A URI naming another host
+/// (`file://server/share/a.xsd`) gives the network path
+/// `//server/share/a.xsd`, which [`is_remote_location`] recognizes.
 pub fn file_uri_to_path(uri: &str) -> PathBuf {
     let raw = uri.get(5..).filter(|_| {
         uri.get(..5)
             .is_some_and(|scheme| scheme.eq_ignore_ascii_case("file:"))
     });
     let raw = raw.unwrap_or(uri);
-    let raw = raw.strip_prefix("//localhost/").map_or_else(
-        || raw.strip_prefix("//").unwrap_or(raw),
-        |rest| &raw[raw.len() - rest.len() - 1..],
-    );
+    let raw = match raw.strip_prefix("//") {
+        Some(rest) => {
+            let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+            let drive = authority.len() == 2
+                && authority.as_bytes()[0].is_ascii_alphabetic()
+                && authority.as_bytes()[1] == b':';
+            if authority.is_empty() || authority.eq_ignore_ascii_case("localhost") {
+                &rest[authority.len()..]
+            } else if drive {
+                // `file://C:/a.xsd` (sloppy form of `file:///C:/a.xsd`).
+                rest
+            } else {
+                // Another host: keep the `//` of a network path.
+                raw
+            }
+        }
+        None => raw,
+    };
     let raw = raw.split(['?', '#']).next().unwrap_or(raw);
     let raw = if cfg!(windows) && raw.starts_with('/') && raw.as_bytes().get(2) == Some(&b':') {
         &raw[1..]
@@ -1556,7 +1594,9 @@ struct XmlFrame<'s> {
     location: Range<usize>,
     /// Namespace declarations of the start tag (`""` for the default).
     namespaces: Vec<(String, String)>,
-    step: XsdInstanceStep,
+    /// Declaration resolved for the element (`skipped` ones included), the
+    /// starting point of its children.
+    resolution: Option<model::ResolvedElement<'s>>,
     value: ValueCheck<'s>,
     /// Index of the element in the identity tree.
     node: usize,
@@ -1609,6 +1649,7 @@ fn validate(
         .any(|model| !model.identity_constraints.is_empty());
     let mut reader = Reader::from_str(source);
     let mut stack: Vec<XmlFrame<'_>> = Vec::new();
+    let mut bindings = Bindings::default();
     let mut nodes: Vec<identity::InstanceNode<'_>> = Vec::new();
     let mut diagnostics = Vec::new();
     let mut root_checked = false;
@@ -1637,10 +1678,11 @@ fn validate(
                         &frame.location,
                     ));
                     diagnostics.extend(located(
-                        validate_text_content(&frame, &stack, schema),
+                        validate_text_content(&frame, &bindings, schema),
                         &frame.location,
                     ));
-                    close_node(&mut nodes, &frame, &stack, has_constraints);
+                    close_node(&mut nodes, &frame, &bindings, has_constraints);
+                    bindings.unbind(&frame.namespaces);
                 }
                 continue;
             }
@@ -1690,16 +1732,19 @@ fn validate(
                 &location,
             ));
         }
-        let lookup = |prefix: &str| lookup_prefix(&stack, &namespaces, prefix);
+        bindings.bind(&namespaces);
+        let lookup = |prefix: &str| bindings.lookup(prefix);
         let step = instance_step(&name, &element, &lookup);
-        let mut path = stack
-            .iter()
-            .map(|frame| frame.step.clone())
-            .collect::<Vec<_>>();
-        path.push(step.clone());
-        let resolved = models
-            .resolve_element_path(&path)
-            .filter(|resolved| !resolved.skipped);
+        // Each open element keeps its own resolution: resolving a child from
+        // its parent's is constant time, the whole path would be quadratic.
+        let chain = match stack.last() {
+            None => models.resolve_root_element(&step),
+            Some(parent) => parent
+                .resolution
+                .as_ref()
+                .and_then(|parent| models.resolve_child_element(parent, &step)),
+        };
+        let resolved = chain.filter(|resolved| !resolved.skipped);
         let (attribute_diagnostics, attribute_types, instance_attributes) =
             validate_attribute_values(
                 source,
@@ -1772,7 +1817,7 @@ fn validate(
             unresolved_text: false,
             location,
             namespaces,
-            step,
+            resolution: chain,
             value,
             node,
             text_range: None,
@@ -1781,10 +1826,11 @@ fn validate(
             // Content model rules are only checked on elements with an end
             // tag; the (empty) value is checked here.
             diagnostics.extend(located(
-                validate_text_content(&frame, &stack, schema),
+                validate_text_content(&frame, &bindings, schema),
                 &frame.location,
             ));
-            close_node(&mut nodes, &frame, &stack, has_constraints);
+            close_node(&mut nodes, &frame, &bindings, has_constraints);
+            bindings.unbind(&frame.namespaces);
         } else {
             stack.push(frame);
         }
@@ -1822,7 +1868,7 @@ fn extend_text_range(frame: &mut XmlFrame<'_>, range: Option<Range<usize>>) {
 fn close_node(
     nodes: &mut [identity::InstanceNode<'_>],
     frame: &XmlFrame<'_>,
-    ancestors: &[XmlFrame<'_>],
+    bindings: &Bindings,
     has_constraints: bool,
 ) {
     let last = nodes.len().saturating_sub(1).max(frame.node);
@@ -1832,7 +1878,7 @@ fn close_node(
             ValueCheck::Model { value_type: Some(value_type), .. } if value_type.id_kind().is_some()
         );
     let value = if needed {
-        element_value(frame, ancestors)
+        element_value(frame, bindings)
     } else {
         None
     };
@@ -1844,10 +1890,7 @@ fn close_node(
 
 /// Simple value of a closed element (`None` for element content, nil or
 /// unknown entities).
-fn element_value(
-    frame: &XmlFrame<'_>,
-    ancestors: &[XmlFrame<'_>],
-) -> Option<identity::InstanceValue> {
+fn element_value(frame: &XmlFrame<'_>, bindings: &Bindings) -> Option<identity::InstanceValue> {
     if frame.unresolved_text || !frame.children.is_empty() {
         return None;
     }
@@ -1870,7 +1913,7 @@ fn element_value(
                 (true, Some(value)) => value,
                 _ => frame.text.as_str(),
             };
-            let lookup = |prefix: &str| lookup_prefix(ancestors, &frame.namespaces, prefix);
+            let lookup = |prefix: &str| bindings.lookup(prefix);
             // Complex content has no simple value (§3.11.4, fields).
             let value_type = value_type.as_ref()?;
             Some(instance_value(value_type, text, range, &lookup).0)
@@ -1945,7 +1988,12 @@ fn validate_root_element(
         return validate_root(name, schema);
     }
     let (prefix, local) = name.split_once(':').unwrap_or(("", name));
-    let namespace = lookup_prefix(&[], namespaces, prefix);
+    let namespace = namespaces
+        .iter()
+        .rev()
+        .find(|(declared, _)| declared == prefix)
+        .map(|(_, namespace)| namespace.clone())
+        .filter(|namespace| !namespace.is_empty());
     if models.global_elements().any(|declaration| {
         declaration.item.name == local && declaration.item.namespace == namespace
     }) {
@@ -2020,17 +2068,44 @@ fn namespace_declarations(element: &quick_xml::events::BytesStart<'_>) -> Vec<(S
         .collect()
 }
 
-/// Namespace bound to `prefix` (`""` for the default namespace) by the
-/// start tag being read (`own`) or its ancestors.
-fn lookup_prefix(stack: &[XmlFrame<'_>], own: &[(String, String)], prefix: &str) -> Option<String> {
-    if prefix == "xml" {
-        return Some(model::XML_NAMESPACE.to_owned());
+/// Namespace bindings in scope while a document is walked: the declarations
+/// of every open element (and of the start tag being read), innermost last,
+/// so a lookup does not depend on the nesting depth.
+#[derive(Default)]
+struct Bindings(HashMap<String, Vec<String>>);
+
+impl Bindings {
+    fn bind(&mut self, declarations: &[(String, String)]) {
+        for (prefix, namespace) in declarations {
+            self.0
+                .entry(prefix.clone())
+                .or_default()
+                .push(namespace.clone());
+        }
     }
-    own.iter()
-        .chain(stack.iter().rev().flat_map(|frame| frame.namespaces.iter()))
-        .find(|(declared, _)| declared == prefix)
-        .map(|(_, namespace)| namespace.clone())
-        .filter(|namespace| !namespace.is_empty())
+
+    fn unbind(&mut self, declarations: &[(String, String)]) {
+        for (prefix, _) in declarations.iter().rev() {
+            if let Some(namespaces) = self.0.get_mut(prefix) {
+                namespaces.pop();
+                if namespaces.is_empty() {
+                    self.0.remove(prefix);
+                }
+            }
+        }
+    }
+
+    /// Namespace bound to `prefix` (`""` for the default namespace).
+    fn lookup(&self, prefix: &str) -> Option<String> {
+        if prefix == "xml" {
+            return Some(model::XML_NAMESPACE.to_owned());
+        }
+        self.0
+            .get(prefix)
+            .and_then(|namespaces| namespaces.last())
+            .filter(|namespace| !namespace.is_empty())
+            .cloned()
+    }
 }
 
 /// Step of an instance element: expanded name and `xsi:type`.
@@ -2283,7 +2358,7 @@ fn validate_sequence_frame(frame: &XmlFrame<'_>, schema: &XsdSchema) -> Vec<XsdD
 /// namespace prefixes of `QName` values).
 fn validate_text_content(
     frame: &XmlFrame<'_>,
-    ancestors: &[XmlFrame<'_>],
+    bindings: &Bindings,
     schema: &XsdSchema,
 ) -> Vec<XsdDiagnostic> {
     let name = &frame.name;
@@ -2323,7 +2398,7 @@ fn validate_text_content(
     if nil || frame.unresolved_text {
         return Vec::new();
     }
-    let lookup = |prefix: &str| lookup_prefix(ancestors, &frame.namespaces, prefix);
+    let lookup = |prefix: &str| bindings.lookup(prefix);
     let Some(value_type) = value_type else {
         // Complex content: only the `fixed` value of a text-only element.
         return match fixed {
@@ -3782,6 +3857,15 @@ mod tests {
             resolve_location(Path::new("/base"), "./sub/../missing%zz.xsd"),
             PathBuf::from("/base/missing%zz.xsd")
         );
+        let share = resolve_location(Path::new("/base"), "file://server/share/s.xsd");
+        assert_eq!(share, PathBuf::from("//server/share/s.xsd"));
+        assert!(is_remote_location(&share));
+        assert!(is_remote_location(Path::new(r"\\server\share\s.xsd")));
+        assert!(!is_remote_location(Path::new("/tmp/s.xsd")));
+        assert_eq!(
+            resolve_location(Path::new("/base"), "file://C:/s.xsd"),
+            PathBuf::from("C:/s.xsd")
+        );
         let remote = resolve_location(Path::new("/base"), "https://example.com/s.xsd");
         assert_eq!(remote, PathBuf::from("https://example.com/s.xsd"));
         assert!(is_remote_location(&remote));
@@ -3845,5 +3929,32 @@ mod tests {
                 PathBuf::from("/catalog/inc.xsd")
             ]
         );
+    }
+
+    #[test]
+    fn handles_deeply_nested_schemas_and_documents() {
+        const DEPTH: usize = 100_000;
+        let schema = format!(
+            "<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\"><xs:element name=\"a\">{}{}</xs:element></xs:schema>",
+            "<xs:complexType><xs:sequence><xs:element name=\"a\">".repeat(DEPTH),
+            "</xs:element></xs:sequence></xs:complexType>".repeat(DEPTH)
+        );
+        let error = parse_xsd(&schema).unwrap_err();
+        assert!(error.contains("nested more than"), "{error}");
+        let _ = resolve_schema_dependencies(&schema, "/tmp/deep.xsd");
+        // A recursive schema validating a deeply nested instance.
+        let schema = parse_xsd(
+            "<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\"><xs:element name=\"a\"><xs:complexType><xs:sequence><xs:element ref=\"a\" minOccurs=\"0\"/></xs:sequence><xs:attribute name=\"x\"/></xs:complexType></xs:element></xs:schema>",
+        )
+        .unwrap();
+        let document = format!("{}{}", "<a>".repeat(DEPTH), "</a>".repeat(DEPTH));
+        validate_document_located(&document, &schema);
+        let middle = DEPTH * 3;
+        complete_elements(&document, middle, &schema);
+        complete_attributes(&document, middle - 1, &schema);
+        let _ = resolve_schema_locations(&document, "/tmp/deep.xml");
+        let open = "<a x='1'>".repeat(DEPTH);
+        validate_document_located(&open, &schema);
+        complete_elements(&open, open.len(), &schema);
     }
 }

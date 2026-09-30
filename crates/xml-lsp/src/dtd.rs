@@ -42,7 +42,10 @@ use dtd_core::{
     general_entity_references, is_name_char, load_document_dtd, parse_dtd, validate_instance,
 };
 use serde_json::{Value, json};
-use xml_core::tags::{XmlTagKind, XmlTagTree, scan_attributes, scan_markup, scan_tags};
+use xml_core::{
+    resource::{is_local_file, is_network_path, read_text_file},
+    tags::{XmlTagKind, XmlTagTree, scan_attributes, scan_markup, scan_tags},
+};
 use xsd_core::{file_uri_to_path, percent_decode};
 
 use crate::{
@@ -113,14 +116,24 @@ impl ExternalLoader for Loader<'_, '_> {
 }
 
 fn not_found(path: &Path) -> LoadError {
+    if is_network_path(path) {
+        return LoadError {
+            message: format!(
+                "DTD '{}' not loaded: network paths are never accessed, map it to a local file with xml.catalogs",
+                path.display()
+            ),
+            remote: true,
+        };
+    }
     LoadError {
         message: format!("DTD '{}' not found", path.display()),
         remote: false,
     }
 }
 
+/// Open document or local regular file; network paths are never touched.
 fn is_available(context: &DtdContext<'_>, path: &Path) -> bool {
-    path.is_file() || context.documents.contains_key(&path_to_uri(path))
+    context.documents.contains_key(&path_to_uri(path)) || is_local_file(path)
 }
 
 /// Resolves an external identifier: XML catalogs, then `file:` URI,
@@ -191,6 +204,15 @@ fn read_text(context: &mut DtdContext<'_>, path: &Path) -> Result<String, LoadEr
         message,
         remote: false,
     };
+    if is_network_path(path) {
+        return Err(LoadError {
+            message: format!(
+                "DTD '{}' not loaded: network paths are never accessed",
+                path.display()
+            ),
+            remote: true,
+        });
+    }
     let metadata = fs::metadata(path)
         .map_err(|cause| error(format!("DTD '{}' is unreadable: {cause}", path.display())))?;
     if metadata.len() > MAX_DTD_SIZE {
@@ -206,7 +228,7 @@ fn read_text(context: &mut DtdContext<'_>, path: &Path) -> Result<String, LoadEr
     {
         return Ok(text.to_string());
     }
-    let text = xml_core::text::read_text_file(path)
+    let text = read_text_file(path, MAX_DTD_SIZE)
         .map_err(|cause| error(format!("DTD '{}' is unreadable: {cause}", path.display())))?;
     context.cache.insert(
         path.to_path_buf(),

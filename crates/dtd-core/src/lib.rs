@@ -17,8 +17,11 @@
 //!
 //! Security: entity expansion is bounded
 //! ([`MAX_ENTITY_EXPANSION`], [`MAX_PARAMETER_EXPANSION`],
-//! [`MAX_ENTITY_DEPTH`]); general entities are never expanded in memory,
-//! only their size is computed ("billion laughs" attack).
+//! [`MAX_ENTITY_DEPTH`], [`MAX_DOCUMENT_EXPANSION`]); general entities are
+//! never expanded in memory, only their size is computed ("billion laughs"
+//! attack), except inside attribute values, whose normalization is bounded
+//! per value and per document ("quadratic blowup" attack). External
+//! general entities are never read.
 
 pub mod content;
 use xml_core::names;
@@ -64,6 +67,13 @@ pub const MAX_ENTITY_DEPTH: usize = 32;
 /// Maximum number of sources (files, replacement texts) of a
 /// grammar.
 pub const MAX_SOURCES: usize = 256;
+/// Maximum cumulative size (bytes) of the entity replacement texts
+/// expanded while normalizing all the attribute values of one document (or
+/// all the attribute defaults of one grammar). Each value is bounded by
+/// [`MAX_ENTITY_EXPANSION`]; this budget bounds the total, so that many
+/// references to one large entity ("quadratic blowup") cannot make the
+/// work quadratic.
+pub const MAX_DOCUMENT_EXPANSION: usize = 8 << 20;
 
 pub type SourceId = usize;
 
@@ -509,9 +519,22 @@ impl Dtd {
     /// an external, unparsed, unknown or too large entity, or one
     /// containing `<`.
     pub fn normalize_attribute_value(&self, raw: &str, cdata: bool) -> Option<String> {
-        let mut value = String::new();
         let mut budget = MAX_ENTITY_EXPANSION;
-        self.expand_attribute_text(raw, &mut value, &mut budget, 0)?;
+        self.normalize_attribute_value_within(raw, cdata, &mut budget)
+    }
+
+    /// Like [`Dtd::normalize_attribute_value`], taking the replacement texts
+    /// from `budget` (bytes, decreased by what is expanded, set to 0 when
+    /// it is exceeded) so that a caller can bound the total over many
+    /// values.
+    pub fn normalize_attribute_value_within(
+        &self,
+        raw: &str,
+        cdata: bool,
+        budget: &mut usize,
+    ) -> Option<String> {
+        let mut value = String::new();
+        self.expand_attribute_text(raw, &mut value, budget, 0)?;
         if cdata {
             return Some(value);
         }
@@ -563,7 +586,11 @@ impl Dtd {
                 if entity.expansion.error.is_some() || entity.expansion.markup {
                     return None;
                 }
-                *budget = budget.checked_sub(text.len())?;
+                let Some(rest) = budget.checked_sub(text.len()) else {
+                    *budget = 0;
+                    return None;
+                };
+                *budget = rest;
                 self.expand_attribute_text(text, value, budget, depth + 1)?;
             }
         }

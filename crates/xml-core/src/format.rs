@@ -185,7 +185,7 @@ pub fn format_xml_with(source: &str, options: &FormatOptions) -> Result<String, 
         return Err("the XML document is invalid".to_owned());
     }
 
-    let mut formatter = Formatter::new(options, 0, false, false);
+    let mut formatter = Formatter::new(options, 0, false, false, source.len());
     formatter.run(source)?;
     if !formatter.has_root {
         return Err("the XML document has no root element".to_owned());
@@ -266,7 +266,7 @@ pub fn format_xml_range(
         empty_elements: EmptyElements::Ignore,
         ..options.clone()
     };
-    let mut formatter = Formatter::new(options, region.depth, text_before, true);
+    let mut formatter = Formatter::new(options, region.depth, text_before, true, source.len());
     formatter.run(&source[region.range.clone()]).ok()?;
     let (body, text_after) = formatter.finish().ok()?;
 
@@ -345,13 +345,19 @@ struct Region {
 impl Region {
     fn find(tree: &XmlTagTree, start: usize, end: usize) -> Option<Self> {
         let elements = tree.elements();
-        // Only complete elements form a well-nested tree.
-        let closed_parent = (0..elements.len())
-            .map(|index| {
-                tree.ancestors(index)
-                    .find(|&ancestor| elements[ancestor].is_closed())
-            })
-            .collect::<Vec<_>>();
+        // Only complete elements form a well-nested tree. Parents precede
+        // their children: linear even for deeply nested unclosed elements.
+        let mut closed_parent: Vec<Option<usize>> = Vec::with_capacity(elements.len());
+        for element in elements {
+            let parent = element.parent.and_then(|parent| {
+                if elements[parent].is_closed() {
+                    Some(parent)
+                } else {
+                    closed_parent.get(parent).copied().flatten()
+                }
+            });
+            closed_parent.push(parent);
+        }
         let deepest = |contains: &dyn Fn(Range<usize>) -> bool| {
             elements
                 .iter()
@@ -373,7 +379,8 @@ impl Region {
             |index: usize| std::iter::successors(Some(index), |&current| closed_parent[current]);
         let common = match (at_start, at_end) {
             (Some(first), Some(last)) => {
-                chain(first).find(|&ancestor| chain(last).any(|other| other == ancestor))
+                let last_chain = chain(last).collect::<std::collections::HashSet<_>>();
+                chain(first).find(|ancestor| last_chain.contains(ancestor))
             }
             _ => None,
         };
@@ -491,6 +498,19 @@ struct Formatter<'a> {
     pending_start: Option<(BytesStart<'static>, usize)>,
     blank_lines: usize,
     has_root: bool,
+    /// Maximum size of the output (see [`max_formatted_size`]).
+    max_output: usize,
+}
+
+/// Minimum of [`max_formatted_size`].
+const MIN_MAX_FORMATTED_SIZE: usize = 64 * 1024 * 1024;
+
+/// Maximum size of the formatted text of a `source_len`-byte input. The
+/// indentation grows with the depth, so a small, deeply nested document
+/// (or many siblings deep in one) would otherwise format into gigabytes:
+/// formatting is refused beyond this size.
+fn max_formatted_size(source_len: usize) -> usize {
+    source_len.saturating_mul(8).max(MIN_MAX_FORMATTED_SIZE)
 }
 
 impl<'a> Formatter<'a> {
@@ -499,8 +519,10 @@ impl<'a> Formatter<'a> {
         base_depth: usize,
         outer_has_text: bool,
         fragment: bool,
+        source_len: usize,
     ) -> Self {
         Self {
+            max_output: max_formatted_size(source_len),
             options,
             writer: Writer::new(Vec::new()),
             base_depth,
@@ -702,6 +724,9 @@ impl<'a> Formatter<'a> {
     }
 
     fn write_indent(&mut self) -> Result<(), String> {
+        if self.writer.get_ref().len() > self.max_output {
+            return Err("the formatted document would be too large".to_owned());
+        }
         let mut indent = String::new();
         if self.output_started {
             let newline = self.options.line_ending.as_str();

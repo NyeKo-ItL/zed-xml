@@ -31,16 +31,20 @@ use std::{
 };
 
 use serde_json::{Value, json};
-use xml_core::tags::{
-    XmlAttribute, XmlTagKind, XmlTagTree, qualified_name_parts, resolve_namespace, scan_attributes,
+use xml_core::{
+    resource::{MAX_RESOURCE_SIZE, read_text_file},
+    tags::{
+        XmlAttribute, XmlTagKind, XmlTagTree, qualified_name_parts, resolve_namespace,
+        scan_attributes,
+    },
 };
 use xsd_core::model::{
     Located, XSD_NAMESPACE, XsdAttributeDecl, XsdDerivation, XsdElementDecl, XsdInstanceStep,
     XsdModel, XsdModelSet, XsdTypeRef, XsdUse, parse_xsd_model,
 };
 use xsd_core::{
-    SchemaLocation, SchemaLocationKind, resolve_schema_dependencies_with, resolve_schema_location,
-    resolve_schema_locations_with,
+    MAX_SCHEMA_DOCUMENTS, SchemaLocation, SchemaLocationKind, is_remote_location,
+    resolve_schema_dependencies_with, resolve_schema_location, resolve_schema_locations_with,
 };
 
 use crate::{
@@ -368,6 +372,9 @@ pub(crate) fn load_models(
     let (mut paths, mut models): (Vec<_>, Vec<_>) = loaded.into_iter().unzip();
     let mut queue = VecDeque::from(roots);
     while let Some(path) = queue.pop_front() {
+        if visited.len() >= MAX_SCHEMA_DOCUMENTS {
+            break;
+        }
         if !visited.insert(path.clone()) {
             continue;
         }
@@ -376,6 +383,8 @@ pub(crate) fn load_models(
                 let dependencies = dependency_paths(source, &path, context.catalogs);
                 (Arc::new(model), dependencies)
             })
+        } else if is_remote_location(&path) {
+            None
         } else {
             let modified = fs::metadata(&path)
                 .and_then(|metadata| metadata.modified())
@@ -384,7 +393,7 @@ pub(crate) fn load_models(
                 Some((cached, model, dependencies)) if *cached == modified => {
                     Some((model.clone(), dependencies.clone()))
                 }
-                _ => xml_core::text::read_text_file(&path)
+                _ => read_text_file(&path, MAX_RESOURCE_SIZE)
                     .ok()
                     .and_then(|source| {
                         let model = Arc::new(parse_xsd_model(&source).ok()?);

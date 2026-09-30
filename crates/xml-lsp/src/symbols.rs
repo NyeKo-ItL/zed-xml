@@ -24,6 +24,7 @@ use std::{
 };
 
 use serde_json::{Value, json};
+use xml_core::resource::read_text_file;
 use xml_core::tags::{XmlAttribute, XmlTagTree, qualified_name_parts, resolve_namespace};
 use xsd_core::model::XSD_NAMESPACE;
 
@@ -583,7 +584,7 @@ impl WorkspaceIndex {
                 .get(&path)
                 .is_some_and(|cached| cached.modified == modified && cached.len == len);
             if !fresh {
-                let Ok(source) = xml_core::text::read_text_file(&path) else {
+                let Ok(source) = read_text_file(&path, MAX_FILE_SIZE) else {
                     continue;
                 };
                 let location = path.to_string_lossy();
@@ -613,8 +614,10 @@ impl WorkspaceIndex {
             .filter(|uri| uri.starts_with("file://"))
             .map(|uri| uri_to_path(uri))
             .collect::<HashSet<_>>();
+        // Open documents are bounded like the files of the disk.
         let open = documents
             .iter()
+            .filter(|(_, source)| source.len() as u64 <= MAX_FILE_SIZE)
             .map(|(uri, source)| (uri.clone(), Arc::new(index_document(source, uri))));
         let disk = self
             .files

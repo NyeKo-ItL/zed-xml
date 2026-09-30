@@ -357,11 +357,38 @@ fn is_xsd(node: &Node, local: &str) -> bool {
             .is_none_or(|namespace| namespace == XSD_NAMESPACE)
 }
 
-type Scope = HashMap<String, String>;
+/// Namespace declarations of an element (`xmlns`, `xmlns:p`), chained to
+/// the scope of its parent: a scope is never copied, so a document declaring
+/// prefixes on many elements stays linear in memory.
+struct Scope {
+    parent: Option<usize>,
+    declarations: HashMap<String, String>,
+}
+
+/// Namespace bound to `prefix` (`""`: default namespace) in the scope
+/// `index` or its ancestors.
+fn scope_lookup<'s>(scopes: &'s [Scope], index: usize, prefix: &str) -> Option<&'s String> {
+    let mut current = Some(index);
+    while let Some(index) = current {
+        let scope = scopes.get(index)?;
+        if let Some(namespace) = scope.declarations.get(prefix) {
+            return Some(namespace);
+        }
+        current = scope.parent;
+    }
+    None
+}
+
+/// Maximum nesting depth of a schema document: the component model is
+/// built recursively, and real schemas nest a few dozen levels at most.
+pub(crate) const MAX_SCHEMA_DEPTH: usize = 256;
 
 fn build_tree(source: &str) -> Result<(Node, Vec<Scope>), String> {
     let mut reader = Reader::from_str(source);
-    let mut scopes: Vec<Scope> = vec![Scope::new()];
+    let mut scopes: Vec<Scope> = vec![Scope {
+        parent: None,
+        declarations: HashMap::new(),
+    }];
     let mut stack: Vec<Node> = Vec::new();
     let mut root = None;
     loop {
@@ -371,6 +398,11 @@ fn build_tree(source: &str) -> Result<(Node, Vec<Scope>), String> {
         let empty = matches!(event, Event::Empty(_));
         match event {
             Event::Start(element) | Event::Empty(element) => {
+                if stack.len() >= MAX_SCHEMA_DEPTH {
+                    return Err(format!(
+                        "XSD error: the schema is nested more than {MAX_SCHEMA_DEPTH} levels deep"
+                    ));
+                }
                 let qname = String::from_utf8_lossy(element.name().as_ref()).into_owned();
                 let mut attributes = Vec::new();
                 for attribute in element.attributes().flatten() {
@@ -393,17 +425,17 @@ fn build_tree(source: &str) -> Result<(Node, Vec<Scope>), String> {
                 let scope = if declarations.is_empty() {
                     parent_scope
                 } else {
-                    let mut scope = scopes[parent_scope].clone();
-                    scope.extend(declarations);
-                    scopes.push(scope);
+                    scopes.push(Scope {
+                        parent: Some(parent_scope),
+                        declarations: declarations.into_iter().collect(),
+                    });
                     scopes.len() - 1
                 };
                 let (prefix, local) = match qname.split_once(':') {
                     Some((prefix, local)) => (prefix, local.to_owned()),
                     None => ("", qname.clone()),
                 };
-                let namespace = scopes[scope]
-                    .get(prefix)
+                let namespace = scope_lookup(&scopes, scope, prefix)
                     .filter(|namespace| !namespace.is_empty())
                     .cloned();
                 let node = Node {
@@ -458,7 +490,7 @@ fn build_tree(source: &str) -> Result<(Node, Vec<Scope>), String> {
         close(&mut stack, &mut root);
     }
     root.map(|root| (root, scopes))
-        .ok_or_else(|| "document XSD vide".to_owned())
+        .ok_or_else(|| "empty XSD document".to_owned())
 }
 
 /// `xs:boolean` attribute of a schema component (`true` or `1`).
@@ -580,8 +612,7 @@ impl Context<'_> {
         let namespace = if prefix == Some("xml") {
             Some(XML_NAMESPACE.to_owned())
         } else {
-            self.scopes[node.scope]
-                .get(prefix.unwrap_or(""))
+            scope_lookup(self.scopes, node.scope, prefix.unwrap_or(""))
                 .filter(|namespace| !namespace.is_empty())
                 .cloned()
         };
@@ -808,13 +839,12 @@ impl Context<'_> {
         let expression = node
             .attribute("xpath")
             .ok_or_else(|| format!("the xpath attribute of xs:{} is missing", node.local))?;
-        let scope = &self.scopes[node.scope];
+        let scopes = self.scopes;
         let resolve = |prefix: &str| {
             if prefix == "xml" {
                 return Some(XML_NAMESPACE.to_owned());
             }
-            scope
-                .get(prefix)
+            scope_lookup(scopes, node.scope, prefix)
                 .filter(|namespace| !namespace.is_empty())
                 .cloned()
         };
@@ -1411,18 +1441,36 @@ impl XsdModelSet {
     /// content).
     pub fn resolve_element_path(&self, path: &[XsdInstanceStep]) -> Option<ResolvedElement<'_>> {
         let (first, rest) = path.split_first()?;
-        let particle = self.global_element(first.namespace.as_deref(), &first.local)?;
-        let mut current = self.resolved(particle, first);
+        let mut current = self.resolve_root_element(first)?;
         for step in rest {
-            let parent = current.element_type;
-            let child = parent.and_then(|parent| self.find_child(parent, step));
-            let skipped = current.skipped
-                || (child.is_none() && parent.is_some_and(|parent| self.has_skip_wildcard(parent)));
-            let particle =
-                child.or_else(|| self.global_element(step.namespace.as_deref(), &step.local))?;
-            current = self.resolved(particle, step);
-            current.skipped = skipped;
+            current = self.resolve_child_element(&current, step)?;
         }
+        Some(current)
+    }
+
+    /// Global element declaration designated by the root element `step`.
+    pub fn resolve_root_element(&self, step: &XsdInstanceStep) -> Option<ResolvedElement<'_>> {
+        let particle = self.global_element(step.namespace.as_deref(), &step.local)?;
+        Some(self.resolved(particle, step))
+    }
+
+    /// Declaration of the child `step` of `parent`: one step of
+    /// [`Self::resolve_element_path`], for callers walking a document that
+    /// keep the resolution of each open element (linear in the depth).
+    pub fn resolve_child_element<'a>(
+        &'a self,
+        parent: &ResolvedElement<'a>,
+        step: &XsdInstanceStep,
+    ) -> Option<ResolvedElement<'a>> {
+        let parent_type = parent.element_type;
+        let child = parent_type.and_then(|parent_type| self.find_child(parent_type, step));
+        let skipped = parent.skipped
+            || (child.is_none()
+                && parent_type.is_some_and(|parent| self.has_skip_wildcard(parent)));
+        let particle =
+            child.or_else(|| self.global_element(step.namespace.as_deref(), &step.local))?;
+        let mut current = self.resolved(particle, step);
+        current.skipped = skipped;
         Some(current)
     }
 
@@ -2248,5 +2296,42 @@ mod tests {
     fn rejects_non_schema_documents() {
         assert!(parse_xsd_model("<root/>").is_err());
         assert!(parse_xsd_model("<xs:schema").is_err());
+    }
+
+    #[test]
+    fn bounds_the_depth_and_scopes_of_schemas() {
+        let deep = format!(
+            "<xs:schema xmlns:xs=\"{XSD_NAMESPACE}\">{}{}</xs:schema>",
+            "<xs:complexType><xs:sequence>".repeat(50_000),
+            "</xs:sequence></xs:complexType>".repeat(50_000)
+        );
+        let error = parse_xsd_model(&deep).unwrap_err();
+        assert!(error.contains("nested more than"), "{error}");
+        // Within the limit, nested prefixes still resolve.
+        let nested = format!(
+            "<xs:schema xmlns:xs=\"{XSD_NAMESPACE}\" xmlns:t=\"urn:t\" targetNamespace=\"urn:t\"><xs:element name=\"a\"><xs:complexType xmlns:u=\"urn:u\"><xs:sequence xmlns:t=\"urn:other\"><xs:element name=\"b\" type=\"t:B\"/></xs:sequence><xs:attribute name=\"c\" type=\"t:C\"/></xs:complexType></xs:element></xs:schema>"
+        );
+        let model = parse_xsd_model(&nested).unwrap();
+        let element = &model.elements[0];
+        let definition = element
+            .anonymous_type
+            .as_ref()
+            .expect("anonymous type expected");
+        let debug = format!("{definition:?}");
+        assert!(debug.contains("urn:other"), "{debug}");
+        assert!(debug.contains("urn:t"), "{debug}");
+        // Many elements declaring prefixes deep in a schema stay linear
+        // (scopes are chained, not copied).
+        let prefixes = (0..200)
+            .map(|index| format!("<xs:sequence xmlns:p{index}=\"urn:{index}\">"))
+            .collect::<String>();
+        let wide = format!(
+            "<xs:schema xmlns:xs=\"{XSD_NAMESPACE}\"><xs:complexType name=\"T\">{prefixes}{}{}</xs:complexType></xs:schema>",
+            "<xs:element name=\"e\" xmlns:q=\"urn:q\" type=\"q:E\"/>".repeat(50_000),
+            "</xs:sequence>".repeat(200)
+        );
+        let start = std::time::Instant::now();
+        assert!(parse_xsd_model(&wide).is_ok());
+        assert!(start.elapsed() < std::time::Duration::from_secs(30));
     }
 }

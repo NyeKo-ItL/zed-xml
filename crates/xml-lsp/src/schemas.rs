@@ -23,7 +23,7 @@ use std::{
 
 use quick_xml::{Reader, events::Event};
 use xsd_core::{
-    SchemaReference, XsdSchema, is_remote_location, merge_schemas, parse_xsd,
+    MAX_SCHEMA_DOCUMENTS, SchemaReference, XsdSchema, is_remote_location, merge_schemas, parse_xsd,
     resolve_schema_dependencies_with,
 };
 
@@ -105,9 +105,23 @@ impl SchemaStore {
         let mut errors = Vec::new();
 
         while let Some(path) = queue.pop() {
-            if !visited.insert(path.clone()) {
+            if visited.contains(&path) {
+                // Already loaded: `xs:include`/`xs:import` cycles end here.
                 continue;
             }
+            if visited.len() >= MAX_SCHEMA_DOCUMENTS {
+                errors.push(SchemaLoadError {
+                    message: format!(
+                        "too many schema documents: only the first {MAX_SCHEMA_DOCUMENTS} are loaded ({} not loaded)",
+                        path.display()
+                    ),
+                    path,
+                    offset: 0,
+                    remote: false,
+                });
+                break;
+            }
+            visited.insert(path.clone());
             if is_remote_location(&path) {
                 errors.push(SchemaLoadError {
                     message: format!(
@@ -223,7 +237,8 @@ fn read_schema(
     stamp: Stamp,
     catalogs: &catalog::Catalogs,
 ) -> Result<CachedFile, SchemaLoadError> {
-    let source = xml_core::text::read_text_file(path).map_err(|error| unreadable(path, error))?;
+    let source = xml_core::resource::read_text_file(path, xml_core::resource::MAX_RESOURCE_SIZE)
+        .map_err(|error| unreadable(path, error))?;
     let schema = parse_xsd(&source)
         .map(Arc::new)
         .map_err(|error| SchemaLoadError {

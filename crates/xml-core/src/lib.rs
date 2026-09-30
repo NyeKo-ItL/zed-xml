@@ -3,6 +3,7 @@
 pub mod diff;
 mod format;
 pub mod names;
+pub mod resource;
 pub mod tags;
 pub mod text;
 pub mod wellformed;
@@ -743,5 +744,58 @@ mod tests {
     #[test]
     fn rejects_invalid_xml() {
         assert!(format_xml("<root>").is_err());
+    }
+
+    /// 100 000 nested elements (and an unclosed variant) go through every
+    /// analysis without overflowing the stack of a test thread.
+    #[test]
+    fn handles_deeply_nested_documents() {
+        const DEPTH: usize = 100_000;
+        let closed = format!("{}{}", "<a>".repeat(DEPTH), "</a>".repeat(DEPTH));
+        let open = "<a b='1'>".repeat(DEPTH);
+        for source in [&closed, &open] {
+            parse_xml(source);
+            wellformed::check_well_formedness(source);
+            let tree = tags::XmlTagTree::parse(source);
+            assert_eq!(tree.elements().len(), DEPTH);
+            let middle = source.len() / 2;
+            tree.innermost_element_at(middle);
+            tree.tag_pair_at(middle);
+            tags::scan_markup(source);
+            complete_xml(source, middle);
+            auto_close_tag(source, source.len());
+            let _ = format_xml(source);
+            let _ = format_xml_range(source, middle..middle + 3, &FormatOptions::default());
+        }
+        // Beyond the maximum depth, the document is reported and not
+        // formatted; a range deep inside it is not formatted either, since
+        // its indentation alone would take gigabytes.
+        assert!(format_xml(&closed).is_err());
+        let middle = closed.len() / 2;
+        assert_eq!(
+            format_xml_range(&closed, middle..middle, &FormatOptions::default()),
+            None
+        );
+    }
+
+    /// Many siblings deep in a document: the formatted output would be
+    /// quadratic in size and is refused beyond a bound.
+    #[test]
+    fn refuses_formatting_results_that_are_too_large() {
+        let depth = MAX_XML_DEPTH - 1;
+        let source = format!(
+            "{}{}{}",
+            "<a>".repeat(depth),
+            "<b/>".repeat(200_000),
+            "</a>".repeat(depth)
+        );
+        assert!(parse_xml(&source).diagnostics.is_empty());
+        assert_eq!(
+            format_xml(&source),
+            Err("the formatted document would be too large".to_owned())
+        );
+        // Reasonable documents are still formatted.
+        let source = format!("<r>{}</r>", "<b/>".repeat(1000));
+        assert!(format_xml(&source).is_ok());
     }
 }

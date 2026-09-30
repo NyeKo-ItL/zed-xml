@@ -68,6 +68,10 @@ pub enum InstanceProblemKind {
         expected: Vec<String>,
     },
     TextNotAllowed,
+    /// The entity expansion budget of the document
+    /// ([`crate::MAX_DOCUMENT_EXPANSION`]) is exhausted: the following
+    /// attribute values referencing entities are not checked.
+    ExpansionBudget,
 }
 
 impl InstanceProblemKind {
@@ -92,6 +96,7 @@ impl InstanceProblemKind {
             InstanceProblemKind::UnexpectedElement { .. } => "unexpectedElement",
             InstanceProblemKind::IncompleteContent { .. } => "incompleteContent",
             InstanceProblemKind::TextNotAllowed => "textNotAllowed",
+            InstanceProblemKind::ExpansionBudget => "expansionBudget",
         }
     }
 }
@@ -331,6 +336,8 @@ fn run_validator(
         ids: HashMap::new(),
         references: Vec::new(),
         links: Vec::new(),
+        expansion_budget: crate::MAX_DOCUMENT_EXPANSION,
+        content_budget: MAX_CONTENT_STEPS,
     };
     validator.run();
     validator
@@ -339,15 +346,39 @@ fn run_validator(
     (validator.problems, validator.links)
 }
 
+/// Maximum number of automaton state visits (states × children) spent on
+/// the content models of one document.
+const MAX_CONTENT_STEPS: usize = 1 << 28;
+
+/// Maximum number of characters of a value quoted in a message.
+const MAX_QUOTED_CHARS: usize = 80;
+
+/// `value`, shortened with `…` when it is too long to be quoted in a
+/// message (a value can come from a large entity expansion).
+fn excerpt(value: &str) -> std::borrow::Cow<'_, str> {
+    match value.char_indices().nth(MAX_QUOTED_CHARS) {
+        Some((end, _)) => format!("{}…", &value[..end]).into(),
+        None => value.into(),
+    }
+}
+
+/// Maximum number of names listed in a message.
+const MAX_LISTED_NAMES: usize = 50;
+
 fn list(names: &[String]) -> String {
     if names.is_empty() {
         return "no element".to_owned();
     }
-    names
+    let mut listed = names
         .iter()
-        .map(|name| format!("'{name}'"))
+        .take(MAX_LISTED_NAMES)
+        .map(|name| format!("'{}'", excerpt(name)))
         .collect::<Vec<_>>()
-        .join(", ")
+        .join(", ");
+    if names.len() > MAX_LISTED_NAMES {
+        listed.push_str(&format!(" and {} more", names.len() - MAX_LISTED_NAMES));
+    }
+    listed
 }
 
 /// Direct content of an element, excluding child elements.
@@ -372,6 +403,10 @@ struct Validator<'a> {
     references: Vec<(String, Range<usize>)>,
     /// (IDREF, ID) ranges.
     links: Vec<(Range<usize>, Range<usize>)>,
+    /// Remaining bytes of entity replacement texts for attribute values.
+    expansion_budget: usize,
+    /// Remaining automaton steps (states × children) for content models.
+    content_budget: usize,
 }
 
 impl<'a> Validator<'a> {
@@ -446,7 +481,7 @@ impl<'a> Validator<'a> {
                 self.push(
                     InstanceProblemKind::UnknownIdRef,
                     range,
-                    format!("no element has the ID '{value}'"),
+                    format!("no element has the ID '{}'", excerpt(&value)),
                 );
             }
         }
@@ -533,7 +568,7 @@ impl<'a> Validator<'a> {
         let raw = &self.source[range.clone()];
         let cdata = declaration.attribute_type == AttributeType::CData;
         // Invalid references: reported by `check_entity_references`.
-        let Some(value) = self.dtd.normalize_attribute_value(raw, cdata) else {
+        let Some(value) = self.normalize(raw, cdata, &range) else {
             return;
         };
         let attribute = &declaration.name;
@@ -545,7 +580,9 @@ impl<'a> Validator<'a> {
                     },
                     range,
                     format!(
-                        "the attribute '{attribute}' has the fixed value '{expected}' (#FIXED), found '{value}'"
+                        "the attribute '{attribute}' has the fixed value '{}' (#FIXED), found '{}'",
+                        excerpt(expected),
+                        excerpt(&value)
                     ),
                 );
             }
@@ -564,7 +601,10 @@ impl<'a> Validator<'a> {
                     self.push(
                         InstanceProblemKind::DuplicateId,
                         range,
-                        format!("the ID '{value}' is already used in the document"),
+                        format!(
+                            "the ID '{}' is already used in the document",
+                            excerpt(&value)
+                        ),
                     );
                 } else {
                     let target = self.token_range(&range, &value);
@@ -625,7 +665,8 @@ impl<'a> Validator<'a> {
                         },
                         range,
                         format!(
-                            "the value '{value}' is not allowed for the attribute '{attribute}' (expected: {})",
+                            "the value '{}' is not allowed for the attribute '{attribute}' (expected: {})",
+                            excerpt(&value),
                             values.join(", ")
                         ),
                     );
@@ -634,7 +675,36 @@ impl<'a> Validator<'a> {
         }
     }
 
+    /// Normalized attribute value, the entity replacement texts being taken
+    /// from the budget of the document (reported once when exhausted).
+    fn normalize(&mut self, raw: &str, cdata: bool, range: &Range<usize>) -> Option<String> {
+        if !raw.contains('&') {
+            return self.dtd.normalize_attribute_value(raw, cdata);
+        }
+        if self.expansion_budget == 0 {
+            return None;
+        }
+        let mut budget = self.expansion_budget.min(crate::MAX_ENTITY_EXPANSION);
+        let before = budget;
+        let value = self
+            .dtd
+            .normalize_attribute_value_within(raw, cdata, &mut budget);
+        self.expansion_budget -= before - budget;
+        if self.expansion_budget == 0 {
+            self.push(
+                InstanceProblemKind::ExpansionBudget,
+                range.clone(),
+                format!(
+                    "the entity references of the attribute values expand to more than {} bytes in total: the following values referencing entities are not checked",
+                    crate::MAX_DOCUMENT_EXPANSION
+                ),
+            );
+        }
+        value
+    }
+
     fn invalid(&mut self, range: Range<usize>, value: &str, attribute: &str, expected: &str) {
+        let value = excerpt(value);
         self.push(
             InstanceProblemKind::InvalidAttributeValue,
             range,
@@ -803,13 +873,26 @@ impl<'a> Validator<'a> {
                     self.push(
                         InstanceProblemKind::TextNotAllowed,
                         range,
-                        format!("text is not allowed in the element '{name}' (content {content})"),
+                        format!(
+                            "text is not allowed in the element '{name}' (content {})",
+                            excerpt(&content.to_string())
+                        ),
                     );
                 }
                 let automaton = self
                     .automata
                     .entry(name)
                     .or_insert_with(|| ContentAutomaton::new(particle));
+                // Recognition costs `states × children`: a huge model
+                // matched against many children is skipped once the budget
+                // of the document is spent.
+                let cost = automaton
+                    .state_count()
+                    .saturating_mul(children.len().saturating_add(1));
+                let Some(rest) = self.content_budget.checked_sub(cost) else {
+                    return;
+                };
+                self.content_budget = rest;
                 let mut matcher = automaton.matcher();
                 for &child in children {
                     let child_name = elements[child].name(source);
@@ -817,7 +900,8 @@ impl<'a> Validator<'a> {
                         let expected = matcher.expected();
                         let message = if expected.is_empty() {
                             format!(
-                                "the element '{child_name}' is not expected here: the content of '{name}' is complete ({content})"
+                                "the element '{child_name}' is not expected here: the content of '{name}' is complete ({})",
+                                excerpt(&content.to_string())
                             )
                         } else {
                             format!(
@@ -836,8 +920,9 @@ impl<'a> Validator<'a> {
                 if !matcher.accepts() {
                     let expected = matcher.expected();
                     let message = format!(
-                        "the content of the element '{name}' is incomplete (expected: {}); model {content}",
-                        list(&expected)
+                        "the content of the element '{name}' is incomplete (expected: {}); model {}",
+                        list(&expected),
+                        excerpt(&content.to_string())
                     );
                     self.problems.push(InstanceProblem {
                         kind: InstanceProblemKind::IncompleteContent { expected },
@@ -1040,5 +1125,101 @@ mod tests {
         assert_eq!(entity_reference_at(source, 13, true), Some(12..14));
         assert_eq!(entity_reference_at("&é;", 1, false), Some(1..3));
         assert_eq!(entity_reference_at("& b;", 3, false), None);
+    }
+
+    #[test]
+    fn bounds_attribute_normalization_over_the_document() {
+        // "Quadratic blowup": a 512 KiB entity referenced by 2000
+        // attribute values would copy 1 GiB without a document budget.
+        let big = "x".repeat(512 * 1024);
+        let mut document = format!(
+            "<!DOCTYPE r [\n<!ELEMENT r (e*)>\n<!ELEMENT e EMPTY>\n<!ATTLIST e a CDATA #FIXED \"v\">\n<!ENTITY big \"{big}\">\n]>\n<r>"
+        );
+        for _ in 0..2000 {
+            document.push_str("<e a=\"&big;\"/>");
+        }
+        document.push_str("</r>");
+        let start = std::time::Instant::now();
+        let problems = validate(&document);
+        assert!(start.elapsed() < std::time::Duration::from_secs(20));
+        let fixed = problems
+            .iter()
+            .filter(|(kind, _)| *kind == "fixedValue")
+            .count();
+        let budget = problems
+            .iter()
+            .filter(|(kind, _)| *kind == "expansionBudget")
+            .count();
+        // 8 MiB / 512 KiB values are checked, then the budget is reported
+        // once and the other values are skipped.
+        assert_eq!(budget, 1, "{problems:?}");
+        assert_eq!(
+            fixed,
+            crate::MAX_DOCUMENT_EXPANSION / big.len(),
+            "{problems:?}"
+        );
+        // Messages quote a bounded excerpt of the value.
+        let (_, dtd) = load_document_dtd(&document, None, &mut NoLoader).unwrap();
+        let problem = validate_instance(&document, &dtd)
+            .into_iter()
+            .find(|problem| problem.kind.id() == "fixedValue")
+            .unwrap();
+        assert!(problem.message.len() < 300, "{}", problem.message);
+        assert!(problem.message.contains("xxx…"));
+    }
+
+    #[test]
+    fn never_reads_external_general_entities() {
+        struct Recording(Vec<String>);
+        impl crate::ExternalLoader for Recording {
+            fn load(
+                &mut self,
+                _: Option<&str>,
+                system: &str,
+                _: Option<&std::path::Path>,
+            ) -> Result<(std::path::PathBuf, String), crate::LoadError> {
+                self.0.push(system.to_owned());
+                Err(crate::LoadError {
+                    message: "not found".to_owned(),
+                    remote: false,
+                })
+            }
+        }
+        let document = "<!DOCTYPE r [\n<!ELEMENT r ANY>\n<!ATTLIST r a CDATA #IMPLIED>\n<!ENTITY secret SYSTEM \"file:///etc/passwd\">\n<!ENTITY remote SYSTEM \"http://example.com/x.xml\">\n]>\n<r a=\"&secret;\">&secret;&remote;</r>";
+        let mut loader = Recording(Vec::new());
+        let (_, dtd) = load_document_dtd(document, None, &mut loader).unwrap();
+        validate_instance(document, &dtd);
+        let problems = check_entity_references(document, Some(&dtd));
+        assert_eq!(loader.0, Vec::<String>::new());
+        assert_eq!(
+            problems
+                .iter()
+                .map(|problem| problem.kind.id())
+                .collect::<Vec<_>>(),
+            vec!["externalEntityInAttribute"]
+        );
+    }
+
+    #[test]
+    fn bounds_content_model_recognition() {
+        // A model of 20 000 optional particles against 20 000 children
+        // would cost 8·10⁸ state visits: skipped once over the budget.
+        let model = vec!["a?"; 20_000].join(",");
+        let children = "<a/>".repeat(20_000);
+        let document = format!(
+            "<!DOCTYPE r [<!ELEMENT r ({model})><!ELEMENT a EMPTY><!ELEMENT s ({model})>]><r>{children}</r>"
+        );
+        let start = std::time::Instant::now();
+        assert_eq!(validate(&document), Vec::new());
+        assert!(start.elapsed() < std::time::Duration::from_secs(20));
+        // Small models are still checked, and messages quote a bounded
+        // excerpt of a large model.
+        let document = format!(
+            "<!DOCTYPE r [<!ELEMENT r ({model}, b)><!ELEMENT a EMPTY><!ELEMENT b EMPTY>]><r><a/></r>"
+        );
+        let (_, dtd) = load_document_dtd(&document, None, &mut NoLoader).unwrap();
+        let problems = validate_instance(&document, &dtd);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].message.len() < 400, "{}", problems[0].message);
     }
 }

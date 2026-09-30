@@ -220,6 +220,11 @@ impl<'a> Document<'a> {
         }
         chain.push(elements[index].range());
         for ancestor in self.tree.ancestors(index) {
+            if chain.is_full() {
+                // Deeply nested document: the outer ancestors are skipped
+                // and the chain ends with the whole document.
+                break;
+            }
             self.push_content(chain, ancestor);
             chain.push(elements[ancestor].range());
         }
@@ -278,6 +283,12 @@ impl<'a> Document<'a> {
     }
 }
 
+/// Maximum number of ranges of a chain. The LSP answer nests one JSON
+/// object per range (`parent`), so an unbounded chain on a deeply nested
+/// document would make its serialization overflow the stack; the chain
+/// keeps the innermost ranges and the whole document.
+const MAX_CHAIN_LENGTH: usize = 256;
+
 /// Chain of nested ranges: a range is only added when it is non-empty and
 /// strictly contains the previous one (or, for the first one, the requested
 /// position).
@@ -292,6 +303,11 @@ impl Chain {
             offset,
             ranges: Vec::new(),
         }
+    }
+
+    /// Whether only the whole document can still be added.
+    fn is_full(&self) -> bool {
+        self.ranges.len() + 3 >= MAX_CHAIN_LENGTH
     }
 
     fn push(&mut self, range: Range<usize>) {
@@ -357,20 +373,32 @@ fn floor_char_boundary(source: &str, mut offset: usize) -> usize {
 
 /// UTF-8 offset -> LSP position (line, code units of the negotiated
 /// [`crate::positions::PositionEncoding`]) conversion in logarithmic time
-/// for the line.
+/// for the line, and constant time for the column of an ASCII line (a long
+/// single-line document stays linear to convert).
 pub(crate) struct LineIndex {
     starts: Vec<usize>,
     encoding: PositionEncoding,
+    /// Whether each line is pure ASCII (column = byte offset).
+    ascii: Vec<bool>,
 }
 
 impl LineIndex {
     pub(crate) fn new(source: &str) -> Self {
-        let starts = std::iter::once(0)
+        let starts: Vec<usize> = std::iter::once(0)
             .chain(source.match_indices('\n').map(|(index, _)| index + 1))
+            .collect();
+        let ascii = starts
+            .iter()
+            .enumerate()
+            .map(|(line, &start)| {
+                let end = starts.get(line + 1).copied().unwrap_or(source.len());
+                source.as_bytes()[start..end].is_ascii()
+            })
             .collect();
         Self {
             starts,
             encoding: PositionEncoding::current(),
+            ascii,
         }
     }
 
@@ -381,8 +409,29 @@ impl LineIndex {
             .partition_point(|&start| start <= offset)
             .saturating_sub(1);
         let start = self.starts.get(line).copied().unwrap_or(0).min(offset);
-        let character = self.encoding.len(&source[start..offset]);
+        let character = if self.ascii.get(line).copied().unwrap_or(false) {
+            offset - start
+        } else {
+            self.encoding.len(&source[start..offset])
+        };
         json!({"line": line, "character": character})
+    }
+
+    /// UTF-8 offset of an LSP position (line, code units of the negotiated
+    /// encoding), clamped to the end of the line (before its line break) and
+    /// of the document.
+    pub(crate) fn offset(&self, source: &str, line: usize, character: usize) -> usize {
+        let Some(&start) = self.starts.get(line) else {
+            return source.len();
+        };
+        let end = self
+            .starts
+            .get(line + 1)
+            .map_or(source.len(), |&next| next - 1);
+        if self.ascii.get(line).copied().unwrap_or(false) {
+            return (start + character).min(end);
+        }
+        start + self.encoding.offset_in_line(&source[start..end], character)
     }
 }
 
@@ -616,5 +665,55 @@ mod tests {
                 "end": {"line": 0, "character": 0},
             }})]
         );
+    }
+
+    #[test]
+    fn bounds_the_chain_of_deeply_nested_documents() {
+        let source = format!("{}x{}", "<a>".repeat(10_000), "</a>".repeat(10_000));
+        let offset = source.find('x').unwrap();
+        let ranges = Document::new(&source).chain(offset);
+        assert!(ranges.len() <= MAX_CHAIN_LENGTH, "{}", ranges.len());
+        assert_eq!(ranges.last(), Some(&(0..source.len())));
+        for pair in ranges.windows(2) {
+            assert!(pair[1].start <= pair[0].start && pair[0].end <= pair[1].end);
+        }
+        // The LSP answer nests one object per range.
+        let answer = selection_ranges(&source, &[offset]);
+        let mut depth = 0;
+        let mut current = &answer[0];
+        while let Some(parent) = current.get("parent") {
+            current = parent;
+            depth += 1;
+        }
+        assert_eq!(depth + 1, ranges.len());
+    }
+
+    #[test]
+    fn converts_positions_to_offsets() {
+        let source = "é😀a\r\n<b>\nxy";
+        let lines = LineIndex::new(source);
+        assert_eq!(lines.offset(source, 0, 0), 0);
+        assert_eq!(lines.offset(source, 0, 1), 2);
+        assert_eq!(lines.offset(source, 0, 3), 6);
+        assert_eq!(lines.offset(source, 0, 4), 7);
+        // Beyond the line: clamped before its line break.
+        assert_eq!(lines.offset(source, 0, 40), 8);
+        assert_eq!(lines.offset(source, 1, 2), 11);
+        assert_eq!(lines.offset(source, 1, 9), 12);
+        assert_eq!(lines.offset(source, 2, 1), 14);
+        assert_eq!(lines.offset(source, 2, 9), source.len());
+        assert_eq!(lines.offset(source, 7, 0), source.len());
+        for offset in (0..=source.len()).filter(|&offset| {
+            // A position never falls between `\r` and `\n`.
+            source.is_char_boundary(offset)
+                && !(source[..offset].ends_with('\r') && source[offset..].starts_with('\n'))
+        }) {
+            let position = lines.position(source, offset);
+            let line = position["line"].as_u64().unwrap() as usize;
+            let character = position["character"].as_u64().unwrap() as usize;
+            let back = lines.offset(source, line, character);
+            // `\r` belongs to the line: the offset before `\n` round-trips.
+            assert_eq!(back, offset, "{offset}");
+        }
     }
 }

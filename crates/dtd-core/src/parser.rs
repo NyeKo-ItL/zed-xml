@@ -20,8 +20,9 @@ use xml_core::tags::{XmlMarkupKind, scan_markup, scan_tags};
 use crate::{
     AttributeDecl, AttributeType, ContentParticle, ContentSpec, DefaultDecl, Dtd, DtdProblem,
     DtdProblemKind, DtdSource, ElementDecl, EntityDecl, EntityExpansion, EntityValue,
-    ExpansionError, Location, MAX_ENTITY_DEPTH, MAX_ENTITY_EXPANSION, MAX_PARAMETER_EXPANSION,
-    MAX_SOURCES, NotationDecl, Occurrence, PREDEFINED_ENTITIES, SourceId, SourceKind,
+    ExpansionError, Location, MAX_DOCUMENT_EXPANSION, MAX_ENTITY_DEPTH, MAX_ENTITY_EXPANSION,
+    MAX_PARAMETER_EXPANSION, MAX_SOURCES, NotationDecl, Occurrence, PREDEFINED_ENTITIES, SourceId,
+    SourceKind,
     content::ParticleKind,
     names::{is_name, scan_name_chars},
 };
@@ -714,6 +715,9 @@ pub struct DtdBuilder<'l> {
     depth: usize,
     /// Bytes of expanded replacement texts.
     expanded: usize,
+    /// Remaining bytes of entity replacement texts for the normalization
+    /// of attribute defaults ([`MAX_DOCUMENT_EXPANSION`]).
+    default_budget: usize,
 }
 
 impl<'l> DtdBuilder<'l> {
@@ -724,6 +728,7 @@ impl<'l> DtdBuilder<'l> {
             active: Vec::new(),
             depth: 0,
             expanded: 0,
+            default_budget: MAX_DOCUMENT_EXPANSION,
         }
     }
 
@@ -1459,9 +1464,13 @@ impl<'l> DtdBuilder<'l> {
                 "'<' is not allowed in an attribute value",
             );
         }
-        self.dtd
-            .normalize_attribute_value(raw, cdata)
-            .unwrap_or_else(|| raw.to_owned())
+        let mut budget = self.default_budget.min(MAX_ENTITY_EXPANSION);
+        let before = budget;
+        let value = self
+            .dtd
+            .normalize_attribute_value_within(raw, cdata, &mut budget);
+        self.default_budget -= before - budget;
+        value.unwrap_or_else(|| raw.to_owned())
     }
 
     fn add_attribute(&mut self, attribute: AttributeDecl) {
@@ -2146,6 +2155,42 @@ mod tests {
         source.push_str("%l8;");
         let dtd = parse(&source);
         assert!(problem_ids(&dtd).contains(&"entityExpansionLimit"));
+    }
+
+    #[test]
+    fn bounds_the_normalization_of_attribute_defaults() {
+        let big = "x".repeat(512 * 1024);
+        let mut source = format!("<!ENTITY big \"{big}\">\n");
+        for index in 0..64 {
+            source.push_str(&format!("<!ATTLIST e{index} a CDATA \"&big;\">\n"));
+        }
+        let dtd = parse(&source);
+        let normalized = (0..64)
+            .filter(|index| {
+                matches!(
+                    &dtd.attribute(&format!("e{index}"), "a").unwrap().default,
+                    DefaultDecl::Default(value) if value.len() == big.len()
+                )
+            })
+            .count();
+        assert_eq!(normalized, MAX_DOCUMENT_EXPANSION / big.len());
+        // The others keep their raw value.
+        assert_eq!(
+            dtd.attribute("e63", "a").unwrap().default,
+            DefaultDecl::Default("&big;".to_owned())
+        );
+    }
+
+    #[test]
+    fn bounds_repeated_parameter_entity_references() {
+        // Linear ("quadratic blowup") rather than exponential: one large
+        // parameter entity referenced many times.
+        let comment = format!("<!-- {} -->", "x".repeat(100 * 1024));
+        let mut source = format!("<!ENTITY % big \"{comment}\">\n");
+        source.push_str(&"%big;".repeat(1000));
+        let dtd = parse(&source);
+        assert!(problem_ids(&dtd).contains(&"entityExpansionLimit"));
+        assert!(dtd.sources.len() <= MAX_SOURCES);
     }
 
     #[test]

@@ -127,9 +127,10 @@ fn exercise_offsets(path: &Path, source: &str, offsets: Vec<usize>) -> Vec<Strin
     let document = json!({"uri": uri});
     let whole = json!({"start": position_at(source, 0), "end": position_at(source, source.len())});
     let mut problems = Vec::new();
+    let lengths = line_lengths(source);
     let mut check = |request: &str, response: Option<Value>| {
         if let Some(response) = response {
-            check_ranges(source, request, &response, &mut problems);
+            check_ranges(&lengths, request, &response, &mut problems);
         }
     };
 
@@ -263,6 +264,82 @@ fn all_offsets(source: &str) -> Vec<usize> {
         .collect()
 }
 
+/// Hostile generated documents: deeply nested elements (closed, unclosed,
+/// with a DTD, in an XSD, in an SVG), many siblings deep in a document.
+fn pathological_documents(depth: usize) -> Vec<(&'static str, String)> {
+    let nested = |open: &str, close: &str| format!("{}{}", open.repeat(depth), close.repeat(depth));
+    vec![
+        ("deep.xml", nested("<a>", "</a>")),
+        ("deep-lines.xml", nested("<a>\n", "</a>\n")),
+        ("unclosed.xml", "<a b='1'>".repeat(depth)),
+        (
+            "deep-dtd.xml",
+            format!(
+                "<!DOCTYPE a [<!ELEMENT a (a*)><!ATTLIST a id ID #IMPLIED>]>{}",
+                nested("<a>", "</a>")
+            ),
+        ),
+        (
+            "deep.xsd",
+            format!(
+                "<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\"><xs:element name=\"a\">{}</xs:element></xs:schema>",
+                nested(
+                    "<xs:complexType><xs:sequence><xs:element name=\"a\">",
+                    "</xs:element></xs:sequence></xs:complexType>"
+                )
+            ),
+        ),
+        (
+            "deep.svg",
+            format!(
+                "<svg xmlns=\"http://www.w3.org/2000/svg\">{}</svg>",
+                nested("<g fill=\"red\">", "</g>")
+            ),
+        ),
+        (
+            "wide.xml",
+            format!(
+                "{}{}{}",
+                "<a>".repeat(400),
+                "<b/>".repeat(depth),
+                "</a>".repeat(400)
+            ),
+        ),
+    ]
+}
+
+/// Every request over [`pathological_documents`]: 100 000 levels in release
+/// builds (the CI conformance job), fewer in debug builds.
+/// `PATHOLOGICAL_DEPTH` and `PATHOLOGICAL_ONLY=<name>` help profiling.
+#[test]
+fn every_request_handles_pathological_documents() {
+    let depth = std::env::var("PATHOLOGICAL_DEPTH")
+        .ok()
+        .and_then(|depth| depth.parse().ok())
+        .unwrap_or(if cfg!(debug_assertions) {
+            2_000
+        } else {
+            100_000
+        });
+    let only = std::env::var("PATHOLOGICAL_ONLY").ok();
+    let mut failures = Vec::new();
+    for (name, source) in pathological_documents(depth) {
+        if only.as_deref().is_some_and(|only| only != name) {
+            continue;
+        }
+        let path = std::env::temp_dir().join(name);
+        let start = std::time::Instant::now();
+        let problems = exercise(&path, &source);
+        eprintln!("{name}: {:?}", start.elapsed());
+        failures.extend(
+            problems
+                .into_iter()
+                .map(|problem| format!("{name}: {problem}")),
+        );
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
 /// Offsets on character boundaries spread over the document, plus its ends
 /// and the positions right after each of the first `<`.
 fn sample_offsets(source: &str) -> Vec<usize> {
@@ -291,13 +368,14 @@ fn sample_offsets(source: &str) -> Vec<usize> {
 }
 
 /// Checks every `{"start": position, "end": position}` object in `response`.
-fn check_ranges(source: &str, request: &str, response: &Value, problems: &mut Vec<String>) {
+fn check_ranges(lengths: &[u64], request: &str, response: &Value, problems: &mut Vec<String>) {
     match response {
         Value::Object(object) => {
             if let (Some(start), Some(end)) = (object.get("start"), object.get("end"))
                 && let (Some(start), Some(end)) = (position(start), position(end))
             {
-                let valid = in_document(source, start) && in_document(source, end) && start <= end;
+                let valid =
+                    in_document(lengths, start) && in_document(lengths, end) && start <= end;
                 if !valid {
                     problems.push(format!(
                         "{request} returned an invalid range {start:?}..{end:?}"
@@ -305,12 +383,12 @@ fn check_ranges(source: &str, request: &str, response: &Value, problems: &mut Ve
                 }
             }
             for value in object.values() {
-                check_ranges(source, request, value, problems);
+                check_ranges(lengths, request, value, problems);
             }
         }
         Value::Array(values) => {
             for value in values {
-                check_ranges(source, request, value, problems);
+                check_ranges(lengths, request, value, problems);
             }
         }
         _ => {}
@@ -324,14 +402,24 @@ fn position(value: &Value) -> Option<(u64, u64)> {
     ))
 }
 
-/// Whether a (line, UTF-16 character) position lies inside `source`.
-fn in_document(source: &str, (line, character): (u64, u64)) -> bool {
-    let mut lines = source.split('\n');
-    let Some(text) = lines.nth(line as usize) else {
-        return false;
-    };
-    let text = text.strip_suffix('\r').unwrap_or(text);
-    character <= text.encode_utf16().count() as u64
+/// Length in UTF-16 code units of each line of `source` (without its line
+/// break), so that checking a range is constant time.
+fn line_lengths(source: &str) -> Vec<u64> {
+    source
+        .split('\n')
+        .map(|text| {
+            let text = text.strip_suffix('\r').unwrap_or(text);
+            text.encode_utf16().count() as u64
+        })
+        .collect()
+}
+
+/// Whether a (line, UTF-16 character) position lies inside the document.
+fn in_document(lengths: &[u64], (line, character): (u64, u64)) -> bool {
+    usize::try_from(line)
+        .ok()
+        .and_then(|line| lengths.get(line))
+        .is_some_and(|&length| character <= length)
 }
 
 fn collect(directory: &Path, files: &mut Vec<PathBuf>) {

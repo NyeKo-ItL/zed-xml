@@ -161,6 +161,11 @@ impl ContentAutomaton {
         automaton
     }
 
+    /// Number of states (linear in the size of the model).
+    pub fn state_count(&self) -> usize {
+        self.states.len()
+    }
+
     fn state(&mut self) -> usize {
         self.states.push(State::default());
         self.states.len() - 1
