@@ -28,6 +28,10 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Changed
 
+- Release binaries for Linux aarch64, static musl Linux (x86_64 and aarch64; the extension now downloads these on Linux, so it no longer depends on the distribution's glibc), macOS x86_64 and Windows arm64, in addition to Linux x86_64 (glibc), macOS arm64 and Windows x86_64.
+- SHA-256 checksums for every release asset (`<asset>.sha256` and `SHA256SUMS`); the extension verifies the downloaded binary (and the cached one) before starting it, with `XML_LSP_DOWNLOAD_SHA256` for custom download URLs.
+- A clear error listing the supported platforms when no prebuilt binary exists for the current one.
+- Release notes generated from conventional commits with git-cliff (`cliff.toml`), after the hand-written CHANGELOG section.
 - CI quality gates: `cargo clippy -D warnings`, `cargo-deny` (licences, advisories, bans, sources), a minimum supported Rust version (1.88, checked in CI), tests on Linux, Windows and macOS, a `wasm32-wasip2` build of the extension, and coverage reports (`cargo llvm-cov`).
 - Comments, documentation and every user-facing message (diagnostics, hover, code action titles, errors) are now in English (#36).
 - Well-formedness diagnostics report every problem with a precise range and a stable `data.kind`; XSD diagnostics carry `data.rule` and point at the offending element (#30).
