@@ -51,7 +51,7 @@ use crate::{
 
 /// Genres d'actions annoncés dans `codeActionProvider.codeActionKinds`.
 pub(crate) const CODE_ACTION_KINDS: [&str; 3] = ["quickfix", "refactor", "source"];
-const QUICK_FIX: &str = "quickfix";
+pub(crate) const QUICK_FIX: &str = "quickfix";
 const REWRITE: &str = "refactor.rewrite";
 const SOURCE: &str = "source";
 /// Code des diagnostics de validation XSD.
@@ -142,18 +142,24 @@ pub(crate) fn enumeration_diagnostics(
 // Construction des actions
 // ---------------------------------------------------------------------------
 
-struct Actions<'a> {
+/// Actions en construction pour une requête (partagé avec [`crate::dtd`]).
+pub(crate) struct Actions<'a> {
     uri: &'a str,
-    source: &'a str,
+    pub(crate) source: &'a str,
     range: Range<usize>,
     only: Option<Vec<String>>,
     diagnostics: Vec<(Range<usize>, &'a Value)>,
     lines: LineIndex,
-    actions: Vec<Value>,
+    pub(crate) actions: Vec<Value>,
 }
 
 impl<'a> Actions<'a> {
-    fn new(uri: &'a str, source: &'a str, range: Range<usize>, context: &'a Value) -> Self {
+    pub(crate) fn new(
+        uri: &'a str,
+        source: &'a str,
+        range: Range<usize>,
+        context: &'a Value,
+    ) -> Self {
         let only = context.get("only").and_then(Value::as_array).map(|kinds| {
             kinds
                 .iter()
@@ -182,7 +188,7 @@ impl<'a> Actions<'a> {
     }
 
     /// Indique si le genre `kind` passe le filtre `context.only`.
-    fn wants(&self, kind: &str) -> bool {
+    pub(crate) fn wants(&self, kind: &str) -> bool {
         self.only.as_ref().is_none_or(|only| {
             only.iter().any(|requested| {
                 kind == requested
@@ -194,13 +200,19 @@ impl<'a> Actions<'a> {
     }
 
     /// Indique si un problème situé en `range` concerne l'étendue demandée.
-    fn requested(&self, range: &Range<usize>) -> bool {
+    pub(crate) fn requested(&self, range: &Range<usize>) -> bool {
         touches(&self.range, range)
     }
 
     /// Diagnostics du contexte correspondant au problème : même `code`,
     /// `data.<key>` égal à `id` (ou absent) et étendues qui se touchent.
-    fn matching(&self, code: &str, key: &str, id: &str, range: &Range<usize>) -> Vec<Value> {
+    pub(crate) fn matching(
+        &self,
+        code: &str,
+        key: &str,
+        id: &str,
+        range: &Range<usize>,
+    ) -> Vec<Value> {
         self.diagnostics
             .iter()
             .filter(|(diagnostic_range, diagnostic)| {
@@ -216,7 +228,7 @@ impl<'a> Actions<'a> {
             .collect()
     }
 
-    fn push(
+    pub(crate) fn push(
         &mut self,
         title: String,
         kind: &str,

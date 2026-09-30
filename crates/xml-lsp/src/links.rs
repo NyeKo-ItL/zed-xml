@@ -567,7 +567,7 @@ pub(crate) fn doctype_external_id(
 
 /// Schéma d'URI de `value` (au moins deux caractères, pour ne pas confondre
 /// une lettre de lecteur Windows `C:` avec un schéma).
-fn uri_scheme(value: &str) -> Option<&str> {
+pub(crate) fn uri_scheme(value: &str) -> Option<&str> {
     let (scheme, _) = value.split_once(':')?;
     let mut chars = scheme.chars();
     (scheme.len() >= 2

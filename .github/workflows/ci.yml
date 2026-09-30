@@ -63,6 +63,7 @@ jobs:
               pathlib.Path("Cargo.toml"),
               pathlib.Path("crates/xml-core/Cargo.toml"),
               pathlib.Path("crates/xsd-core/Cargo.toml"),
+              pathlib.Path("crates/dtd-core/Cargo.toml"),
               pathlib.Path("crates/xml-lsp/Cargo.toml"),
               pathlib.Path("extension.toml"),
           ]:
