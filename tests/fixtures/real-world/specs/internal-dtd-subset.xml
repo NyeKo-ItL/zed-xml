@@ -12,7 +12,7 @@
   <!ELEMENT em (#PCDATA)>
   <!ATTLIST memo
     id ID #REQUIRED
-    urgent %yesno; "no"
+    urgent (yes|no) "no"
     lang NMTOKEN #IMPLIED>
   <!NOTATION png SYSTEM "image/png">
   <!ENTITY company "Example &amp; Sons">

@@ -24,8 +24,8 @@ use xml_core::tags::{
 };
 
 use crate::{
-    AttributeDecl, AttributeType, ContentAutomaton, ContentSpec, DefaultDecl, Dtd, ExpansionError,
-    PREDEFINED_ENTITIES, is_name, is_nmtoken, names::scan_name_chars,
+    AttributeDecl, AttributeType, ContentAutomaton, ContentSpec, DefaultDecl, Dtd, EntityValue,
+    ExpansionError, PREDEFINED_ENTITIES, is_name, is_nmtoken, names::scan_name_chars,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +35,9 @@ pub enum InstanceProblemKind {
     },
     /// Reference to a recursive or too large entity.
     EntityExpansion,
+    /// The replacement text of the referenced entity is not well-formed
+    /// content (unbalanced tags, unterminated references...).
+    MalformedEntity,
     UnparsedEntityReference,
     ExternalEntityInAttribute,
     RootMismatch {
@@ -95,6 +98,7 @@ impl InstanceProblemKind {
             InstanceProblemKind::EmptyContent => "emptyContent",
             InstanceProblemKind::UnexpectedElement { .. } => "unexpectedElement",
             InstanceProblemKind::IncompleteContent { .. } => "incompleteContent",
+            InstanceProblemKind::MalformedEntity => "malformedEntity",
             InstanceProblemKind::TextNotAllowed => "textNotAllowed",
             InstanceProblemKind::ExpansionBudget => "expansionBudget",
         }
@@ -298,6 +302,14 @@ fn check_reference(
             format!(
                 "the expansion of the entity '{name}' contains '<', which is not allowed in an attribute value"
             ),
+        )
+    } else if let EntityValue::Internal(text) = &entity.value
+        && (text.contains('&') || text.contains('<'))
+        && let Some(reason) = xml_core::strict::check_replacement_text(text)
+    {
+        (
+            InstanceProblemKind::MalformedEntity,
+            format!("the replacement text of the entity '{name}' is not well-formed: {reason}"),
         )
     } else {
         return;
@@ -1237,5 +1249,19 @@ mod tests {
         assert!(parameter.optional_declarations);
         let external = load("<!DOCTYPE a SYSTEM \"a.dtd\"><a>&e;</a>");
         assert!(external.optional_declarations);
+    }
+
+    #[test]
+    fn reports_references_to_entities_with_malformed_replacement_text() {
+        let source = "<!DOCTYPE d [<!ENTITY a \"</b><b>\"><!ENTITY c \"&#38;#9\"><!ENTITY ok \"<b>x</b>\">]><d>&a;&c;&ok;</d>";
+        let (_, dtd) = load_document_dtd(source, None, &mut crate::NoLoader).unwrap();
+        let problems = check_entity_references(source, Some(&dtd));
+        assert_eq!(
+            problems
+                .iter()
+                .map(|problem| problem.kind.id())
+                .collect::<Vec<_>>(),
+            vec!["malformedEntity", "malformedEntity"]
+        );
     }
 }

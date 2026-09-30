@@ -87,6 +87,15 @@ pub fn mask_doctype(source: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(masked)
 }
 
+/// Why the replacement text of an entity (references already resolved by the
+/// declaration) is not well-formed content, when it is not.
+pub fn check_replacement_text(text: &str) -> Option<String> {
+    check(&format!("<a>{text}</a>"))
+        .into_iter()
+        .next()
+        .map(|problem| problem.message)
+}
+
 /// Checks the whole document.
 pub fn check(source: &str) -> Vec<StrictProblem> {
     let mut parser = Parser::new(source);
@@ -442,6 +451,13 @@ impl<'a> Parser<'a> {
             return;
         };
         let target_text = &self.source[target.clone()];
+        if target_text.contains(':') {
+            self.report(
+                "invalidName",
+                target.clone(),
+                "a processing instruction target cannot contain a colon (Namespaces in XML)",
+            );
+        }
         if target_text.eq_ignore_ascii_case("xml") {
             self.report(
                 "malformedProcessingInstruction",

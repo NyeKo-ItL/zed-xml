@@ -1,3 +1,2 @@
 # Known failures of the `spec-namespaces` suite, one case per line.
 # Regenerate with `BLESS=1 cargo test -p xml-conformance`.
-ns §3 [4] prefix starting with a digit

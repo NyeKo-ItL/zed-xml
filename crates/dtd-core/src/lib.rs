@@ -26,6 +26,7 @@
 pub mod content;
 use xml_core::names;
 pub mod parser;
+pub mod syntax;
 pub mod validate;
 
 use std::{
