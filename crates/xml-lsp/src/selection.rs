@@ -1,21 +1,21 @@
-//! `textDocument/selectionRange` : extension progressive de la sélection,
-//! comme « Expand Selection » de LemMinX ou « Extend Selection »
-//! d'IntelliJ.
+//! `textDocument/selectionRange`: progressive selection expansion, like
+//! LemMinX "Expand Selection" or IntelliJ "Extend
+//! Selection".
 //!
-//! Pour chaque position, la chaîne va du plus petit au plus grand :
+//! For each position, the chain goes from smallest to largest:
 //!
-//! - nom de balise : préfixe ou nom local, nom qualifié, balise, élément ;
-//! - attribut : mot, jeton de la valeur, valeur sans guillemets, valeur avec
-//!   guillemets, attribut complet, balise ouvrante, élément ;
-//! - texte : mot, nœud texte sans les blancs, nœud texte, contenu de
-//!   l'élément sans les blancs, contenu, élément ;
-//! - commentaire, CDATA, instruction de traitement, déclaration : mot (ou
-//!   cible de l'instruction), contenu sans les blancs, contenu, construction
-//!   complète, puis le contenu de l'élément englobant ;
+//! - tag name: prefix or local name, qualified name, tag, element;
+//! - attribute: word, value token, value without quotes, value with
+//!   quotes, whole attribute, start tag, element;
+//! - text: word, text node without whitespace, text node, element
+//!   content without whitespace, content, element;
+//! - comment, CDATA, processing instruction, declaration: word (or
+//!   instruction target), content without whitespace, content, whole
+//!   construct, then the content of the enclosing element;
 //!
-//! puis, pour chaque ancêtre : contenu sans les blancs, contenu, élément, et
-//! enfin le document entier. Chaque étendue contient strictement la
-//! précédente (les doublons sont éliminés).
+//! then, for each ancestor: content without whitespace, content, element,
+//! and finally the whole document. Each range strictly contains the
+//! previous one (duplicates are removed).
 
 use std::ops::Range;
 
@@ -25,8 +25,8 @@ use xml_core::tags::{
     scan_markup, scan_tags,
 };
 
-/// Retourne la réponse LSP (`SelectionRange[]`) pour les offsets demandés,
-/// dans le même ordre.
+/// Returns the LSP response (`SelectionRange[]`) for the requested offsets,
+/// in the same order.
 pub fn selection_ranges(source: &str, offsets: &[usize]) -> Vec<Value> {
     let document = Document::new(source);
     let lines = LineIndex::new(source);
@@ -54,13 +54,13 @@ pub fn selection_ranges(source: &str, offsets: &[usize]) -> Vec<Value> {
         .collect()
 }
 
-/// Analyse lexicale partagée par toutes les positions d'une requête.
+/// Lexical analysis shared by all positions of a request.
 struct Document<'a> {
     source: &'a str,
     tree: XmlTagTree,
     markups: Vec<XmlMarkup>,
     orphans: Vec<XmlTag>,
-    /// Étendues de toutes les constructions (balises et markup), triées.
+    /// Ranges of all constructs (tags and markup), sorted.
     constructs: Vec<Range<usize>>,
 }
 
@@ -84,7 +84,7 @@ impl<'a> Document<'a> {
         }
     }
 
-    /// Chaîne d'étendues, de la plus petite à la plus grande.
+    /// Chain of ranges, from smallest to largest.
     fn chain(&self, offset: usize) -> Vec<Range<usize>> {
         let mut chain = Chain::new(offset);
         let elements = self.tree.elements();
@@ -134,13 +134,13 @@ impl<'a> Document<'a> {
         self.construct_contains(&tag.range, tag.closed, offset)
     }
 
-    /// Une construction fermée contient `[début, fin)` ; une construction
-    /// non terminée contient aussi sa fin (curseur en fin de saisie).
+    /// A closed construct contains `[start, end)`; an unterminated construct
+    /// also contains its end (cursor at the end of typing).
     fn construct_contains(&self, range: &Range<usize>, closed: bool, offset: usize) -> bool {
         range.start <= offset && (offset < range.end || (!closed && offset == range.end))
     }
 
-    /// Nom (préfixe ou nom local, puis nom qualifié), attribut, balise.
+    /// Name (prefix or local name, then qualified name), attribute, tag.
     fn push_tag(&self, chain: &mut Chain, tag: &XmlTag, offset: usize) {
         if tag.name_contains(offset) {
             self.push_name(chain, tag.name.clone(), offset);
@@ -178,8 +178,8 @@ impl<'a> Document<'a> {
         chain.push(name);
     }
 
-    /// Mot (ou cible d'instruction), contenu sans les blancs, contenu,
-    /// construction complète.
+    /// Word (or instruction target), content without whitespace, content,
+    /// whole construct.
     fn push_markup(&self, chain: &mut Chain, markup: &XmlMarkup, offset: usize) {
         let content = markup.content.clone();
         if markup.kind == XmlMarkupKind::ProcessingInstruction {
@@ -199,8 +199,8 @@ impl<'a> Document<'a> {
         chain.push(markup.range.clone());
     }
 
-    /// Contenu puis élément de l'élément le plus profond dont le contenu
-    /// contient `range`, puis ses ancêtres.
+    /// Content then element of the deepest element whose content contains
+    /// `range`, then its ancestors.
     fn push_enclosing(&self, chain: &mut Chain, range: Range<usize>) {
         let enclosing = self.tree.elements().iter().rposition(|element| {
             element
@@ -231,7 +231,7 @@ impl<'a> Document<'a> {
         }
     }
 
-    /// Nœud texte entre les deux constructions qui entourent `offset`.
+    /// Text node between the two constructs surrounding `offset`.
     fn text_node_at(&self, offset: usize) -> Range<usize> {
         let start = self
             .constructs
@@ -249,7 +249,7 @@ impl<'a> Document<'a> {
         start..end
     }
 
-    /// Attribut complet : du nom jusqu'après le guillemet fermant.
+    /// Whole attribute: from the name to after the closing quote.
     fn attribute_range(&self, name: &Range<usize>, value: &Option<Range<usize>>) -> Range<usize> {
         match value {
             Some(value) => name.start..self.quoted_value(value).end,
@@ -257,7 +257,7 @@ impl<'a> Document<'a> {
         }
     }
 
-    /// Valeur avec ses guillemets (le guillemet fermant peut manquer).
+    /// Value with its quotes (the closing quote may be missing).
     fn quoted_value(&self, value: &Range<usize>) -> Range<usize> {
         let bytes = self.source.as_bytes();
         let Some(quote) = value
@@ -277,9 +277,9 @@ impl<'a> Document<'a> {
     }
 }
 
-/// Chaîne d'étendues imbriquées : une étendue n'est ajoutée que si elle est
-/// non vide et contient strictement la précédente (ou, pour la première, la
-/// position demandée).
+/// Chain of nested ranges: a range is only added when it is non-empty and
+/// strictly contains the previous one (or, for the first one, the requested
+/// position).
 struct Chain {
     offset: usize,
     ranges: Vec<Range<usize>>,
@@ -311,8 +311,8 @@ fn is_word_char(character: char) -> bool {
     character.is_alphanumeric() || matches!(character, '_' | '-')
 }
 
-/// Plus longue suite de caractères `is_word` autour de `offset`, limitée à
-/// `bounds` (vide si le curseur n'est pas au contact d'un mot).
+/// Longest run of `is_word` characters around `offset`, limited to
+/// `bounds` (empty when the cursor does not touch a word).
 fn word_at(
     source: &str,
     bounds: &Range<usize>,
@@ -338,7 +338,7 @@ fn word_at(
     start..end
 }
 
-/// Retire les blancs en début et en fin d'étendue.
+/// Trims whitespace at the start and end of a range.
 fn trim(source: &str, range: Range<usize>) -> Range<usize> {
     let text = &source[range.clone()];
     let start = range.start + (text.len() - text.trim_start().len());
@@ -354,8 +354,8 @@ fn floor_char_boundary(source: &str, mut offset: usize) -> usize {
     offset
 }
 
-/// Conversion offset UTF-8 -> position LSP (ligne, unités UTF-16) en
-/// temps logarithmique pour la ligne.
+/// UTF-8 offset -> LSP position (line, UTF-16 code units) conversion in
+/// logarithmic time for the line.
 pub(crate) struct LineIndex {
     starts: Vec<usize>,
 }
@@ -383,7 +383,7 @@ impl LineIndex {
 mod tests {
     use super::*;
 
-    /// Chaîne sous forme de sous-chaînes, de la plus petite à la plus grande.
+    /// Chain as substrings, from smallest to largest.
     fn chain(source: &str, offset: usize) -> Vec<&str> {
         Document::new(source)
             .chain(offset)

@@ -1,13 +1,13 @@
-//! Analyse des déclarations DTD et de la déclaration `<!DOCTYPE>`.
+//! Parsing of DTD declarations and of the `<!DOCTYPE>` declaration.
 //!
-//! L'analyse est tolérante : chaque déclaration invalide produit un
-//! [`DtdProblem`] localisé et l'analyse reprend à la déclaration suivante.
-//! Les références d'entités paramètres sont développées entre les
-//! déclarations (le texte de remplacement devient une source
-//! [`SourceKind::Replacement`] ou [`SourceKind::External`]) et à
-//! l'intérieur des déclarations (hors littéraux, avec un espace de part et
-//! d'autre comme le veut XML 1.0 §4.4.8) ; les étendues d'un texte développé
-//! sont rapportées à la référence `%nom;`.
+//! Parsing is tolerant: each invalid declaration produces a located
+//! [`DtdProblem`] and parsing resumes at the next declaration.
+//! Parameter entity references are expanded between declarations (the
+//! replacement text becomes a [`SourceKind::Replacement`] or
+//! [`SourceKind::External`] source) and inside declarations (outside
+//! literals, with a space on each side as required by XML 1.0 §4.4.8); the
+//! ranges of an expanded text are mapped back to the `%name;`
+//! reference.
 
 use std::{
     ops::Range,
@@ -26,19 +26,19 @@ use crate::{
     names::{is_name, scan_name_chars},
 };
 
-/// Profondeur maximale des groupes imbriqués d'un modèle de contenu.
+/// Maximum depth of nested groups in a content model.
 const MAX_GROUP_DEPTH: usize = 64;
 
-/// Échec de lecture d'une ressource externe.
+/// Failure to read an external resource.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadError {
     pub message: String,
-    /// Ressource distante (`http(s)`) jamais téléchargée.
+    /// Remote resource (`http(s)`), never downloaded.
     pub remote: bool,
 }
 
-/// Lecture des ressources externes (sous-ensemble externe, entités
-/// paramètres externes) ; `base` est le chemin de la source déclarante.
+/// Reading of external resources (external subset, external parameter
+/// entities); `base` is the path of the declaring source.
 pub trait ExternalLoader {
     fn load(
         &mut self,
@@ -48,7 +48,7 @@ pub trait ExternalLoader {
     ) -> Result<(PathBuf, String), LoadError>;
 }
 
-/// Chargeur qui refuse toute ressource externe.
+/// Loader refusing every external resource.
 pub struct NoLoader;
 
 impl ExternalLoader for NoLoader {
@@ -59,28 +59,28 @@ impl ExternalLoader for NoLoader {
         _base: Option<&Path>,
     ) -> Result<(PathBuf, String), LoadError> {
         Err(LoadError {
-            message: format!("ressource externe « {system} » non chargée"),
+            message: format!("external resource '{system}' not loaded"),
             remote: false,
         })
     }
 }
 
-/// Déclaration `<!DOCTYPE>` d'un document.
+/// `<!DOCTYPE>` declaration of a document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Doctype {
-    /// Déclaration entière.
+    /// Whole declaration.
     pub range: Range<usize>,
     pub name: String,
     pub name_range: Range<usize>,
-    /// Identifiant public et étendue (guillemets exclus).
+    /// Public identifier and its range (quotes excluded).
     pub public_id: Option<(String, Range<usize>)>,
-    /// Identifiant système et étendue (guillemets exclus).
+    /// System identifier and its range (quotes excluded).
     pub system_id: Option<(String, Range<usize>)>,
-    /// Contenu du sous-ensemble interne, crochets exclus.
+    /// Content of the internal subset, brackets excluded.
     pub internal_subset: Option<Range<usize>>,
 }
 
-/// Déclaration `<!DOCTYPE>` qui précède l'élément racine.
+/// `<!DOCTYPE>` declaration preceding the root element.
 pub fn find_doctype(source: &str) -> Option<Doctype> {
     let first_tag = scan_tags(source)
         .first()
@@ -147,7 +147,7 @@ fn skip_spaces(bytes: &[u8], mut index: usize, end: usize) -> usize {
     index
 }
 
-/// Littéral entre guillemets après des blancs : `(valeur, étendue, suite)`.
+/// Quoted literal after whitespace: `(value, range, rest)`.
 fn quoted(source: &str, from: usize, end: usize) -> Option<(String, Range<usize>, usize)> {
     let bytes = source.as_bytes();
     let index = skip_spaces(bytes, from, end);
@@ -167,8 +167,8 @@ fn quoted(source: &str, from: usize, end: usize) -> Option<(String, Range<usize>
     ))
 }
 
-/// Position du `]` qui ferme le sous-ensemble interne (hors littéraux,
-/// commentaires et instructions de traitement), ou `end`.
+/// Position of the `]` closing the internal subset (outside literals,
+/// comments and processing instructions), or `end`.
 fn subset_end(bytes: &[u8], mut index: usize, end: usize) -> usize {
     while index < end {
         match bytes[index] {
@@ -185,8 +185,8 @@ fn subset_end(bytes: &[u8], mut index: usize, end: usize) -> usize {
             b'<' if bytes[index..end].starts_with(b"<?") => {
                 index = find_after(bytes, index + 2, end, b"?>");
             }
-            // Section conditionnelle (interdite ici, mais ses crochets ne
-            // ferment pas le sous-ensemble).
+            // Conditional section (not allowed here, but its brackets do not
+            // close the subset).
             b'<' if bytes[index..end].starts_with(b"<![") => {
                 index = section_end(bytes, index + 3, end).map_or(end, |close| close + 3);
             }
@@ -204,7 +204,7 @@ fn find_after(bytes: &[u8], from: usize, end: usize, needle: &[u8]) -> usize {
         .map_or(end, |offset| from + offset + needle.len())
 }
 
-/// Analyse un fichier DTD (sous-ensemble externe) complet.
+/// Parses a whole DTD file (external subset).
 pub fn parse_dtd(text: &str, path: Option<PathBuf>, loader: &mut dyn ExternalLoader) -> Dtd {
     let mut builder = DtdBuilder::new(loader);
     let source = builder.add_document(text, path);
@@ -212,8 +212,8 @@ pub fn parse_dtd(text: &str, path: Option<PathBuf>, loader: &mut dyn ExternalLoa
     builder.finish()
 }
 
-/// Grammaire d'un document d'instance : sous-ensemble interne (source 0 =
-/// le document), puis sous-ensemble externe. `None` sans `<!DOCTYPE>`.
+/// Grammar of an instance document: internal subset (source 0 = the
+/// document), then external subset. `None` without `<!DOCTYPE>`.
 pub fn load_document_dtd(
     document: &str,
     path: Option<PathBuf>,
@@ -244,7 +244,7 @@ pub fn load_document_dtd(
     Some((doctype, builder.finish()))
 }
 
-/// Décode le contenu d'une référence de caractère (`#10`, `#x1F`).
+/// Decodes the content of a character reference (`#10`, `#x1F`).
 pub(crate) fn decode_char_reference(reference: &str) -> Option<char> {
     let digits = reference.strip_prefix('#')?;
     let code = match digits.strip_prefix('x') {
@@ -264,15 +264,15 @@ pub(crate) fn decode_char_reference(reference: &str) -> Option<char> {
     })
 }
 
-/// Commentaire normalisé en documentation (lignes rognées).
+/// Comment normalized into documentation (trimmed lines).
 fn normalize_comment(text: &str) -> Option<String> {
     let text = text.lines().map(str::trim).collect::<Vec<_>>().join("\n");
     let text = text.trim();
     (!text.is_empty()).then(|| text.to_owned())
 }
 
-/// Fin d'une déclaration `<!...>` : `(suite, fin du corps, fermée)`. Un `<`
-/// hors littéral interrompt une déclaration non fermée.
+/// End of a `<!...>` declaration: `(rest, end of body, closed)`. A `<`
+/// outside a literal interrupts an unclosed declaration.
 fn declaration_end(bytes: &[u8], mut index: usize, end: usize) -> (usize, usize, bool) {
     while index < end {
         match bytes[index] {
@@ -291,8 +291,8 @@ fn declaration_end(bytes: &[u8], mut index: usize, end: usize) -> (usize, usize,
     (end, end, false)
 }
 
-/// Position du `]]>` qui ferme une section conditionnelle (sections
-/// imbriquées comprises).
+/// Position of the `]]>` closing a conditional section (nested sections
+/// included).
 fn section_end(bytes: &[u8], mut index: usize, end: usize) -> Option<usize> {
     let mut depth = 0usize;
     while index < end {
@@ -316,14 +316,14 @@ fn section_end(bytes: &[u8], mut index: usize, end: usize) -> Option<usize> {
 }
 
 // ---------------------------------------------------------------------------
-// Texte développé
+// Expanded text
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
 enum Origin {
-    /// Recopié de la source à partir de cet offset.
+    /// Copied from the source starting at this offset.
     Verbatim(usize),
-    /// Issu du développement de la référence `%nom;` à cette étendue.
+    /// Produced by the expansion of the `%name;` reference at this range.
     Reference(Range<usize>),
 }
 
@@ -334,7 +334,7 @@ struct Segment {
     origin: Origin,
 }
 
-/// Corps d'une déclaration après développement des entités paramètres.
+/// Body of a declaration after parameter entity expansion.
 #[derive(Debug, Default)]
 struct Expanded {
     text: String,
@@ -359,7 +359,7 @@ impl Expanded {
         });
     }
 
-    /// Étendue de la source correspondant à `range` du texte développé.
+    /// Source range matching `range` of the expanded text.
     fn locate(&self, range: &Range<usize>) -> Range<usize> {
         let segment = self
             .segments
@@ -386,7 +386,7 @@ impl Expanded {
 }
 
 // ---------------------------------------------------------------------------
-// Lexèmes d'une déclaration
+// Declaration tokens
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -479,12 +479,9 @@ fn literal_content<'t>(
         Token::Literal => Ok(&text[range.start + 1..range.end - 1]),
         Token::UnclosedLiteral => Err(ParseError::new(
             range.clone(),
-            "littéral non fermé : guillemet fermant attendu",
+            "unclosed literal: closing quote expected",
         )),
-        _ => Err(ParseError::new(
-            range.clone(),
-            "valeur entre guillemets attendue",
-        )),
+        _ => Err(ParseError::new(range.clone(), "quoted value expected")),
     }
 }
 
@@ -498,7 +495,7 @@ fn parse_content_spec(lexer: &mut Lexer<'_>, text: &str) -> Result<ContentSpec, 
             if next == Token::Hash {
                 lexer.next();
                 if &text[next_range.clone()] != "#PCDATA" {
-                    return Err(ParseError::new(next_range, "« #PCDATA » attendu"));
+                    return Err(ParseError::new(next_range, "'#PCDATA' expected"));
                 }
                 parse_mixed(lexer, text)
             } else {
@@ -507,12 +504,12 @@ fn parse_content_spec(lexer: &mut Lexer<'_>, text: &str) -> Result<ContentSpec, 
         }
         _ => Err(ParseError::new(
             range,
-            "modèle de contenu attendu : EMPTY, ANY ou « ( »",
+            "content model expected: EMPTY, ANY or '('",
         )),
     }
 }
 
-/// Suite d'un modèle mixte après `( #PCDATA`.
+/// Rest of a mixed model after `( #PCDATA`.
 fn parse_mixed(lexer: &mut Lexer<'_>, text: &str) -> Result<ContentSpec, ParseError> {
     let mut names = Vec::new();
     loop {
@@ -521,7 +518,7 @@ fn parse_mixed(lexer: &mut Lexer<'_>, text: &str) -> Result<ContentSpec, ParseEr
             Token::Punct(b'|') => {
                 let (token, range) = lexer.next();
                 if token != Token::Name {
-                    return Err(ParseError::new(range, "nom d'élément attendu après « | »"));
+                    return Err(ParseError::new(range, "element name expected after '|'"));
                 }
                 names.push(text[range].to_owned());
             }
@@ -529,7 +526,7 @@ fn parse_mixed(lexer: &mut Lexer<'_>, text: &str) -> Result<ContentSpec, ParseEr
             _ => {
                 return Err(ParseError::new(
                     range,
-                    "« | » ou « ) » attendu dans un modèle mixte",
+                    "'|' or ')' expected in a mixed model",
                 ));
             }
         }
@@ -540,13 +537,13 @@ fn parse_mixed(lexer: &mut Lexer<'_>, text: &str) -> Result<ContentSpec, ParseEr
     } else if !names.is_empty() {
         return Err(ParseError::new(
             range,
-            "« * » attendu après un modèle mixte qui cite des éléments",
+            "'*' expected after a mixed model listing elements",
         ));
     }
     Ok(ContentSpec::Mixed(names))
 }
 
-/// Groupe après `(`, jusqu'à `)` et sa cardinalité.
+/// Group after `(`, up to `)` and its cardinality.
 fn parse_group(
     lexer: &mut Lexer<'_>,
     text: &str,
@@ -554,7 +551,7 @@ fn parse_group(
 ) -> Result<ContentParticle, ParseError> {
     if depth >= MAX_GROUP_DEPTH {
         let (_, range) = lexer.peek();
-        return Err(ParseError::new(range, "modèle de contenu trop imbriqué"));
+        return Err(ParseError::new(range, "content model nested too deeply"));
     }
     let mut items = vec![parse_particle(lexer, text, depth)?];
     let mut separator = None;
@@ -565,14 +562,14 @@ fn parse_group(
                 if separator.is_some_and(|separator| separator != character) {
                     return Err(ParseError::new(
                         range,
-                        "« , » et « | » ne peuvent pas être mélangés dans un même groupe",
+                        "',' and '|' cannot be mixed in the same group",
                     ));
                 }
                 separator = Some(character);
                 items.push(parse_particle(lexer, text, depth)?);
             }
             Token::Punct(b')') => break,
-            _ => return Err(ParseError::new(range, "« , », « | » ou « ) » attendu")),
+            _ => return Err(ParseError::new(range, "',', '|' or ')' expected")),
         }
     }
     let occurrence = parse_occurrence(lexer);
@@ -600,9 +597,9 @@ fn parse_particle(
         Token::Punct(b'(') => parse_group(lexer, text, depth + 1),
         Token::Hash => Err(ParseError::new(
             range,
-            "« #PCDATA » doit être le premier élément du groupe",
+            "'#PCDATA' must be the first item of the group",
         )),
-        _ => Err(ParseError::new(range, "nom d'élément ou « ( » attendu")),
+        _ => Err(ParseError::new(range, "element name or '(' expected")),
     }
 }
 
@@ -617,7 +614,7 @@ fn parse_occurrence(lexer: &mut Lexer<'_>) -> Occurrence {
     occurrence
 }
 
-/// Valeurs d'une énumération après `(`, jusqu'à `)`.
+/// Values of an enumeration after `(`, up to `)`.
 fn parse_enumeration(
     lexer: &mut Lexer<'_>,
     text: &str,
@@ -630,9 +627,9 @@ fn parse_enumeration(
             return Err(ParseError::new(
                 range,
                 if notation {
-                    "nom de notation attendu"
+                    "notation name expected"
                 } else {
-                    "valeur d'énumération (NMTOKEN) attendue"
+                    "enumeration value (NMTOKEN) expected"
                 },
             ));
         }
@@ -640,7 +637,7 @@ fn parse_enumeration(
         if notation && !is_name(value) {
             return Err(ParseError::new(
                 range,
-                format!("« {value} » n'est pas un nom de notation valide"),
+                format!("'{value}' is not a valid notation name"),
             ));
         }
         values.push(value.to_owned());
@@ -648,13 +645,13 @@ fn parse_enumeration(
         match token {
             Token::Punct(b'|') => {}
             Token::Punct(b')') => return Ok(values),
-            _ => return Err(ParseError::new(range, "« | » ou « ) » attendu")),
+            _ => return Err(ParseError::new(range, "'|' or ')' expected")),
         }
     }
 }
 
-/// `SYSTEM "…"`, `PUBLIC "…" "…"` (ou `PUBLIC "…"` seul pour une notation)
-/// après le mot-clé `keyword`.
+/// `SYSTEM "…"`, `PUBLIC "…" "…"` (or `PUBLIC "…"` alone for a notation)
+/// after the `keyword` keyword.
 fn external_id(
     lexer: &mut Lexer<'_>,
     text: &str,
@@ -680,13 +677,13 @@ fn external_id(
             } else {
                 Err(ParseError::new(
                     range,
-                    "identifiant système attendu après l'identifiant public",
+                    "system identifier expected after the public identifier",
                 ))
             }
         }
         other => Err(ParseError::new(
             keyword,
-            format!("SYSTEM ou PUBLIC attendu, « {other} » trouvé"),
+            format!("SYSTEM or PUBLIC expected, found '{other}'"),
         )),
     }
 }
@@ -698,24 +695,24 @@ fn expect_end(lexer: &mut Lexer<'_>) -> Result<(), ParseError> {
     } else {
         Err(ParseError::new(
             range,
-            "contenu inattendu : fin de déclaration « > » attendue",
+            "unexpected content: end of declaration '>' expected",
         ))
     }
 }
 
 // ---------------------------------------------------------------------------
-// Construction de la grammaire
+// Grammar construction
 // ---------------------------------------------------------------------------
 
-/// Construit une [`Dtd`] à partir d'un ou plusieurs textes.
+/// Builds a [`Dtd`] from one or more texts.
 pub struct DtdBuilder<'l> {
     dtd: Dtd,
     loader: &'l mut dyn ExternalLoader,
-    /// Entités paramètres en cours de développement.
+    /// Parameter entities being expanded.
     active: Vec<String>,
-    /// Profondeur des sections conditionnelles.
+    /// Depth of conditional sections.
     depth: usize,
-    /// Octets de textes de remplacement développés.
+    /// Bytes of expanded replacement texts.
     expanded: usize,
 }
 
@@ -730,23 +727,23 @@ impl<'l> DtdBuilder<'l> {
         }
     }
 
-    /// Ajoute le texte d'un document analysé directement.
+    /// Adds the text of a directly parsed document.
     pub fn add_document(&mut self, text: &str, path: Option<PathBuf>) -> SourceId {
         self.push_source(SourceKind::Document(path), Arc::from(text), None)
     }
 
-    /// Analyse le sous-ensemble interne `range` de `source`.
+    /// Parses the internal subset `range` of `source`.
     pub fn parse_internal_subset(&mut self, source: SourceId, range: Range<usize>) {
         self.parse_declarations(source, range, false);
     }
 
-    /// Analyse `source` entière comme sous-ensemble externe.
+    /// Parses the whole `source` as an external subset.
     pub fn parse_external_text(&mut self, source: SourceId) {
         let length = self.dtd.source_text(source).len();
         self.parse_declarations(source, 0..length, true);
     }
 
-    /// Charge et analyse le sous-ensemble externe référencé en `reference`.
+    /// Loads and parses the external subset referenced at `reference`.
     pub fn parse_external_subset(
         &mut self,
         public: Option<&str>,
@@ -791,7 +788,7 @@ impl<'l> DtdBuilder<'l> {
         Location { source, range }
     }
 
-    /// Chemin servant de base aux identifiants système relatifs.
+    /// Path used as the base of relative system identifiers.
     fn base_path(&self, source: SourceId) -> Option<PathBuf> {
         let anchored = self.dtd.anchor(&Self::at(source, 0..0));
         self.dtd.source_path(anchored.source).map(Path::to_path_buf)
@@ -805,7 +802,7 @@ impl<'l> DtdBuilder<'l> {
         self.problem(
             DtdProblemKind::EntityExpansionLimit,
             reference.clone(),
-            format!("trop de ressources DTD développées (limite {MAX_SOURCES})"),
+            format!("too many DTD resources expanded (limit {MAX_SOURCES})"),
         );
         true
     }
@@ -840,10 +837,10 @@ impl<'l> DtdBuilder<'l> {
         }
     }
 
-    /// Texte de remplacement de l'entité paramètre `name` référencée en
-    /// `at`, et chemin du fichier pour une entité externe. Vérifie la
-    /// déclaration, la récursion, la profondeur et le budget de
-    /// développement.
+    /// Replacement text of the parameter entity `name` referenced at `at`,
+    /// and the file path for an external entity. Checks the declaration,
+    /// recursion, depth and expansion
+    /// budget.
     fn parameter_text(&mut self, name: &str, at: &Location) -> Option<(Arc<str>, Option<PathBuf>)> {
         let Some(value) = self
             .dtd
@@ -854,7 +851,7 @@ impl<'l> DtdBuilder<'l> {
                 self.problem(
                     DtdProblemKind::UndeclaredParameterEntity,
                     at.clone(),
-                    format!("l'entité paramètre « %{name}; » n'est pas déclarée"),
+                    format!("the parameter entity '%{name};' is not declared"),
                 );
             }
             return None;
@@ -863,7 +860,7 @@ impl<'l> DtdBuilder<'l> {
             self.problem(
                 DtdProblemKind::EntityRecursion,
                 at.clone(),
-                format!("référence récursive à l'entité paramètre « %{name}; »"),
+                format!("recursive reference to the parameter entity '%{name};'"),
             );
             return None;
         }
@@ -871,9 +868,7 @@ impl<'l> DtdBuilder<'l> {
             self.problem(
                 DtdProblemKind::EntityExpansionLimit,
                 at.clone(),
-                format!(
-                    "imbrication d'entités paramètres trop profonde (limite {MAX_ENTITY_DEPTH})"
-                ),
+                format!("parameter entities nested too deeply (limit {MAX_ENTITY_DEPTH})"),
             );
             return None;
         }
@@ -913,7 +908,7 @@ impl<'l> DtdBuilder<'l> {
                 DtdProblemKind::EntityExpansionLimit,
                 at.clone(),
                 format!(
-                    "développement des entités paramètres trop volumineux (limite {MAX_PARAMETER_EXPANSION} octets)"
+                    "parameter entity expansion too large (limit {MAX_PARAMETER_EXPANSION} bytes)"
                 ),
             );
             return None;
@@ -921,8 +916,8 @@ impl<'l> DtdBuilder<'l> {
         Some((text, path))
     }
 
-    /// Déclarations, commentaires, instructions de traitement, sections
-    /// conditionnelles et références `%nom;` de `range` dans `source`.
+    /// Declarations, comments, processing instructions, conditional
+    /// sections and `%name;` references of `range` in `source`.
     fn parse_declarations(&mut self, source: SourceId, range: Range<usize>, external: bool) {
         let text = self.dtd.sources[source].text.clone();
         let bytes = text.as_bytes();
@@ -946,7 +941,7 @@ impl<'l> DtdBuilder<'l> {
                         self.problem(
                             DtdProblemKind::Syntax,
                             Self::at(source, index..end),
-                            "commentaire non fermé : « --> » attendu",
+                            "unclosed comment: '-->' expected",
                         );
                         return;
                     }
@@ -960,7 +955,7 @@ impl<'l> DtdBuilder<'l> {
                         self.problem(
                             DtdProblemKind::Syntax,
                             Self::at(source, index..end),
-                            "instruction de traitement non fermée : « ?> » attendu",
+                            "unclosed processing instruction: '?>' expected",
                         );
                         return;
                     }
@@ -989,7 +984,7 @@ impl<'l> DtdBuilder<'l> {
                         DtdProblemKind::Syntax,
                         Self::at(source, index..keyword_end.max(index + 2)),
                         format!(
-                            "déclaration inconnue « <!{keyword} » : ELEMENT, ATTLIST, ENTITY ou NOTATION attendu"
+                            "unknown declaration '<!{keyword}': ELEMENT, ATTLIST, ENTITY or NOTATION expected"
                         ),
                     ),
                 }
@@ -997,7 +992,7 @@ impl<'l> DtdBuilder<'l> {
                     self.problem(
                         DtdProblemKind::Syntax,
                         Self::at(source, index..keyword_end.max(index + 2)),
-                        "déclaration non fermée : « > » attendu",
+                        "unclosed declaration: '>' expected",
                     );
                 }
                 documentation = None;
@@ -1014,7 +1009,7 @@ impl<'l> DtdBuilder<'l> {
                     self.problem(
                         DtdProblemKind::Syntax,
                         Self::at(source, index..name_end.max(index + 1)),
-                        "référence d'entité paramètre invalide : « %nom; » attendu",
+                        "invalid parameter entity reference: '%name;' expected",
                     );
                     index = name_end.max(index + 1);
                 }
@@ -1028,15 +1023,15 @@ impl<'l> DtdBuilder<'l> {
             self.problem(
                 DtdProblemKind::Syntax,
                 Self::at(source, index..unexpected_end.max(index + 1)),
-                "contenu inattendu dans la DTD : déclaration « <!…> » attendue",
+                "unexpected content in the DTD: '<!…>' declaration expected",
             );
             documentation = None;
             index = stop;
         }
     }
 
-    /// Référence `%nom;` entre deux déclarations : son texte de
-    /// remplacement est analysé comme une suite de déclarations.
+    /// `%name;` reference between two declarations: its replacement text is
+    /// parsed as a sequence of declarations.
     fn include_parameter_entity(
         &mut self,
         source: SourceId,
@@ -1082,7 +1077,7 @@ impl<'l> DtdBuilder<'l> {
             self.problem(
                 DtdProblemKind::Syntax,
                 Self::at(source, start..end),
-                "section conditionnelle invalide : « [ » attendu",
+                "invalid conditional section: '[' expected",
             );
             return end;
         };
@@ -1096,14 +1091,14 @@ impl<'l> DtdBuilder<'l> {
             self.problem(
                 DtdProblemKind::Syntax,
                 opening.clone(),
-                "section conditionnelle non fermée : « ]]> » attendu",
+                "unclosed conditional section: ']]>' expected",
             );
         }
         if !external {
             self.problem(
                 DtdProblemKind::ConditionalSection,
                 opening,
-                "les sections conditionnelles ne sont permises que dans le sous-ensemble externe",
+                "conditional sections are only allowed in the external subset",
             );
             return next;
         }
@@ -1113,7 +1108,7 @@ impl<'l> DtdBuilder<'l> {
                     self.problem(
                         DtdProblemKind::EntityExpansionLimit,
                         opening,
-                        "sections conditionnelles trop imbriquées",
+                        "conditional sections nested too deeply",
                     );
                     return next;
                 }
@@ -1125,13 +1120,13 @@ impl<'l> DtdBuilder<'l> {
             other => self.problem(
                 DtdProblemKind::Syntax,
                 Self::at(source, keyword_range),
-                format!("INCLUDE ou IGNORE attendu, « {other} » trouvé"),
+                format!("INCLUDE or IGNORE expected, found '{other}'"),
             ),
         }
         next
     }
 
-    /// Développe les références `%nom;` (hors littéraux) de `range`.
+    /// Expands the `%name;` references (outside literals) of `range`.
     fn expand(&mut self, source: SourceId, range: Range<usize>) -> Expanded {
         let text = self.dtd.sources[source].text.clone();
         let mut expanded = Expanded {
@@ -1148,8 +1143,8 @@ impl<'l> DtdBuilder<'l> {
         expanded
     }
 
-    /// `origin` : `None` pour un texte recopié de la source à partir de
-    /// `base`, sinon la référence dont le texte est issu.
+    /// `origin`: `None` for a text copied from the source starting at
+    /// `base`, otherwise the reference the text comes from.
     fn expand_into(
         &mut self,
         text: &str,
@@ -1195,8 +1190,8 @@ impl<'l> DtdBuilder<'l> {
         out.push(&text[copied..], origin, base + copied);
     }
 
-    /// Texte de remplacement d'une entité interne : références d'entités
-    /// paramètres et de caractères développées.
+    /// Replacement text of an internal entity: parameter entity and
+    /// character references expanded.
     fn entity_value(&mut self, raw: &str, at: &Location) -> String {
         let bytes = raw.as_bytes();
         let mut value = String::with_capacity(raw.len());
@@ -1233,7 +1228,7 @@ impl<'l> DtdBuilder<'l> {
                             self.problem(
                                 DtdProblemKind::Syntax,
                                 at.clone(),
-                                "référence de caractère invalide dans la valeur d'entité",
+                                "invalid character reference in the entity value",
                             );
                             value.push('&');
                             index += 1;
@@ -1269,7 +1264,7 @@ impl<'l> DtdBuilder<'l> {
         if let Err(error) = result {
             let mut range = expanded.locate(&error.range);
             if range.is_empty() {
-                // Erreur en fin de déclaration : le mot-clé est signalé.
+                // Error at the end of the declaration: the keyword is reported.
                 range = whole.start..body.start;
             }
             self.problem(
@@ -1289,7 +1284,7 @@ impl<'l> DtdBuilder<'l> {
             self.problem(
                 DtdProblemKind::Syntax,
                 location.clone(),
-                format!("« {name} » n'est pas un nom XML valide"),
+                format!("'{name}' is not a valid XML name"),
             );
         }
     }
@@ -1306,7 +1301,7 @@ impl<'l> DtdBuilder<'l> {
         if token != Token::Name {
             return Err(ParseError::new(
                 name_range,
-                "nom d'élément attendu après « <!ELEMENT »",
+                "element name expected after '<!ELEMENT'",
             ));
         }
         let name = text[name_range.clone()].to_owned();
@@ -1316,14 +1311,14 @@ impl<'l> DtdBuilder<'l> {
             .and_then(|content| expect_end(&mut lexer).map(|()| content));
         let (content, result) = match parsed {
             Ok(content) => (content, Ok(())),
-            // Élément enregistré quand même pour éviter des erreurs en cascade.
+            // Element registered anyway to avoid cascading errors.
             Err(error) => (ContentSpec::Any, Err(error)),
         };
         if self.dtd.element_index.contains_key(&name) {
             self.problem(
                 DtdProblemKind::DuplicateElement,
                 location,
-                format!("l'élément « {name} » est déjà déclaré"),
+                format!("the element '{name}' is already declared"),
             );
         } else {
             self.dtd
@@ -1352,7 +1347,7 @@ impl<'l> DtdBuilder<'l> {
         if token != Token::Name {
             return Err(ParseError::new(
                 element_range,
-                "nom d'élément attendu après « <!ATTLIST »",
+                "element name expected after '<!ATTLIST'",
             ));
         }
         let element = text[element_range].to_owned();
@@ -1364,7 +1359,7 @@ impl<'l> DtdBuilder<'l> {
                 _ => {
                     return Err(ParseError::new(
                         name_range,
-                        "nom d'attribut ou fin de déclaration « > » attendu",
+                        "attribute name or end of declaration '>' expected",
                     ));
                 }
             }
@@ -1383,7 +1378,7 @@ impl<'l> DtdBuilder<'l> {
                     "NOTATION" => {
                         let (token, range) = lexer.next();
                         if token != Token::Punct(b'(') {
-                            return Err(ParseError::new(range, "« ( » attendu après NOTATION"));
+                            return Err(ParseError::new(range, "'(' expected after NOTATION"));
                         }
                         AttributeType::Notation(parse_enumeration(&mut lexer, text, true)?)
                     }
@@ -1391,7 +1386,7 @@ impl<'l> DtdBuilder<'l> {
                         return Err(ParseError::new(
                             type_range.clone(),
                             format!(
-                                "type d'attribut inconnu « {other} » : CDATA, ID, IDREF, IDREFS, ENTITY, ENTITIES, NMTOKEN, NMTOKENS, NOTATION ou énumération attendu"
+                                "unknown attribute type '{other}': CDATA, ID, IDREF, IDREFS, ENTITY, ENTITIES, NMTOKEN, NMTOKENS, NOTATION or enumeration expected"
                             ),
                         ));
                     }
@@ -1402,7 +1397,7 @@ impl<'l> DtdBuilder<'l> {
                 _ => {
                     return Err(ParseError::new(
                         type_range,
-                        format!("type attendu pour l'attribut « {name} »"),
+                        format!("type expected for the attribute '{name}'"),
                     ));
                 }
             };
@@ -1421,7 +1416,7 @@ impl<'l> DtdBuilder<'l> {
                     other => {
                         return Err(ParseError::new(
                             default_range.clone(),
-                            format!("#REQUIRED, #IMPLIED ou #FIXED attendu, « {other} » trouvé"),
+                            format!("#REQUIRED, #IMPLIED or #FIXED expected, found '{other}'"),
                         ));
                     }
                 },
@@ -1434,7 +1429,7 @@ impl<'l> DtdBuilder<'l> {
                     return Err(ParseError::new(
                         default_range,
                         format!(
-                            "valeur par défaut attendue pour l'attribut « {name} » : #REQUIRED, #IMPLIED, #FIXED ou valeur"
+                            "default value expected for the attribute '{name}': #REQUIRED, #IMPLIED, #FIXED or a value"
                         ),
                     ));
                 }
@@ -1453,13 +1448,13 @@ impl<'l> DtdBuilder<'l> {
         }
     }
 
-    /// Valeur par défaut normalisée d'un attribut.
+    /// Normalized default value of an attribute.
     fn default_value(&mut self, raw: &str, cdata: bool, location: &Location) -> String {
         if raw.contains('<') {
             self.problem(
                 DtdProblemKind::Syntax,
                 location.clone(),
-                "« < » est interdit dans une valeur d'attribut",
+                "'<' is not allowed in an attribute value",
             );
         }
         self.dtd
@@ -1471,7 +1466,7 @@ impl<'l> DtdBuilder<'l> {
         let mut has_id = false;
         for other in self.dtd.attributes_of(&attribute.element) {
             if other.name == attribute.name {
-                // La première déclaration d'un attribut l'emporte.
+                // The first declaration of an attribute wins.
                 return;
             }
             has_id |= other.attribute_type == AttributeType::Id;
@@ -1482,7 +1477,7 @@ impl<'l> DtdBuilder<'l> {
                     DtdProblemKind::MultipleIdAttributes,
                     attribute.location.clone(),
                     format!(
-                        "l'élément « {} » a déjà un attribut de type ID",
+                        "the element '{}' already has an ID attribute",
                         attribute.element
                     ),
                 );
@@ -1492,7 +1487,7 @@ impl<'l> DtdBuilder<'l> {
                     DtdProblemKind::IdAttributeDefault,
                     attribute.location.clone(),
                     format!(
-                        "l'attribut ID « {} » doit être #IMPLIED ou #REQUIRED",
+                        "the ID attribute '{}' must be #IMPLIED or #REQUIRED",
                         attribute.name
                     ),
                 );
@@ -1521,7 +1516,7 @@ impl<'l> DtdBuilder<'l> {
             (token, name_range) = lexer.next();
         }
         if token != Token::Name {
-            return Err(ParseError::new(name_range, "nom d'entité attendu"));
+            return Err(ParseError::new(name_range, "entity name expected"));
         }
         let name = text[name_range.clone()].to_owned();
         let location = Self::located(expanded, declaration, &name_range);
@@ -1541,14 +1536,14 @@ impl<'l> DtdBuilder<'l> {
                     if parameter {
                         return Err(ParseError::new(
                             range,
-                            "NDATA est interdit pour une entité paramètre",
+                            "NDATA is not allowed for a parameter entity",
                         ));
                     }
                     let (token, notation_range) = lexer.next();
                     if token != Token::Name {
                         return Err(ParseError::new(
                             notation_range,
-                            "nom de notation attendu après NDATA",
+                            "notation name expected after NDATA",
                         ));
                     }
                     Some(text[notation_range].to_owned())
@@ -1565,13 +1560,13 @@ impl<'l> DtdBuilder<'l> {
             Token::UnclosedLiteral => {
                 return Err(ParseError::new(
                     value_range,
-                    "littéral non fermé : guillemet fermant attendu",
+                    "unclosed literal: closing quote expected",
                 ));
             }
             _ => {
                 return Err(ParseError::new(
                     value_range,
-                    "valeur entre guillemets, SYSTEM ou PUBLIC attendu",
+                    "quoted value, SYSTEM or PUBLIC expected",
                 ));
             }
         };
@@ -1585,7 +1580,7 @@ impl<'l> DtdBuilder<'l> {
             documentation,
             expansion: EntityExpansion::default(),
         };
-        // La première déclaration d'une entité l'emporte.
+        // The first declaration of an entity wins.
         if parameter {
             if !self.dtd.parameter_index.contains_key(&name) {
                 self.dtd
@@ -1614,7 +1609,7 @@ impl<'l> DtdBuilder<'l> {
         if token != Token::Name {
             return Err(ParseError::new(
                 name_range,
-                "nom de notation attendu après « <!NOTATION »",
+                "notation name expected after '<!NOTATION'",
             ));
         }
         let name = text[name_range.clone()].to_owned();
@@ -1622,7 +1617,7 @@ impl<'l> DtdBuilder<'l> {
         self.check_name(&name, &location);
         let (token, keyword) = lexer.next();
         if token != Token::Name {
-            return Err(ParseError::new(keyword, "SYSTEM ou PUBLIC attendu"));
+            return Err(ParseError::new(keyword, "SYSTEM or PUBLIC expected"));
         }
         let (public, system) = external_id(&mut lexer, text, keyword, true)?;
         let end = expect_end(&mut lexer);
@@ -1630,7 +1625,7 @@ impl<'l> DtdBuilder<'l> {
             self.problem(
                 DtdProblemKind::DuplicateNotation,
                 location,
-                format!("la notation « {name} » est déjà déclarée"),
+                format!("the notation '{name}' is already declared"),
             );
         } else {
             self.dtd
@@ -1648,7 +1643,7 @@ impl<'l> DtdBuilder<'l> {
         end
     }
 
-    /// Notations des entités `NDATA` et valeurs par défaut énumérées.
+    /// Notations of `NDATA` entities and enumerated default values.
     fn check_references(&mut self) {
         let mut problems = Vec::new();
         if !self.dtd.incomplete {
@@ -1663,7 +1658,7 @@ impl<'l> DtdBuilder<'l> {
                         DtdProblemKind::UndeclaredNotation,
                         entity.location.clone(),
                         format!(
-                            "la notation « {notation} » de l'entité « {} » n'est pas déclarée",
+                            "the notation '{notation}' of the entity '{}' is not declared",
                             entity.name
                         ),
                     ));
@@ -1679,7 +1674,7 @@ impl<'l> DtdBuilder<'l> {
                     DtdProblemKind::InvalidDefaultValue,
                     attribute.location.clone(),
                     format!(
-                        "la valeur par défaut « {value} » de l'attribut « {} » n'est pas dans l'énumération ({})",
+                        "the default value '{value}' of the attribute '{}' is not in the enumeration ({})",
                         attribute.name,
                         values.join(" | ")
                     ),
@@ -1691,8 +1686,8 @@ impl<'l> DtdBuilder<'l> {
         }
     }
 
-    /// Calcule le développement de chaque entité générale sans le
-    /// matérialiser (tailles mémoïsées, saturées).
+    /// Computes the expansion of each general entity without materializing
+    /// it (memoized, saturated sizes).
     fn compute_expansions(&mut self) {
         let count = self.dtd.general_entities.len();
         let mut computed: Vec<Option<EntityExpansion>> = vec![None; count];
@@ -1739,9 +1734,7 @@ impl<'l> DtdBuilder<'l> {
             result.error = Some(ExpansionError::TooLarge);
             own_problem = Some((
                 DtdProblemKind::EntityExpansionLimit,
-                format!(
-                    "imbrication des entités trop profonde depuis « {name} » (limite {MAX_ENTITY_DEPTH})"
-                ),
+                format!("entities nested too deeply from '{name}' (limit {MAX_ENTITY_DEPTH})"),
             ));
         } else {
             stack.push(index);
@@ -1785,9 +1778,7 @@ impl<'l> DtdBuilder<'l> {
                     result.error = Some(ExpansionError::Recursive);
                     own_problem = Some((
                         DtdProblemKind::EntityRecursion,
-                        format!(
-                            "l'entité « {name} » se référence elle-même (via « &{reference}; »)"
-                        ),
+                        format!("the entity '{name}' references itself (via '&{reference};')"),
                     ));
                     break;
                 }
@@ -1813,7 +1804,7 @@ impl<'l> DtdBuilder<'l> {
                 own_problem = Some((
                     DtdProblemKind::EntityExpansionLimit,
                     format!(
-                        "le développement de l'entité « {name} » dépasse la limite de {MAX_ENTITY_EXPANSION} octets (expansion exponentielle d'entités)"
+                        "the expansion of the entity '{name}' exceeds the limit of {MAX_ENTITY_EXPANSION} bytes (exponential entity expansion)"
                     ),
                 ));
             }
@@ -1832,7 +1823,7 @@ mod tests {
 
     use super::*;
 
-    /// Chargeur de test : fichiers virtuels par identifiant système.
+    /// Test loader: virtual files by system identifier.
     #[derive(Default)]
     struct MemoryLoader {
         files: HashMap<String, String>,
@@ -1853,7 +1844,7 @@ mod tests {
             ));
             if system.starts_with("http") {
                 return Err(LoadError {
-                    message: format!("DTD distante « {system} »"),
+                    message: format!("remote DTD '{system}'"),
                     remote: true,
                 });
             }
@@ -1861,7 +1852,7 @@ mod tests {
                 .get(system)
                 .map(|text| (PathBuf::from(format!("/dtd/{system}")), text.clone()))
                 .ok_or_else(|| LoadError {
-                    message: format!("fichier « {system} » introuvable"),
+                    message: format!("file '{system}' not found"),
                     remote: false,
                 })
         }
@@ -1885,7 +1876,7 @@ mod tests {
     #[test]
     fn parses_element_declarations_and_content_models() {
         let dtd = parse(
-            "<!-- Un livre. -->\n<!ELEMENT book (title, (chapter | appendix)+, index?)>\n<!ELEMENT title (#PCDATA)>\n<!ELEMENT p (#PCDATA|em | strong)*>\n<!ELEMENT br EMPTY>\n<!ELEMENT any ANY>\n<!ELEMENT one (item)>",
+            "<!-- A book. -->\n<!ELEMENT book (title, (chapter | appendix)+, index?)>\n<!ELEMENT title (#PCDATA)>\n<!ELEMENT p (#PCDATA|em | strong)*>\n<!ELEMENT br EMPTY>\n<!ELEMENT any ANY>\n<!ELEMENT one (item)>",
         );
         assert!(dtd.problems.is_empty(), "{:?}", dtd.problems);
         let book = dtd.element("book").expect("book should be declared");
@@ -1893,7 +1884,7 @@ mod tests {
             book.content.to_string(),
             "(title, (chapter | appendix)+, index?)"
         );
-        assert_eq!(book.documentation.as_deref(), Some("Un livre."));
+        assert_eq!(book.documentation.as_deref(), Some("A book."));
         assert_eq!(text_at(&dtd, &book.location), "book");
         assert!(text_at(&dtd, &book.declaration).starts_with("<!ELEMENT book"));
         assert_eq!(
@@ -1907,14 +1898,14 @@ mod tests {
         assert_eq!(dtd.element("br").unwrap().content, ContentSpec::Empty);
         assert_eq!(dtd.element("any").unwrap().content, ContentSpec::Any);
         assert_eq!(dtd.element("one").unwrap().content.to_string(), "(item)");
-        // La documentation ne s'applique qu'à la déclaration suivante.
+        // Documentation only applies to the following declaration.
         assert_eq!(dtd.element("title").unwrap().documentation, None);
     }
 
     #[test]
     fn parses_attribute_lists() {
         let dtd = parse(
-            "<!ENTITY company \"ACME\">\n<!NOTATION gif SYSTEM \"image/gif\">\n<!-- Attributs communs. -->\n<!ATTLIST item\n  id ID #REQUIRED\n  ref IDREF #IMPLIED\n  refs IDREFS #IMPLIED\n  kind (a|b | c) \"b\"\n  version CDATA #FIXED \"1.0\"\n  owner CDATA '&company; Inc'\n  tokens NMTOKENS #IMPLIED\n  token NMTOKEN #IMPLIED\n  logo ENTITY #IMPLIED\n  logos ENTITIES #IMPLIED\n  format NOTATION (gif) #IMPLIED>\n<!ATTLIST item kind CDATA #IMPLIED extra CDATA #IMPLIED>",
+            "<!ENTITY company \"ACME\">\n<!NOTATION gif SYSTEM \"image/gif\">\n<!-- Common attributes. -->\n<!ATTLIST item\n  id ID #REQUIRED\n  ref IDREF #IMPLIED\n  refs IDREFS #IMPLIED\n  kind (a|b | c) \"b\"\n  version CDATA #FIXED \"1.0\"\n  owner CDATA '&company; Inc'\n  tokens NMTOKENS #IMPLIED\n  token NMTOKEN #IMPLIED\n  logo ENTITY #IMPLIED\n  logos ENTITIES #IMPLIED\n  format NOTATION (gif) #IMPLIED>\n<!ATTLIST item kind CDATA #IMPLIED extra CDATA #IMPLIED>",
         );
         assert!(dtd.problems.is_empty(), "{:?}", dtd.problems);
         let names = dtd
@@ -1929,13 +1920,13 @@ mod tests {
             ]
         );
         let kind = dtd.attribute("item", "kind").unwrap();
-        // Première déclaration de `kind` conservée.
+        // First declaration of `kind` kept.
         assert_eq!(
             kind.attribute_type,
             AttributeType::Enumeration(vec!["a".into(), "b".into(), "c".into()])
         );
         assert_eq!(kind.default, DefaultDecl::Default("b".into()));
-        assert_eq!(kind.documentation.as_deref(), Some("Attributs communs."));
+        assert_eq!(kind.documentation.as_deref(), Some("Common attributes."));
         assert_eq!(kind.display(), "<!ATTLIST item kind (a | b | c) \"b\">");
         assert_eq!(
             dtd.attribute("item", "version").unwrap().default,
@@ -2016,12 +2007,12 @@ mod tests {
             ContentSpec::Mixed(vec!["em".into(), "strong".into()])
         );
         let class = dtd.attribute("p", "class").unwrap();
-        // Nom issu d'une entité : localisé sur la référence `%common;`.
+        // Name coming from an entity: located on the `%common;` reference.
         assert_eq!(text_at(&dtd, &class.location), "%common;");
         let lang = dtd.attribute("p", "lang").unwrap();
         assert_eq!(text_at(&dtd, &lang.location), "lang");
         let em = dtd.element("em").unwrap();
-        // Déclaration issue d'un texte de remplacement : ancrée sur `%decls;`.
+        // Declaration coming from a replacement text: anchored on `%decls;`.
         assert!(matches!(
             dtd.sources[em.location.source].kind,
             SourceKind::Replacement { .. }
@@ -2041,7 +2032,7 @@ mod tests {
         assert!(dtd.element("hidden").is_none());
         assert!(dtd.element("deep").is_none());
 
-        // Interdites dans le sous-ensemble interne.
+        // Not allowed in the internal subset.
         let document = "<!DOCTYPE r [ <![INCLUDE[ <!ELEMENT r EMPTY> ]]> ]><r/>";
         let (_, dtd) = load_document_dtd(document, None, &mut NoLoader).unwrap();
         assert_eq!(problem_ids(&dtd), vec!["conditionalSection"]);
@@ -2056,8 +2047,8 @@ mod tests {
         assert_eq!(
             ids,
             vec![
-                "dtdSyntax",            // , et | mélangés
-                "dtdSyntax",            // * manquant après le modèle mixte
+                "dtdSyntax",            // mixed , and |
+                "dtdSyntax",            // missing * after the mixed model
                 "duplicateElement",     // c
                 "multipleIdAttributes", // key
                 "idAttributeDefault",   // key "k"
@@ -2067,17 +2058,17 @@ mod tests {
                 "undeclaredParameterEntity",
                 "dtdSyntax", // BOGUS
                 "dtdSyntax", // 1bad
-                "dtdSyntax", // modèle non terminé
-                "dtdSyntax", // déclaration non fermée
+                "dtdSyntax", // unterminated model
+                "dtdSyntax", // unclosed declaration
                 "undeclaredNotation",
                 "invalidDefaultValue", // "z"
             ],
             "{:#?}",
             dtd.problems
         );
-        // Les déclarations valides restent disponibles.
+        // Valid declarations stay available.
         assert!(dtd.element("d").is_some());
-        // Les déclarations invalides d'élément sont enregistrées (ANY).
+        // Invalid element declarations are registered (ANY).
         assert_eq!(dtd.element("a").unwrap().content, ContentSpec::Any);
         let mixed = &dtd.problems[0];
         assert_eq!(text_at(&dtd, &mixed.location), "|");
@@ -2089,8 +2080,8 @@ mod tests {
 
     #[test]
     fn detects_parameter_entity_recursion() {
-        // `&#37;` devient `%` dans le texte de remplacement : `%b;` se
-        // référence lui-même une fois développé.
+        // `&#37;` becomes `%` in the replacement text: `%b;` references
+        // itself once expanded.
         let dtd = parse("<!ENTITY % b \"<!ELEMENT x EMPTY> &#37;b;\">\n%b;");
         assert!(
             problem_ids(&dtd).contains(&"entityRecursion"),
@@ -2119,7 +2110,7 @@ mod tests {
                 "{name}"
             );
         }
-        // Le dépassement est signalé une seule fois, sur la première entité.
+        // The overflow is reported only once, on the first entity.
         let limits = dtd
             .problems
             .iter()
@@ -2142,7 +2133,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(recursions, vec!["b", "self"]);
 
-        // Développement d'entités paramètres borné.
+        // Bounded parameter entity expansion.
         let mut source = String::from(
             "<!ENTITY % l0 \"<!-- xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx -->\">\n",
         );
@@ -2194,7 +2185,7 @@ mod tests {
         assert!(!dtd.incomplete);
         assert_eq!(doctype.name, "note");
         assert_eq!(dtd.doctype_name.as_deref(), Some("note"));
-        // Le sous-ensemble interne est prioritaire (première déclaration).
+        // The internal subset takes precedence (first declaration).
         assert_eq!(
             dtd.element("body").unwrap().content,
             ContentSpec::Mixed(vec!["b".into()])
@@ -2219,8 +2210,8 @@ mod tests {
         );
         assert_eq!(loader.requests[1].2, Some(PathBuf::from("/dtd/note.dtd")));
         assert_eq!(dtd.source_path(0), Some(Path::new("/docs/note.xml")));
-        // Remontée jusqu'au document : l'élément du module est rattaché à
-        // l'identifiant système du DOCTYPE.
+        // Walking up to the document: the module's element is attached to
+        // the system identifier of the DOCTYPE.
         let origin = dtd.origin_in(&extra.location, 0).unwrap();
         assert_eq!(&document[origin.range], "note.dtd");
         assert_eq!(dtd.origin_in(&extra.location, 99), None);
@@ -2245,8 +2236,8 @@ mod tests {
             Some("-//W3C//DTD XHTML 1.0 Strict//EN")
         );
 
-        // Référence à une entité paramètre inconnue après un échec : pas
-        // d'erreur supplémentaire (elle peut venir de la ressource absente).
+        // Reference to an unknown parameter entity after a failure: no
+        // additional error (it may come from the missing resource).
         let document = "<!DOCTYPE r [ <!ENTITY % ext SYSTEM \"missing.ent\"> %ext; %later; ]><r/>";
         let (_, dtd) = load_document_dtd(document, None, &mut loader).unwrap();
         assert_eq!(problem_ids(&dtd), vec!["externalLoad"]);

@@ -1,20 +1,20 @@
-//! `textDocument/documentHighlight` : mise en évidence de la balise ouvrante
-//! et de la balise fermante correspondante, comme LemMinX.
+//! `textDocument/documentHighlight`: highlights the start tag and its
+//! matching end tag, like LemMinX.
 
 use serde_json::{Value, json};
 use xml_core::tags::XmlTagTree;
 
 use crate::position_at;
 
-/// `DocumentHighlightKind.Read`, utilisé par LemMinX pour les noms de balises.
+/// `DocumentHighlightKind.Read`, used by LemMinX for tag names.
 const HIGHLIGHT_KIND_READ: u8 = 2;
 
-/// Retourne les mises en évidence LSP pour le curseur situé à `offset`.
+/// Returns the LSP highlights for the cursor at `offset`.
 ///
-/// Si le curseur est sur le nom d'une balise ouvrante ou fermante, les noms
-/// des deux balises de la paire sont retournés (un seul pour un élément
-/// auto-fermant, non fermé ou une balise fermante orpheline). Ailleurs, la
-/// liste est vide.
+/// When the cursor is on the name of a start or end tag, the names of both
+/// tags of the pair are returned (only one for a self-closing element, an
+/// unclosed element or an orphan end tag). Anywhere else, the list is
+/// empty.
 pub fn document_highlights(source: &str, offset: usize) -> Vec<Value> {
     let Some(pair) = XmlTagTree::parse(source).tag_pair_at(offset) else {
         return Vec::new();

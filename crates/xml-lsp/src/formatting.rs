@@ -1,15 +1,15 @@
-//! `textDocument/formatting` et `textDocument/rangeFormatting`.
+//! `textDocument/formatting` and `textDocument/rangeFormatting`.
 //!
-//! Les `FormattingOptions` LSP (`tabSize`, `insertSpaces`,
-//! `trimTrailingWhitespace`, `insertFinalNewline`, `trimFinalNewlines`) sont
-//! respectées ; la fin de ligne insérée est celle du document. Le résultat
-//! est renvoyé sous forme de modifications minimales (différence ligne à
-//! ligne) plutôt que d'un remplacement complet, pour que l'éditeur conserve
-//! les curseurs hors des lignes modifiées.
+//! LSP `FormattingOptions` (`tabSize`, `insertSpaces`,
+//! `trimTrailingWhitespace`, `insertFinalNewline`, `trimFinalNewlines`) are
+//! honoured; inserted line endings are the document's. The result is
+//! returned as minimal edits (line-by-line difference) rather than a full
+//! replacement, so that the editor keeps cursors outside the modified
+//! lines.
 //!
-//! Le formatage de plage suit LemMinX : la plage est étendue aux éléments
-//! complets qui l'englobent et seule cette région est reformatée, même si le
-//! reste du document est invalide.
+//! Range formatting follows LemMinX: the range is expanded to the enclosing
+//! complete elements and only that region is reformatted, even when the
+//! rest of the document is invalid.
 
 use std::ops::Range;
 
@@ -18,9 +18,9 @@ use xml_core::{FormatOptions, LineEnding, diff::diff_text, format_xml_range, for
 
 use crate::{selection::LineIndex, settings::FormatSettings};
 
-/// Options de formatage : réglages `xml.format.*`, puis options de la
-/// requête (prioritaires). Les options absentes des deux conservent le
-/// comportement par défaut.
+/// Formatting options: `xml.format.*` settings, then the request options
+/// (which take precedence). Options missing from both keep the default
+/// behaviour.
 pub fn format_options(params: &Value, source: &str, settings: &FormatSettings) -> FormatOptions {
     let mut options = FormatOptions {
         line_ending: LineEnding::detect(source),
@@ -49,21 +49,21 @@ pub fn format_options(params: &Value, source: &str, settings: &FormatSettings) -
     options
 }
 
-/// Modifications (`TextEdit[]`) formatant tout le document, ou `None` si le
-/// document est invalide.
+/// Edits (`TextEdit[]`) formatting the whole document, or `None` if the
+/// document is invalid.
 pub fn document_edits(source: &str, options: &FormatOptions) -> Option<Value> {
     let formatted = format_xml_with(source, options).ok()?;
     Some(text_edits(source, 0..source.len(), &formatted))
 }
 
-/// Modifications (`TextEdit[]`) formatant la région englobant `range`, ou
-/// `None` si elle ne peut pas être formatée sans risque.
+/// Edits (`TextEdit[]`) formatting the region enclosing `range`, or `None`
+/// if it cannot be formatted safely.
 pub fn range_edits(source: &str, range: Range<usize>, options: &FormatOptions) -> Option<Value> {
     let formatted = format_xml_range(source, range, options)?;
     Some(text_edits(source, formatted.range, &formatted.text))
 }
 
-/// Différence entre `source[range]` et `replacement`, en `TextEdit[]`.
+/// Difference between `source[range]` and `replacement`, as `TextEdit[]`.
 fn text_edits(source: &str, range: Range<usize>, replacement: &str) -> Value {
     let lines = LineIndex::new(source);
     let base = range.start;
@@ -82,7 +82,7 @@ fn text_edits(source: &str, range: Range<usize>, replacement: &str) -> Value {
     Value::Array(edits)
 }
 
-/// Applique des `TextEdit` (positions UTF-16) à `source`.
+/// Applies `TextEdit`s (UTF-16 positions) to `source`.
 #[cfg(test)]
 pub(crate) fn apply_edits(source: &str, edits: &Value) -> String {
     let offset = |position: &Value| {
@@ -143,7 +143,7 @@ mod tests {
             format_options(&json!({}), "<a/>", &FormatSettings::default()),
             FormatOptions::default()
         );
-        // Les réglages servent de repli aux options absentes de la requête.
+        // Settings are the fallback for options missing from the request.
         let settings = crate::settings::Settings::from_value(&json!({"xml": {"format": {
             "tabSize": 8, "insertSpaces": false, "trimFinalNewlines": false,
             "emptyElements": "expand", "maxLineWidth": 40,
@@ -193,7 +193,7 @@ mod tests {
         let source = "<root><😀>é</😀><b>x</b></root>";
         let start = source.find("<b>").unwrap();
         let edits = range_edits(source, start..start + 3, &FormatOptions::default()).unwrap();
-        // `<b>` commence après 16 unités UTF-16 (😀 en compte deux).
+        // `<b>` starts after 16 UTF-16 code units (😀 counts as two).
         assert_eq!(
             edits[0]["range"]["start"],
             json!({"line": 0, "character": 16})

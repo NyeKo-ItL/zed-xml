@@ -1,17 +1,17 @@
-//! `textDocument/linkedEditingRange` : édition simultanée du nom de la balise
-//! ouvrante et de la balise fermante, comme LemMinX.
+//! `textDocument/linkedEditingRange`: edits the start tag name and the end
+//! tag name together, like LemMinX.
 
 use serde_json::{Value, json};
 use xml_core::tags::XmlTagTree;
 
 use crate::position_at;
 
-/// Motif ECMAScript d'un nom XML (`Name` de XML 1.0 5e édition).
+/// ECMAScript pattern of an XML name (`Name` from XML 1.0 5th edition).
 ///
-/// Il permet au client d'arrêter l'édition liée dès qu'un caractère invalide
-/// (espace, `>`, `=`...) est saisi. Les caractères hors du plan multilingue
-/// de base sont décrits par leurs paires de substitution UTF-16, car le motif
-/// est évalué sans le drapeau `u`.
+/// It lets the client stop linked editing as soon as an invalid character
+/// (space, `>`, `=`...) is typed. Characters outside the Basic Multilingual
+/// Plane are described by their UTF-16 surrogate pairs, because the pattern
+/// is evaluated without the `u` flag.
 pub const XML_NAME_WORD_PATTERN: &str = concat!(
     r"(?:[:A-Z_a-zÀ-ÖØ-öø-˿Ͱ-ͽͿ-῿",
     r"‌-‍⁰-↏Ⰰ-⿯、-퟿豈-﷏ﷰ-�]",
@@ -21,12 +21,12 @@ pub const XML_NAME_WORD_PATTERN: &str = concat!(
     r"ﷰ-�]|[\uD800-\uDB7F][\uDC00-\uDFFF])*",
 );
 
-/// Retourne les plages d'édition liée pour le curseur situé à `offset`.
+/// Returns the linked editing ranges for the cursor at `offset`.
 ///
-/// Le curseur doit se trouver sur le nom de la balise ouvrante ou fermante
-/// d'un élément complet (`<a>...</a>`). Retourne `None` pour un élément
-/// auto-fermant, non fermé, une balise fermante orpheline, des noms
-/// différents, ou un curseur hors d'un nom de balise.
+/// The cursor must be on the start or end tag name of a complete element
+/// (`<a>...</a>`). Returns `None` for a self-closing element, an unclosed
+/// element, an orphan end tag, mismatched names, or a cursor outside a tag
+/// name.
 pub fn linked_editing_ranges(source: &str, offset: usize) -> Option<Value> {
     let pair = XmlTagTree::parse(source).tag_pair_at(offset)?;
     if !pair.is_complete() {
@@ -90,11 +90,11 @@ mod tests {
 
     #[test]
     fn returns_null_for_incomplete_pairs() {
-        // Auto-fermant, non fermé, balise fermante orpheline.
+        // Self-closing, unclosed, orphan end tag.
         assert_eq!(linked_editing_ranges("<root><item/></root>", 8), None);
         assert_eq!(linked_editing_ranges("<root><item></root>", 8), None);
         assert_eq!(linked_editing_ranges("<root></item></root>", 9), None);
-        // Noms différents : aucune paire ne se forme.
+        // Mismatched names: no pair is formed.
         assert_eq!(linked_editing_ranges("<item></items>", 2), None);
         assert_eq!(linked_editing_ranges("<item></items>", 10), None);
     }
@@ -115,7 +115,7 @@ mod tests {
         assert_eq!(linked_editing_ranges("<></>", 3), None);
         assert_eq!(linked_editing_ranges("<", 1), None);
         assert_eq!(linked_editing_ranges("", 0), None);
-        // Curseur juste après `<` d'une balise vide suivie d'une paire valide.
+        // Cursor right after the `<` of an empty tag followed by a valid pair.
         assert_eq!(linked_editing_ranges("<root><></root>", 7), None);
     }
 

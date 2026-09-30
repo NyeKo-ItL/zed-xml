@@ -1,101 +1,101 @@
-//! Localisation tolérante des balises et des paires ouvrante/fermante.
+//! Tolerant location of tags and start/end tag pairs.
 //!
-//! Ce module fournit un analyseur lexical volontairement permissif : il ne
-//! s'arrête jamais sur une erreur de syntaxe, afin de rester utilisable
-//! pendant la saisie (documents mal formés, balises non fermées, guillemets
-//! manquants...). Il sert de socle commun aux fonctionnalités LSP qui ont
-//! besoin de relier une balise ouvrante à sa balise fermante :
+//! This module provides a deliberately permissive lexer: it never stops on
+//! a syntax error, so that it stays usable while typing (malformed
+//! documents, unclosed tags, missing quotes...). It is the common
+//! foundation of the LSP features that need to link a start tag to its end
+//! tag:
 //!
-//! - `textDocument/documentHighlight` : [`XmlTagTree::tag_pair_at`] ;
-//! - `textDocument/linkedEditingRange` : [`XmlTagTree::tag_pair_at`] puis
-//!   [`XmlTagPair::name_ranges`] ;
-//! - `textDocument/rename` : [`XmlTagTree::tag_pair_at`],
-//!   [`qualified_name_parts`] pour distinguer préfixe et nom local, et
-//!   [`scan_attributes`] pour les déclarations `xmlns:prefix` ;
-//! - `textDocument/foldingRange` : [`XmlTagTree::elements`],
-//!   [`XmlElement::end_tag`] et [`scan_markup`] (commentaires, CDATA,
-//!   instructions de traitement, `<!DOCTYPE ...>`) ;
-//! - `textDocument/selectionRange` : [`XmlTagTree::innermost_element_at`] et
+//! - `textDocument/documentHighlight`: [`XmlTagTree::tag_pair_at`];
+//! - `textDocument/linkedEditingRange`: [`XmlTagTree::tag_pair_at`] then
+//!   [`XmlTagPair::name_ranges`];
+//! - `textDocument/rename`: [`XmlTagTree::tag_pair_at`],
+//!   [`qualified_name_parts`] to tell prefix and local name apart, and
+//!   [`scan_attributes`] for `xmlns:prefix` declarations;
+//! - `textDocument/foldingRange`: [`XmlTagTree::elements`],
+//!   [`XmlElement::end_tag`] and [`scan_markup`] (comments, CDATA,
+//!   processing instructions, `<!DOCTYPE ...>`);
+//! - `textDocument/selectionRange`: [`XmlTagTree::innermost_element_at`] and
 //!   [`XmlTagTree::ancestors`].
 //!
-//! Tous les offsets sont des offsets d'octets UTF-8 dans la source et tombent
-//! toujours sur une frontière de caractère. Les commentaires, sections CDATA,
-//! instructions de traitement et déclarations `<!DOCTYPE ...>` sont ignorés
-//! par [`scan_tags`] et listés à part par [`scan_markup`].
+//! All offsets are UTF-8 byte offsets into the source and always fall on a
+//! character boundary. Comments, CDATA sections, processing instructions
+//! and `<!DOCTYPE ...>` declarations are ignored by [`scan_tags`] and
+//! listed separately by [`scan_markup`].
 
 use std::ops::Range;
 
-/// Nature d'une balise rencontrée dans la source.
+/// Kind of a tag found in the source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum XmlTagKind {
-    /// Balise ouvrante `<name ...>` (éventuellement non terminée).
+    /// Start tag `<name ...>` (possibly unterminated).
     Start,
-    /// Balise fermante `</name>`.
+    /// End tag `</name>`.
     End,
-    /// Balise auto-fermante `<name ... />`.
+    /// Self-closing tag `<name ... />`.
     SelfClosing,
 }
 
-/// Balise repérée lexicalement.
+/// Lexically located tag.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XmlTag {
     pub kind: XmlTagKind,
-    /// Étendue de la balise, du `<` jusqu'après le `>`. Pour une balise non
-    /// terminée, l'étendue s'arrête au prochain `<` ou à la fin de la source.
+    /// Range of the tag, from `<` to after `>`. For an unterminated tag, the
+    /// range stops at the next `<` or at the end of the source.
     pub range: Range<usize>,
-    /// Étendue du nom qualifié (`prefix:local`) de la balise.
+    /// Range of the qualified name (`prefix:local`) of the tag.
     pub name: Range<usize>,
-    /// Indique si la balise se termine bien par `>` ou `/>`.
+    /// Whether the tag is properly terminated by `>` or `/>`.
     pub closed: bool,
 }
 
 impl XmlTag {
-    /// Nom qualifié de la balise.
+    /// Qualified name of the tag.
     pub fn name<'a>(&self, source: &'a str) -> &'a str {
         &source[self.name.clone()]
     }
 
-    /// Indique si `offset` est sur le nom de la balise, bornes incluses
-    /// (le curseur juste après le dernier caractère du nom compte).
+    /// Whether `offset` is on the tag name, bounds included (the cursor
+    /// right after the last character of the name counts).
     pub fn name_contains(&self, offset: usize) -> bool {
         self.name.start <= offset && offset <= self.name.end
     }
 }
 
-/// Élément reconstruit à partir des balises : balise ouvrante et, si elle
-/// existe, balise fermante correspondante.
+/// Element rebuilt from the tags: start tag and, when it exists, the
+/// matching end tag.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XmlElement {
-    /// Balise ouvrante ou auto-fermante.
+    /// Start or self-closing tag.
     pub start_tag: XmlTag,
-    /// Balise fermante correspondante (`None` pour un élément auto-fermant
-    /// ou non fermé).
+    /// Matching end tag (`None` for a self-closing or unclosed
+    /// element).
     pub end_tag: Option<XmlTag>,
-    /// Index de l'élément parent dans [`XmlTagTree::elements`].
+    /// Index of the parent element in [`XmlTagTree::elements`].
     pub parent: Option<usize>,
-    /// Profondeur (0 pour un élément racine).
+    /// Depth (0 for a root element).
     pub depth: usize,
 }
 
 impl XmlElement {
-    /// Nom qualifié de l'élément.
+    /// Qualified name of the element.
     pub fn name<'a>(&self, source: &'a str) -> &'a str {
         self.start_tag.name(source)
     }
 
-    /// Indique si l'élément est de la forme `<name />`.
+    /// Whether the element has the `<name />` form.
     pub fn is_self_closing(&self) -> bool {
         self.start_tag.kind == XmlTagKind::SelfClosing
     }
 
-    /// Indique si l'élément est auto-fermant ou possède sa balise fermante.
+    /// Whether the element is self-closing or has its end tag.
     pub fn is_closed(&self) -> bool {
         self.is_self_closing() || self.end_tag.is_some()
     }
 
-    /// Étendue complète de l'élément, du `<` ouvrant jusqu'après le `>` de la
-    /// balise fermante. Pour un élément non fermé, seule la balise ouvrante
-    /// est couverte.
+    /// Full range of the element, from the opening `<` to after the `>` of
+    /// the end tag. For an unclosed element, only the start tag is
+    /// covered.
     pub fn range(&self) -> Range<usize> {
         let end = self
             .end_tag
@@ -104,42 +104,42 @@ impl XmlElement {
         self.start_tag.range.start..end
     }
 
-    /// Étendue du contenu entre la balise ouvrante et la balise fermante.
+    /// Range of the content between the start tag and the end tag.
     pub fn content_range(&self) -> Option<Range<usize>> {
         let end_tag = self.end_tag.as_ref()?;
         Some(self.start_tag.range.end..end_tag.range.start)
     }
 }
 
-/// Paire de noms de balises liés, trouvée depuis une position du curseur.
+/// Pair of linked tag names, found from a cursor position.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XmlTagPair {
-    /// Côté de la paire sur lequel se trouve le curseur.
+    /// Side of the pair the cursor is on.
     pub cursor_on: XmlTagKind,
-    /// Nom de la balise ouvrante ou auto-fermante (`None` pour une balise
-    /// fermante orpheline).
+    /// Name of the start or self-closing tag (`None` for an orphan end
+    /// tag).
     pub start_name: Option<Range<usize>>,
-    /// Nom de la balise fermante (`None` pour un élément auto-fermant ou non
-    /// fermé).
+    /// Name of the end tag (`None` for a self-closing or unclosed
+    /// element).
     pub end_name: Option<Range<usize>>,
-    /// Index de l'élément dans [`XmlTagTree::elements`] (`None` pour une
-    /// balise fermante orpheline).
+    /// Index of the element in [`XmlTagTree::elements`] (`None` for an
+    /// orphan end tag).
     pub element: Option<usize>,
 }
 
 impl XmlTagPair {
-    /// Étendues des noms existants, balise ouvrante en premier.
+    /// Ranges of the existing names, start tag first.
     pub fn name_ranges(&self) -> impl Iterator<Item = Range<usize>> + '_ {
         self.start_name.iter().chain(self.end_name.iter()).cloned()
     }
 
-    /// Indique si les deux côtés de la paire existent.
+    /// Whether both sides of the pair exist.
     pub fn is_complete(&self) -> bool {
         self.start_name.is_some() && self.end_name.is_some()
     }
 }
 
-/// Arbre d'éléments reconstruit de façon tolérante.
+/// Element tree rebuilt tolerantly.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct XmlTagTree {
     elements: Vec<XmlElement>,
@@ -147,12 +147,12 @@ pub struct XmlTagTree {
 }
 
 impl XmlTagTree {
-    /// Analyse la source et apparie les balises.
+    /// Parses the source and pairs the tags.
     ///
-    /// Une balise fermante est associée à l'élément ouvert le plus proche
-    /// portant le même nom ; les éléments ouverts intermédiaires restent non
-    /// fermés. Une balise fermante sans élément ouvert correspondant est
-    /// conservée dans [`XmlTagTree::orphan_end_tags`].
+    /// An end tag is associated with the nearest open element with the same
+    /// name; intermediate open elements stay unclosed. An end tag without a
+    /// matching open element is kept in
+    /// [`XmlTagTree::orphan_end_tags`].
     pub fn parse(source: &str) -> Self {
         let mut elements: Vec<XmlElement> = Vec::new();
         let mut orphan_end_tags = Vec::new();
@@ -195,21 +195,21 @@ impl XmlTagTree {
         }
     }
 
-    /// Éléments dans l'ordre de leur balise ouvrante (un parent précède
-    /// toujours ses enfants).
+    /// Elements in the order of their start tag (a parent always precedes
+    /// its children).
     pub fn elements(&self) -> &[XmlElement] {
         &self.elements
     }
 
-    /// Balises fermantes sans balise ouvrante correspondante.
+    /// End tags without a matching start tag.
     pub fn orphan_end_tags(&self) -> &[XmlTag] {
         &self.orphan_end_tags
     }
 
-    /// Retourne la paire de noms liée au nom de balise sous le curseur.
+    /// Returns the pair of names linked to the tag name under the cursor.
     ///
-    /// Retourne `None` si le curseur n'est pas sur un nom de balise (contenu,
-    /// attributs, commentaires...).
+    /// Returns `None` if the cursor is not on a tag name (content,
+    /// attributes, comments...).
     pub fn tag_pair_at(&self, offset: usize) -> Option<XmlTagPair> {
         for (index, element) in self.elements.iter().enumerate() {
             if element.start_tag.range.start > offset {
@@ -244,8 +244,8 @@ impl XmlTagTree {
             })
     }
 
-    /// Index de l'élément le plus profond dont [`XmlElement::range`] contient
-    /// `offset` (bornes incluses).
+    /// Index of the deepest element whose [`XmlElement::range`] contains
+    /// `offset` (bounds included).
     pub fn innermost_element_at(&self, offset: usize) -> Option<usize> {
         let mut found = None;
         for (index, element) in self.elements.iter().enumerate() {
@@ -260,7 +260,7 @@ impl XmlTagTree {
         found
     }
 
-    /// Ancêtres de l'élément `index`, du parent direct vers la racine.
+    /// Ancestors of the element `index`, from the direct parent to the root.
     pub fn ancestors(&self, index: usize) -> impl Iterator<Item = usize> + '_ {
         std::iter::successors(
             self.elements.get(index).and_then(|element| element.parent),
@@ -269,8 +269,8 @@ impl XmlTagTree {
     }
 }
 
-/// Sépare un nom qualifié en étendue de préfixe (sans `:`) et étendue de nom
-/// local. `name` doit être une étendue de `source`.
+/// Splits a qualified name into a prefix range (without `:`) and a local
+/// name range. `name` must be a range of `source`.
 pub fn qualified_name_parts(
     source: &str,
     name: Range<usize>,
@@ -284,13 +284,13 @@ pub fn qualified_name_parts(
     }
 }
 
-/// Espace de noms réservé du préfixe `xml`.
+/// Reserved namespace of the `xml` prefix.
 pub const XML_NAMESPACE: &str = "http://www.w3.org/XML/1998/namespace";
 
-/// Élément le plus proche (`element` lui-même inclus) qui déclare `prefix`
-/// (`None` : espace de noms par défaut `xmlns`), avec l'attribut déclarant.
-/// `attributes[i]` sont les attributs de la balise ouvrante de l'élément `i`
-/// de `tree` (voir [`scan_attributes`]).
+/// Nearest element (`element` itself included) declaring `prefix`
+/// (`None`: default namespace `xmlns`), with the declaring attribute.
+/// `attributes[i]` are the attributes of the start tag of element `i` of
+/// `tree` (see [`scan_attributes`]).
 pub fn namespace_declaration<'t>(
     source: &str,
     tree: &XmlTagTree,
@@ -315,10 +315,10 @@ pub fn namespace_declaration<'t>(
         })
 }
 
-/// Espace de noms de `prefix` dans le contexte de l'élément `element`, en
-/// remontant les déclarations `xmlns` des ancêtres. Retourne `None` pour un
-/// préfixe non déclaré et `Some(None)` sans espace de noms (préfixe absent
-/// sans `xmlns` par défaut, ou `xmlns=""`). Le préfixe `xml` est prédéfini.
+/// Namespace of `prefix` in the context of the element `element`, walking
+/// up the `xmlns` declarations of the ancestors. Returns `None` for an
+/// undeclared prefix and `Some(None)` for no namespace (no prefix without a
+/// default `xmlns`, or `xmlns=""`). The `xml` prefix is predefined.
 pub fn resolve_namespace<'s>(
     source: &'s str,
     tree: &XmlTagTree,
@@ -342,31 +342,31 @@ pub fn resolve_namespace<'s>(
     }
 }
 
-/// Attribut repéré lexicalement dans une balise ouvrante ou auto-fermante.
+/// Lexically located attribute in a start or self-closing tag.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XmlAttribute {
-    /// Étendue du nom qualifié de l'attribut.
+    /// Range of the qualified name of the attribute.
     pub name: Range<usize>,
-    /// Étendue de la valeur, guillemets exclus (`None` sans `=` ou sans
-    /// valeur). Une valeur dont le guillemet fermant manque s'arrête avant la
-    /// fin de la balise.
+    /// Range of the value, quotes excluded (`None` without `=` or without a
+    /// value). A value missing its closing quote stops before the end of the
+    /// tag.
     pub value: Option<Range<usize>>,
 }
 
 impl XmlAttribute {
-    /// Nom qualifié de l'attribut.
+    /// Qualified name of the attribute.
     pub fn name<'a>(&self, source: &'a str) -> &'a str {
         &source[self.name.clone()]
     }
 
-    /// Valeur brute de l'attribut (entités non résolues).
+    /// Raw value of the attribute (entities not resolved).
     pub fn value<'a>(&self, source: &'a str) -> Option<&'a str> {
         self.value.clone().map(|range| &source[range])
     }
 }
 
-/// Liste les attributs d'une balise ouvrante ou auto-fermante, de façon
-/// tolérante. Retourne une liste vide pour une balise fermante.
+/// Lists the attributes of a start or self-closing tag, tolerantly.
+/// Returns an empty list for an end tag.
 pub fn scan_attributes(source: &str, tag: &XmlTag) -> Vec<XmlAttribute> {
     let mut attributes = Vec::new();
     if tag.kind == XmlTagKind::End {
@@ -424,7 +424,7 @@ fn skip_whitespace(bytes: &[u8], mut index: usize) -> usize {
     index
 }
 
-/// Fin d'une valeur non terminée : avant le `>` ou `/>` final de la balise.
+/// End of an unterminated value: before the final `>` or `/>` of the tag.
 fn unterminated_value_end(bytes: &[u8]) -> usize {
     if bytes.ends_with(b"/>") {
         bytes.len() - 2
@@ -435,58 +435,58 @@ fn unterminated_value_end(bytes: &[u8]) -> usize {
     }
 }
 
-/// Nature d'une construction qui n'est pas une balise d'élément.
+/// Kind of a construct that is not an element tag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum XmlMarkupKind {
-    /// Commentaire `<!-- ... -->`.
+    /// Comment `<!-- ... -->`.
     Comment,
     /// Section `<![CDATA[ ... ]]>`.
     CData,
-    /// Instruction de traitement `<? ... ?>`, y compris le prologue
-    /// `<?xml ...?>`.
+    /// Processing instruction `<? ... ?>`, including the `<?xml ...?>`
+    /// prolog.
     ProcessingInstruction,
-    /// Déclaration `<! ... >` (typiquement `<!DOCTYPE ...>` avec son
-    /// sous-ensemble interne `[...]`).
+    /// Declaration `<! ... >` (typically `<!DOCTYPE ...>` with its
+    /// internal subset `[...]`).
     Declaration,
 }
 
-/// Commentaire, section CDATA, instruction de traitement ou déclaration
-/// repéré lexicalement hors des balises d'éléments.
+/// Comment, CDATA section, processing instruction or declaration located
+/// lexically outside element tags.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XmlMarkup {
     pub kind: XmlMarkupKind,
-    /// Étendue complète, délimiteurs inclus. Une construction non terminée
-    /// s'étend jusqu'à la fin de la source.
+    /// Full range, delimiters included. An unterminated construct extends
+    /// to the end of the source.
     pub range: Range<usize>,
-    /// Étendue du contenu, délimiteurs exclus (`<!--`/`-->`, `<![CDATA[`/
+    /// Range of the content, delimiters excluded (`<!--`/`-->`, `<![CDATA[`/
     /// `]]>`, `<?`/`?>`, `<!`/`>`).
     pub content: Range<usize>,
-    /// Indique si le délimiteur fermant est présent.
+    /// Whether the closing delimiter is present.
     pub closed: bool,
 }
 
 impl XmlMarkup {
-    /// Contenu brut, délimiteurs exclus.
+    /// Raw content, delimiters excluded.
     pub fn content<'a>(&self, source: &'a str) -> &'a str {
         &source[self.content.clone()]
     }
 }
 
-/// Liste les balises d'éléments de la source dans l'ordre du document.
+/// Lists the element tags of the source in document order.
 pub fn scan_tags(source: &str) -> Vec<XmlTag> {
     scan(source).0
 }
 
-/// Liste les commentaires, sections CDATA, instructions de traitement et
-/// déclarations de premier niveau dans l'ordre du document. Les commentaires
-/// du sous-ensemble interne d'une DTD font partie de la déclaration.
+/// Lists the top-level comments, CDATA sections, processing instructions
+/// and declarations in document order. Comments of a DTD internal subset
+/// are part of the declaration.
 pub fn scan_markup(source: &str) -> Vec<XmlMarkup> {
     scan(source).1
 }
 
-/// Construit un [`XmlMarkup`] démarrant à `start`, dont le délimiteur ouvrant
-/// mesure `open` octets et dont le parcours (par [`skip_past`] avec le
-/// terminateur `close`) s'est arrêté à `end`.
+/// Builds an [`XmlMarkup`] starting at `start`, whose opening delimiter is
+/// `open` bytes long and whose scan (by [`skip_past`] with the terminator
+/// `close`) stopped at `end`.
 fn markup(
     source: &[u8],
     kind: XmlMarkupKind,
@@ -603,9 +603,9 @@ fn skip_past(bytes: &[u8], from: usize, terminator: &[u8]) -> usize {
         .map_or(bytes.len(), |position| from + position + terminator.len())
 }
 
-/// Ignore une déclaration `<!DOCTYPE ...>` y compris son sous-ensemble interne.
+/// Skips a `<!DOCTYPE ...>` declaration including its internal subset.
 ///
-/// Retourne `(fin, fermée)`.
+/// Returns `(end, closed)`.
 fn skip_declaration(bytes: &[u8], mut index: usize) -> (usize, bool) {
     let mut depth = 0usize;
     while index < bytes.len() {
@@ -643,10 +643,10 @@ fn scan_name(bytes: &[u8], start: usize) -> Range<usize> {
     start..start + length
 }
 
-/// Parcourt les attributs jusqu'à la fin de la balise.
+/// Walks the attributes up to the end of the tag.
 ///
-/// Retourne `(fin, fermée, auto-fermante)`. Une balise non terminée s'arrête
-/// avant le prochain `<` hors guillemets ou à la fin de la source.
+/// Returns `(end, closed, self_closing)`. An unterminated tag stops before
+/// the next `<` outside quotes or at the end of the source.
 fn scan_tag_end(bytes: &[u8], mut index: usize) -> (usize, bool, bool) {
     while index < bytes.len() {
         match bytes[index] {

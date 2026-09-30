@@ -1,4 +1,4 @@
-//! Serveur LSP XML natif.
+//! Native XML LSP server.
 
 mod catalog;
 mod code_actions;
@@ -75,8 +75,8 @@ struct SchemaLoadError {
     path: PathBuf,
     message: String,
     offset: usize,
-    /// Schéma distant (`http(s)`) qu'aucun catalogue ne résout : signalé en
-    /// avertissement.
+    /// Remote schema (`http(s)`) that no catalog resolves: reported as a
+    /// warning.
     remote: bool,
 }
 
@@ -86,30 +86,30 @@ struct XmlLanguageServer {
     schema_index: HashMap<String, Vec<PathBuf>>,
     model_cache: hover::ModelCache,
     folding_settings: folding::FoldingSettings,
-    /// Le client accepte des `LocationLink` en réponse à `textDocument/definition`.
+    /// The client accepts `LocationLink`s in response to `textDocument/definition`.
     definition_link_support: bool,
-    /// Le client accepte des `DocumentSymbol` hiérarchiques.
+    /// The client accepts hierarchical `DocumentSymbol`s.
     hierarchical_document_symbols: bool,
-    /// Le client accepte l'enregistrement dynamique de
+    /// The client accepts dynamic registration of
     /// `workspace/didChangeWatchedFiles`.
     watched_files_registration: bool,
     workspace: symbols::WorkspaceIndex,
-    /// Réglages `xml.*` effectifs.
+    /// Effective `xml.*` settings.
     settings: settings::Settings,
-    /// Section `xml` reçue dans `initializationOptions`, base sur laquelle
-    /// sont fusionnés les réglages de `workspace/configuration`.
+    /// `xml` section received in `initializationOptions`, the base on which
+    /// the `workspace/configuration` settings are merged.
     initialization_settings: Value,
-    /// Le client répond à `workspace/configuration`.
+    /// The client answers `workspace/configuration`.
     configuration_support: bool,
-    /// Requête `workspace/configuration` en attente de réponse.
+    /// `workspace/configuration` request awaiting a response.
     pending_configuration: Option<RequestId>,
     configuration_requests: u64,
-    /// Catalogues XML (`xml.catalogs`, `xml.autoDetectCatalogs`).
+    /// XML catalogs (`xml.catalogs`, `xml.autoDetectCatalogs`).
     catalogs: catalog::Catalogs,
-    /// Enregistrement `didChangeWatchedFiles` en cours pour les catalogues.
+    /// Current `didChangeWatchedFiles` registration for the catalogs.
     catalog_registration: Option<String>,
     catalog_registrations: u64,
-    /// Textes des DTD externes lues sur disque.
+    /// Texts of the external DTDs read from disk.
     dtd_cache: dtd::DtdCache,
 }
 
@@ -137,8 +137,8 @@ impl XmlLanguageServer {
         }
     }
 
-    /// Recalcule la liste des catalogues (réglages et dossiers de l'espace
-    /// de travail) ; retourne `true` si la résolution peut avoir changé.
+    /// Recomputes the list of catalogs (settings and workspace folders);
+    /// returns `true` if resolution may have changed.
     fn update_catalogs(&mut self) -> bool {
         let paths = catalog::catalog_paths(
             &self.settings.catalogs,
@@ -154,12 +154,12 @@ impl XmlLanguageServer {
 
     fn log_catalog_errors(&self) {
         for (path, error) in self.catalogs.errors() {
-            eprintln!("xml-lsp: catalogue {} ignoré : {error}", path.display());
+            eprintln!("xml-lsp: catalog {} ignored: {error}", path.display());
         }
     }
 
-    /// Relit les catalogues modifiés sur disque ; republie alors les
-    /// diagnostics des documents ouverts.
+    /// Rereads the catalogs modified on disk; then republishes the
+    /// diagnostics of the open documents.
     fn refresh_catalogs(
         &mut self,
         connection: &Connection,
@@ -172,7 +172,7 @@ impl XmlLanguageServer {
         self.publish_all_diagnostics(connection)
     }
 
-    /// Republie les diagnostics de tous les documents ouverts.
+    /// Republishes the diagnostics of all open documents.
     fn publish_all_diagnostics(
         &mut self,
         connection: &Connection,
@@ -185,8 +185,8 @@ impl XmlLanguageServer {
         Ok(())
     }
 
-    /// Demande au client de surveiller les fichiers catalogues (y compris
-    /// hors de l'espace de travail) ; remplace l'enregistrement précédent.
+    /// Asks the client to watch the catalog files (including outside the
+    /// workspace); replaces the previous registration.
     fn register_catalog_watchers(
         &mut self,
         connection: &Connection,
@@ -199,7 +199,7 @@ impl XmlLanguageServer {
                 lsp_server::Request {
                     id: RequestId::from(format!("{id}/unregister")),
                     method: UNREGISTER_CAPABILITY_METHOD.to_owned(),
-                    // Orthographe (sic) imposée par la spécification LSP.
+                    // Spelling (sic) mandated by the LSP specification.
                     params: json!({"unregisterations": [{
                         "id": id,
                         "method": DID_CHANGE_WATCHED_FILES_METHOD,
@@ -234,7 +234,7 @@ impl XmlLanguageServer {
         Ok(())
     }
 
-    /// Lit les réglages de `initializationOptions`.
+    /// Reads the settings from `initializationOptions`.
     fn initialize_settings(&mut self, initialize_params: &Value) {
         self.initialization_settings = initialize_params
             .get("initializationOptions")
@@ -248,8 +248,8 @@ impl XmlLanguageServer {
             .unwrap_or(false);
     }
 
-    /// Demande la section `xml` au client (`workspace/configuration`) ; la
-    /// réponse est traitée par [`Self::handle_response`].
+    /// Requests the `xml` section from the client (`workspace/configuration`);
+    /// the response is handled by [`Self::handle_response`].
     fn request_configuration(
         &mut self,
         connection: &Connection,
@@ -292,8 +292,8 @@ impl XmlLanguageServer {
         self.apply_settings(connection, &section)
     }
 
-    /// `workspace/didChangeConfiguration` : utilise la section `xml` poussée
-    /// par le client, sinon la redemande.
+    /// `workspace/didChangeConfiguration`: uses the `xml` section pushed by
+    /// the client, otherwise requests it again.
     fn configuration_changed(
         &mut self,
         connection: &Connection,
@@ -318,8 +318,8 @@ impl XmlLanguageServer {
         }
     }
 
-    /// Remplace les réglages par `initializationOptions` + `section` et
-    /// republie les diagnostics des documents ouverts si la validation change.
+    /// Replaces the settings with `initializationOptions` + `section` and
+    /// republishes the diagnostics of open documents if validation changes.
     fn apply_settings(
         &mut self,
         connection: &Connection,
@@ -341,7 +341,7 @@ impl XmlLanguageServer {
         self.publish_all_diagnostics(connection)
     }
 
-    /// Publie les diagnostics du document ouvert `uri`.
+    /// Publishes the diagnostics of the open document `uri`.
     fn publish_diagnostics(
         &mut self,
         connection: &Connection,
@@ -361,14 +361,14 @@ impl XmlLanguageServer {
         Ok(())
     }
 
-    /// Paramètres `publishDiagnostics` de `uri` selon `xml.validation.*`.
+    /// `publishDiagnostics` parameters of `uri` according to `xml.validation.*`.
     fn diagnostics(&mut self, uri: &str, source: &str) -> Value {
         let validation = self.settings.validation.clone();
         if !validation.enabled {
             return json!({"uri": uri, "diagnostics": []});
         }
         if dtd::is_dtd_uri(uri) {
-            // Fichier DTD : ni bonne formation XML, ni schéma.
+            // DTD file: neither XML well-formedness nor schema.
             let diagnostics = self.dtd_diagnostics(uri, source);
             return json!({"uri": uri, "diagnostics": diagnostics});
         }
@@ -390,7 +390,7 @@ impl XmlLanguageServer {
         diagnostics_params(uri, source, &diagnostics, &extra)
     }
 
-    /// Contexte de chargement des DTD.
+    /// DTD loading context.
     fn dtd_context(&mut self) -> dtd::DtdContext<'_> {
         dtd::DtdContext {
             documents: &self.documents,
@@ -399,7 +399,7 @@ impl XmlLanguageServer {
         }
     }
 
-    /// Grammaire DTD du document (`<!DOCTYPE>` ou fichier `.dtd`).
+    /// DTD grammar of the document (`<!DOCTYPE>` or `.dtd` file).
     fn dtd_grammar(&mut self, uri: &str, source: &str) -> Option<dtd::Grammar> {
         dtd::load(&mut self.dtd_context(), uri, source)
     }
@@ -409,8 +409,8 @@ impl XmlLanguageServer {
         dtd::diagnostics(&mut self.dtd_context(), uri, source, &validation)
     }
 
-    /// Le document est associé à une grammaire (XSD, DTD, `xml-model`,
-    /// `xml.fileAssociations`) ou est lui-même un schéma.
+    /// The document is associated with a grammar (XSD, DTD, `xml-model`,
+    /// `xml.fileAssociations`) or is itself a schema.
     fn has_grammar(&self, uri: &str, source: &str) -> bool {
         if is_xsd_uri(uri) || dtd::is_dtd_uri(uri) || !self.associated_schemas(uri).is_empty() {
             return true;
@@ -436,7 +436,7 @@ impl XmlLanguageServer {
         })
     }
 
-    /// Schémas associés à `uri` par `xml.fileAssociations`.
+    /// Schemas associated with `uri` by `xml.fileAssociations`.
     fn associated_schemas(&self, uri: &str) -> Vec<PathBuf> {
         if self.settings.file_associations.is_empty() || is_xsd_uri(uri) {
             return Vec::new();
@@ -449,8 +449,8 @@ impl XmlLanguageServer {
         )
     }
 
-    /// `xsi:schemaLocation` / `xsi:noNamespaceSchemaLocation` du document,
-    /// résolus via les catalogues XML.
+    /// `xsi:schemaLocation` / `xsi:noNamespaceSchemaLocation` of the document,
+    /// resolved through the XML catalogs.
     fn resolve_schema_locations(
         &self,
         uri: &str,
@@ -463,7 +463,7 @@ impl XmlLanguageServer {
         )
     }
 
-    /// Schémas déclarés par le document, ou à défaut associés par
+    /// Schemas declared by the document, or failing that associated by
     /// `xml.fileAssociations`.
     fn schema_references(
         &self,
@@ -516,8 +516,8 @@ impl XmlLanguageServer {
                 return Ok(false);
             }
             DID_CHANGE_WATCHED_FILES_METHOD => {
-                // Les catalogues modifiés sont relus par `refresh_catalogs`
-                // avant chaque message.
+                // Modified catalogs are reread by `refresh_catalogs`
+                // before each message.
                 self.workspace.files_changed(&notification.params);
                 return Ok(false);
             }
@@ -579,8 +579,8 @@ impl XmlLanguageServer {
         Ok(false)
     }
 
-    /// Demande au client de signaler les fichiers XML modifiés sur disque
-    /// (invalide l'index `workspace/symbol`).
+    /// Asks the client to report XML files modified on disk
+    /// (invalidates the `workspace/symbol` index).
     fn register_watched_files(
         &self,
         connection: &Connection,
@@ -620,7 +620,7 @@ impl XmlLanguageServer {
         let offset = offset_at(&source, line, character);
         let grammar = self.dtd_grammar(uri, &source);
         if dtd::in_dtd_text(grammar.as_ref(), uri, &source, offset) {
-            // Fichier DTD ou sous-ensemble interne : propositions DTD seules.
+            // DTD file or internal subset: DTD suggestions only.
             let items = dtd::completions(grammar.as_ref(), uri, &source, offset);
             return Some(json!({"isIncomplete": false, "items": items}));
         }
@@ -855,7 +855,7 @@ impl XmlLanguageServer {
         None
     }
 
-    /// Répond à `textDocument/codeAction` (liste vide sans action).
+    /// Answers `textDocument/codeAction` (empty list without actions).
     fn code_action(&mut self, params: &Value) -> Option<Value> {
         let uri = params.get("textDocument")?.get("uri")?.as_str()?;
         let source = self.documents.get(uri)?.clone();
@@ -962,9 +962,9 @@ impl XmlLanguageServer {
         rename::prepare_rename(source, offset)
     }
 
-    /// Retourne un `WorkspaceEdit` (`changes`), `None` si rien n'est
-    /// renommable à la position demandée. Le renommage d'un composant XSD
-    /// global est propagé aux documents ouverts qui référencent le schéma.
+    /// Returns a `WorkspaceEdit` (`changes`), `None` if nothing can be
+    /// renamed at the requested position. Renaming a global XSD component
+    /// is propagated to the open documents referencing the schema.
     fn rename(&self, params: &Value) -> Result<Option<Value>, rename::RenameError> {
         let location = (|| {
             let uri = params.get("textDocument")?.get("uri")?.as_str()?;
@@ -980,7 +980,7 @@ impl XmlLanguageServer {
         let Some(new_name) = params.get("newName").and_then(Value::as_str) else {
             return Err(rename::RenameError {
                 code: rename::INVALID_PARAMS,
-                message: "Paramètre `newName` manquant.".to_owned(),
+                message: "Missing `newName` parameter.".to_owned(),
             });
         };
         let Some(plan) = rename::rename(source, offset, new_name)? else {
@@ -1068,7 +1068,7 @@ impl XmlLanguageServer {
         let uri = params.get("textDocument")?.get("uri")?.as_str()?;
         let source = self.documents.get(uri)?;
         if !self.settings.format.enabled || dtd::is_dtd_uri(uri) {
-            // Le formateur XML ne s'applique pas aux fichiers DTD.
+            // The XML formatter does not apply to DTD files.
             return Some(json!([]));
         }
         let options = formatting::format_options(params, source, &self.settings.format);
@@ -1255,7 +1255,7 @@ fn load_schema_graph(
         if is_remote_location(&path) {
             errors.push(SchemaLoadError {
                 message: format!(
-                    "schéma distant non résolu : {} (associez-le à un fichier local avec un catalogue XML, réglage xml.catalogs)",
+                    "unresolved remote schema: {} (map it to a local file with an XML catalog, xml.catalogs setting)",
                     path.display()
                 ),
                 path,
@@ -1269,7 +1269,7 @@ fn load_schema_graph(
             Err(error) => {
                 errors.push(SchemaLoadError {
                     path: path.clone(),
-                    message: format!("impossible de lire le schéma : {error}"),
+                    message: format!("cannot read the schema: {error}"),
                     offset: 0,
                     remote: false,
                 });
@@ -1286,7 +1286,7 @@ fn load_schema_graph(
                 Err(error) => {
                     errors.push(SchemaLoadError {
                         path: path.clone(),
-                        message: format!("schéma XSD invalide : {error}"),
+                        message: format!("invalid XSD schema: {error}"),
                         offset: xsd_parse_error_offset(&schema_source),
                         remote: false,
                     });
@@ -1308,7 +1308,7 @@ fn load_schema_graph(
             Ok(dependencies) => queue.extend(dependencies),
             Err(error) => errors.push(SchemaLoadError {
                 path: path.clone(),
-                message: format!("dépendances XSD invalides : {error}"),
+                message: format!("invalid XSD dependencies: {error}"),
                 offset: xsd_parse_error_offset(&schema_source),
                 remote: false,
             }),
@@ -1352,7 +1352,7 @@ fn xsd_schema_error_diagnostic(error: SchemaLoadError) -> Value {
     })
 }
 
-/// Avertissements d'un catalogue XML ouvert : cibles locales introuvables.
+/// Warnings of an open XML catalog: local targets not found.
 fn catalog_diagnostics(uri: &str, source: &str) -> Vec<Value> {
     catalog::catalog_problems(uri, source)
         .into_iter()
@@ -1372,7 +1372,7 @@ fn catalog_diagnostics(uri: &str, source: &str) -> Vec<Value> {
         .collect()
 }
 
-/// Erreur `xml.validation.disallowDocTypeDecl` sur chaque `<!DOCTYPE>`.
+/// `xml.validation.disallowDocTypeDecl` error on each `<!DOCTYPE>`.
 fn doctype_diagnostics(source: &str) -> Vec<Value> {
     xml_core::tags::scan_markup(source)
         .into_iter()
@@ -1390,13 +1390,13 @@ fn doctype_diagnostics(source: &str) -> Vec<Value> {
                 "source": "xml-lsp",
                 "code": "doctype-disallowed",
                 "data": {"category": "xml", "kind": "doctypeDisallowed"},
-                "message": "La déclaration DOCTYPE est interdite (xml.validation.disallowDocTypeDecl).",
+                "message": "DOCTYPE declarations are not allowed (xml.validation.disallowDocTypeDecl).",
             })
         })
         .collect()
 }
 
-/// Diagnostic `xml.validation.noGrammar` sur le nom de l'élément racine.
+/// `xml.validation.noGrammar` diagnostic on the name of the root element.
 fn no_grammar_diagnostic(source: &str, severity: u8) -> Option<Value> {
     let tree = xml_core::tags::XmlTagTree::parse(source);
     let root = tree.elements().first()?;
@@ -1410,7 +1410,7 @@ fn no_grammar_diagnostic(source: &str, severity: u8) -> Option<Value> {
         "source": "xml-lsp",
         "code": "no-grammar",
         "data": {"category": "xml", "kind": "noGrammar"},
-        "message": "Aucune grammaire (XSD, DTD) n'est associée à ce document.",
+        "message": "No grammar (XSD, DTD) is associated with this document.",
     }))
 }
 
@@ -1622,7 +1622,7 @@ fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
     server.workspace = symbols::WorkspaceIndex::from_initialize_params(&initialize_params);
     server.initialize_settings(&initialize_params);
     server.update_catalogs();
-    // `initialize_finish` a déjà consommé la notification `initialized`.
+    // `initialize_finish` has already consumed the `initialized` notification.
     server.register_watched_files(&connection)?;
     server.register_catalog_watchers(&connection)?;
     server.request_configuration(&connection)?;
@@ -2236,7 +2236,7 @@ mod tests {
                 "wordPattern": linked_editing::XML_NAME_WORD_PATTERN,
             }))
         );
-        // Élément auto-fermant, contenu et document inconnu : `null`.
+        // Self-closing element, content and unknown document: `null`.
         assert_eq!(
             request(4, LINKED_EDITING_RANGE_METHOD, params(1, 13)),
             Some(Value::Null)
@@ -2493,8 +2493,8 @@ mod tests {
         server_thread.join().expect("server thread should stop");
     }
 
-    /// Client LSP de test : envoie des messages et collecte les
-    /// notifications `publishDiagnostics` reçues.
+    /// Test LSP client: sends messages and collects the received
+    /// `publishDiagnostics` notifications.
     struct TestClient {
         connection: Connection,
         diagnostics: std::cell::RefCell<Vec<Value>>,
@@ -2518,7 +2518,7 @@ mod tests {
             );
         }
 
-        /// Prochain message qui n'est pas une publication de diagnostics.
+        /// Next message that is not a diagnostics publication.
         fn next(&self) -> Message {
             loop {
                 match self
@@ -2555,8 +2555,8 @@ mod tests {
             }
         }
 
-        /// Diagnostics publiés jusqu'ici, puis vidés. Une requête
-        /// intermédiaire garantit que les publications précédentes sont reçues.
+        /// Diagnostics published so far, then cleared. An intermediate
+        /// request guarantees that previous publications have been received.
         fn take_diagnostics(&self, id: i32) -> Vec<Value> {
             self.request(id, WORKSPACE_SYMBOL_METHOD, json!({"query": "\u{0}"}));
             std::mem::take(&mut *self.diagnostics.borrow_mut())
@@ -2572,7 +2572,7 @@ mod tests {
             .collect()
     }
 
-    /// Prochain message : une requête serveur -> client `method`, acquittée.
+    /// Next message: a server -> client `method` request, acknowledged.
     fn expect_server_request(client: &TestClient, method: &str) -> Value {
         match client.next() {
             Message::Request(request) => {
@@ -2584,7 +2584,7 @@ mod tests {
         }
     }
 
-    /// `data.kind` des diagnostics publiés.
+    /// `data.kind` of the published diagnostics.
     fn diagnostic_kinds(publication: &Value) -> Vec<String> {
         publication["diagnostics"]
             .as_array()
@@ -2606,7 +2606,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(directory.join("schemas")).expect("directory should be created");
         std::fs::create_dir_all(directory.join("my schemas")).expect("directory should be created");
-        let strict = "<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\">\n  <xs:element name=\"project\">\n    <xs:annotation><xs:documentation>Projet résolu par catalogue.</xs:documentation></xs:annotation>\n    <xs:complexType><xs:sequence><xs:element name=\"name\" type=\"xs:string\"/></xs:sequence></xs:complexType>\n  </xs:element>\n</xs:schema>";
+        let strict = "<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\">\n  <xs:element name=\"project\">\n    <xs:annotation><xs:documentation>Project resolved through a catalog.</xs:documentation></xs:annotation>\n    <xs:complexType><xs:sequence><xs:element name=\"name\" type=\"xs:string\"/></xs:sequence></xs:complexType>\n  </xs:element>\n</xs:schema>";
         let lenient = "<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\">\n  <xs:element name=\"project\">\n    <xs:complexType><xs:sequence><xs:element name=\"other\" type=\"xs:string\"/></xs:sequence></xs:complexType>\n  </xs:element>\n</xs:schema>";
         let strict_path = directory.join("schemas/project.xsd");
         std::fs::write(&strict_path, strict).expect("schema should be written");
@@ -2674,20 +2674,20 @@ mod tests {
         }
         let published = client.take_diagnostics(2);
         assert_eq!(published.len(), 4, "{published:?}");
-        // URL distante résolue hors ligne par le catalogue : validation XSD.
+        // Remote URL resolved offline by the catalog: XSD validation.
         assert_eq!(published[0]["uri"], remote_uri);
         assert!(
             diagnostic_kinds(&published[0]).contains(&"validation".to_owned()),
             "{published:?}"
         );
         assert!(!diagnostic_kinds(&published[0]).contains(&"loading".to_owned()));
-        // Chemin encodé en pourcentage (`my%20schemas`) : même validation.
+        // Percent-encoded path (`my%20schemas`): same validation.
         assert!(
             diagnostic_kinds(&published[1]).contains(&"validation".to_owned()),
             "{published:?}"
         );
         assert!(!diagnostic_kinds(&published[1]).contains(&"loading".to_owned()));
-        // URL non cataloguée : avertissement explicite, pas d'erreur.
+        // Uncataloged URL: explicit warning, no error.
         assert_eq!(diagnostic_kinds(&published[2]), vec!["loading"]);
         assert_eq!(published[2]["diagnostics"][0]["severity"], 2);
         assert!(
@@ -2696,14 +2696,14 @@ mod tests {
                 .unwrap()
                 .contains("xml.catalogs")
         );
-        // Catalogue ouvert : cible absente signalée, pas de « noGrammar ».
+        // Open catalog: missing target reported, no "noGrammar".
         assert_eq!(codes(&published[3]), vec!["catalog-target-missing"]);
         assert_eq!(
             published[3]["diagnostics"][0]["range"],
             json!({"start": {"line": 2, "character": 21}, "end": {"line": 2, "character": 39}})
         );
 
-        // Complétion guidée par le schéma catalogué.
+        // Completion driven by the cataloged schema.
         let character = remote.find("<other").unwrap() + 1;
         let completion = client.request(
             3,
@@ -2718,7 +2718,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(labels.contains(&"name".to_owned()), "{labels:?}");
 
-        // Survol : documentation du schéma catalogué.
+        // Hover: documentation of the cataloged schema.
         let hover = client.request(
             4,
             HOVER_METHOD,
@@ -2728,11 +2728,11 @@ mod tests {
             hover["contents"]["value"]
                 .as_str()
                 .unwrap()
-                .contains("Projet résolu par catalogue."),
+                .contains("Project resolved through a catalog."),
             "{hover:?}"
         );
 
-        // Lien et définition vers le fichier local.
+        // Link and definition to the local file.
         let links = client.request(
             5,
             DOCUMENT_LINK_METHOD,
@@ -2747,7 +2747,7 @@ mod tests {
         );
         assert_eq!(definition[0]["uri"], path_to_uri(&strict_path));
 
-        // Catalogue modifié sur disque : relu, diagnostics republiés.
+        // Catalog modified on disk: reread, diagnostics republished.
         std::fs::write(&catalog_path, catalog("schemas/lenient.xsd"))
             .expect("catalog should be written");
         client.notify(
@@ -2767,7 +2767,7 @@ mod tests {
         };
         assert_eq!(remote_publication(&published)["diagnostics"], json!([]));
 
-        // Catalogues retirés des réglages : l'URL redevient distante.
+        // Catalogs removed from the settings: the URL is remote again.
         client.notify(
             DID_CHANGE_CONFIGURATION_METHOD,
             json!({"settings": {"xml": {"catalogs": []}}}),
@@ -2839,7 +2839,7 @@ mod tests {
         );
         let published = client.take_diagnostics(2);
         assert_eq!(published.len(), 3);
-        // Association de fichier : validation XSD sans xsi:schemaLocation.
+        // File association: XSD validation without xsi:schemaLocation.
         assert_eq!(published[0]["uri"], associated_uri);
         assert!(
             codes(&published[0]).contains(&"xsd-validation".to_owned()),
@@ -2851,10 +2851,10 @@ mod tests {
             published[1]["diagnostics"][0]["range"],
             json!({"start": {"line": 0, "character": 1}, "end": {"line": 0, "character": 4}})
         );
-        // Une DTD est une grammaire, mais la déclaration est interdite.
+        // A DTD is a grammar, but the declaration is not allowed.
         assert_eq!(codes(&published[2]), vec!["doctype-disallowed"]);
 
-        // Complétion guidée par le schéma associé, sans fermeture automatique.
+        // Completion driven by the associated schema, without auto-closing.
         let labels = |id: i32, character: u32| {
             let completion = client.request(
                 id,
@@ -2935,7 +2935,7 @@ mod tests {
             }
             message => panic!("unexpected message {message:?}"),
         };
-        // Le client ne renvoie rien : les options d'initialisation restent.
+        // The client returns nothing: the initialization options remain.
         answer_configuration(Value::Null);
 
         let source = "<root><a></root>";
@@ -2947,7 +2947,7 @@ mod tests {
         assert_eq!(published.len(), 1);
         assert!(!codes(&published[0]).is_empty());
 
-        // Réglages poussés : la validation est désactivée, diagnostics vidés.
+        // Pushed settings: validation is disabled, diagnostics cleared.
         client.notify(
             DID_CHANGE_CONFIGURATION_METHOD,
             json!({"settings": {"xml": {"validation": {"enabled": false}}}}),
@@ -2955,8 +2955,8 @@ mod tests {
         let published = client.take_diagnostics(3);
         assert_eq!(published, vec![json!({"uri": uri, "diagnostics": []})]);
 
-        // Un changement sans effet sur la validation ne republie rien, et les
-        // options d'initialisation restent la base.
+        // A change without effect on validation republishes nothing, and the
+        // initialization options remain the base.
         client.notify(
             DID_CHANGE_CONFIGURATION_METHOD,
             json!({"settings": {"xml": {"validation": {"enabled": false}, "format": {"insertSpaces": false}}}}),
@@ -2965,7 +2965,7 @@ mod tests {
         let edits = client.request(5, FORMATTING_METHOD, json!({"textDocument": {"uri": uri}}));
         assert_eq!(edits, json!([]), "malformed documents are not formatted");
 
-        // Sans section poussée, le serveur redemande la configuration.
+        // Without a pushed section, the server requests the configuration again.
         client.notify(DID_CHANGE_CONFIGURATION_METHOD, json!({"settings": null}));
         answer_configuration(json!({"validation": {"enabled": true}}));
         let published = client.take_diagnostics(6);
@@ -2973,7 +2973,7 @@ mod tests {
         assert_eq!(published[0]["uri"], uri);
         assert!(!codes(&published[0]).is_empty());
 
-        // Formatage désactivé.
+        // Formatting disabled.
         client.notify(
             DID_CHANGE_CONFIGURATION_METHOD,
             json!({"settings": {"xml": {"format": {"enabled": false}}}}),
@@ -3034,14 +3034,14 @@ mod tests {
             codes_for(&mut server, source, on_valid.clone()),
             vec!["xsd-validation"]
         );
-        // Schéma introuvable : seule l'erreur de chargement est signalée.
+        // Schema not found: only the loading error is reported.
         let diagnostics = {
             server.settings = settings::Settings::from_value(&on_valid);
             server.diagnostics(&uri, broken)
         };
         assert_eq!(diagnostics["diagnostics"].as_array().map(Vec::len), Some(1));
         assert_eq!(diagnostics["diagnostics"][0]["data"]["kind"], "loading");
-        // Un document lié à un schéma n'est pas signalé par noGrammar.
+        // A document bound to a schema is not reported by noGrammar.
         assert_eq!(
             codes_for(
                 &mut server,
@@ -3310,7 +3310,7 @@ mod tests {
         assert_eq!(symbols[1]["kind"], symbols::kind::CLASS);
         assert_eq!(symbols[2]["containerName"], "bean");
 
-        // Un buffer ouvert non enregistré remplace le fichier sur disque.
+        // An unsaved open buffer replaces the file on disk.
         notify(
             DID_OPEN_METHOD,
             json!({"textDocument": {"uri": beans_uri, "text": "<beans>\r\n  <bean id=\"orderRepository\"><property name=\"dataSource\"/></bean>\r\n</beans>"}}),
@@ -3431,8 +3431,8 @@ mod tests {
         );
         notify("initialized", json!({}));
 
-        // Chaque correctif rapide préféré est appliqué puis le document est
-        // revalidé : le diagnostic corrigé disparaît.
+        // Each preferred quick fix is applied, then the document is
+        // revalidated: the fixed diagnostic disappears.
         let mut source = "<items xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"\r\n       xsi:noNamespaceSchemaLocation=\"items.xsd\">\r\n  <item id=\"é1\" kind=\"bok\"></itme>\r\n  <item/>\r\n</items>".to_owned();
         notify(
             DID_OPEN_METHOD,
@@ -3483,9 +3483,9 @@ mod tests {
         assert_eq!(
             applied,
             vec![
-                "Remplacer </itme> par </item>",
-                "Ajouter les attributs requis id, kind",
-                "Remplacer par `book`",
+                "Replace </itme> with </item>",
+                "Add required attributes id, kind",
+                "Replace with `book`",
             ]
         );
         assert_eq!(
@@ -3493,7 +3493,7 @@ mod tests {
             "<items xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"\r\n       xsi:noNamespaceSchemaLocation=\"items.xsd\">\r\n  <item id=\"é1\" kind=\"book\"></item>\r\n  <item id=\"\" kind=\"book\"/>\r\n</items>"
         );
 
-        // Réécriture et liaison de schéma sur un document sans schéma.
+        // Rewrite and schema binding on a document without a schema.
         let other = path_to_uri(&directory.join("other.xml"));
         notify(
             DID_OPEN_METHOD,
@@ -3523,11 +3523,8 @@ mod tests {
         assert_eq!(
             titles,
             vec![
-                (
-                    "refactor.rewrite",
-                    "Convertir <a></a> en élément auto-fermant <a/>"
-                ),
-                ("source", "Lier le document au schéma XSD items.xsd"),
+                ("refactor.rewrite", "Convert <a></a> to self-closing <a/>"),
+                ("source", "Bind the document to the XSD schema items.xsd"),
             ]
         );
         assert_eq!(
@@ -3557,11 +3554,11 @@ mod tests {
         let dtd_path = directory.join("note.dtd");
         std::fs::write(
             &dtd_path,
-            "<!-- Note racine. -->\n<!ELEMENT note (to, body?)>\n<!ELEMENT to (#PCDATA)>\n<!ELEMENT body (#PCDATA)>\n<!ATTLIST note lang (fr | en) #REQUIRED>\n",
+            "<!-- Root note. -->\n<!ELEMENT note (to, body?)>\n<!ELEMENT to (#PCDATA)>\n<!ELEMENT body (#PCDATA)>\n<!ATTLIST note lang (fr | en) #REQUIRED>\n",
         )
         .expect("dtd should be written");
         let uri = path_to_uri(&directory.join("note.xml"));
-        // Sous-ensemble interne + DTD externe, fins de ligne CRLF.
+        // Internal subset + external DTD, CRLF line endings.
         let source = "<!DOCTYPE note SYSTEM \"note.dtd\" [\r\n  <!ENTITY sig \"Alice\">\r\n]>\r\n<note lang=\"de\">\r\n  <to>Bob &sig; &unknown;</to>\r\n  <extra/>\r\n</note>";
         let broken_uri = path_to_uri(&directory.join("broken.dtd"));
         let broken = "<!ELEMENT a (b | c, d)>\n<!ELEMENT b EMPTY>";
@@ -3612,13 +3609,13 @@ mod tests {
             published[0]["diagnostics"][1]["range"],
             json!({"start": {"line": 3, "character": 12}, "end": {"line": 3, "character": 14}})
         );
-        // Fichier DTD : erreurs DTD seulement (pas de bonne formation XML).
+        // DTD file: DTD errors only (no XML well-formedness).
         assert_eq!(codes(&published[1]), vec!["dtd-grammar"]);
         assert_eq!(
             published[1]["diagnostics"][0]["range"]["start"],
             json!({"line": 0, "character": 18})
         );
-        // Document en cours de saisie : erreurs XML, pas d'erreur DTD.
+        // Document being typed: XML errors, no DTD error.
         assert!(
             !codes(&published[2])
                 .iter()
@@ -3626,7 +3623,7 @@ mod tests {
             "{published:?}"
         );
 
-        // Complétion : enfants permis par le modèle de contenu.
+        // Completion: children allowed by the content model.
         let completion = client.request(
             3,
             COMPLETION_METHOD,
@@ -3642,7 +3639,7 @@ mod tests {
             .expect("`to` should be proposed");
         assert_eq!(to["detail"], "<!ELEMENT to (#PCDATA)>");
         assert!(!items.iter().any(|item| item["label"] == "body"));
-        // Complétion dans le sous-ensemble interne.
+        // Completion in the internal subset.
         let completion = client.request(
             4,
             COMPLETION_METHOD,
@@ -3659,7 +3656,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(labels, vec!["ELEMENT", "ATTLIST", "ENTITY", "NOTATION"]);
 
-        // Survol : déclaration, attributs et commentaire de la DTD externe.
+        // Hover: declaration, attributes and comment of the external DTD.
         let hover = client.request(
             5,
             HOVER_METHOD,
@@ -3674,13 +3671,13 @@ mod tests {
             markdown.contains("<!ATTLIST note lang (fr | en) #REQUIRED>"),
             "{markdown}"
         );
-        assert!(markdown.contains("Note racine."), "{markdown}");
+        assert!(markdown.contains("Root note."), "{markdown}");
         assert_eq!(
             hover["range"],
             json!({"start": {"line": 3, "character": 1}, "end": {"line": 3, "character": 5}})
         );
 
-        // Définition : entité du sous-ensemble interne, élément de la DTD.
+        // Definition: entity of the internal subset, element of the DTD.
         let definition = client.request(
             6,
             DEFINITION_METHOD,
@@ -3701,7 +3698,7 @@ mod tests {
             json!({"line": 2, "character": 10})
         );
 
-        // Correctifs : valeur énumérée et entité à déclarer (CRLF conservé).
+        // Fixes: enumerated value and entity to declare (CRLF preserved).
         let actions = client.request(
             8,
             CODE_ACTION_METHOD,
@@ -3718,9 +3715,9 @@ mod tests {
             .map(|action| action["title"].as_str().unwrap().to_owned())
             .collect::<Vec<_>>();
         for expected in [
-            "Déclarer l'entité « &unknown; » dans le DOCTYPE",
-            "Remplacer par « fr »",
-            "Remplacer par « en »",
+            "Declare the entity '&unknown;' in the DOCTYPE",
+            "Replace with 'fr'",
+            "Replace with 'en'",
         ] {
             assert!(titles.iter().any(|title| title == expected), "{titles:?}");
         }
@@ -3728,7 +3725,7 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|action| action["title"] == "Déclarer l'entité « &unknown; » dans le DOCTYPE")
+            .find(|action| action["title"] == "Declare the entity '&unknown;' in the DOCTYPE")
             .unwrap();
         assert_eq!(
             declare["edit"]["changes"][&uri][0],
@@ -3739,7 +3736,7 @@ mod tests {
         );
         assert_eq!(declare["diagnostics"][0]["data"]["kind"], "undefinedEntity");
 
-        // Symboles et formatage d'un fichier DTD.
+        // Symbols and formatting of a DTD file.
         let symbols = client.request(
             9,
             SYMBOL_METHOD,
@@ -3759,7 +3756,7 @@ mod tests {
         );
         assert_eq!(formatting, json!([]));
 
-        // Correction du document : plus aucun diagnostic.
+        // Fixing the document: no diagnostics left.
         client.notify(
             DID_CHANGE_METHOD,
             json!({
@@ -3860,7 +3857,7 @@ i:noNamespaceSchemaLocation=\"missing.xsd\">\r\n  \
             json!({"textDocument": {"uri": uri, "text": source}}),
         );
 
-        // Valeur en colonne 24 ; "urn:😀 " : l'emoji compte pour deux unités UTF-16.
+        // Value at column 24; "urn:😀 ": the emoji counts as two UTF-16 code units.
         let schema = 24 + 7;
         let schema_range = range((2, schema), (2, schema + 22));
         assert_eq!(
@@ -3873,17 +3870,17 @@ i:noNamespaceSchemaLocation=\"missing.xsd\">\r\n  \
                 {
                     "range": range((0, 39), (0, 48)),
                     "target": path_to_uri(&stylesheet_path),
-                    "tooltip": format!("Ouvrir la feuille de style : {}", stylesheet_path.display()),
+                    "tooltip": format!("Open stylesheet: {}", stylesheet_path.display()),
                 },
                 {
                     "range": schema_range,
                     "target": path_to_uri(&schema_path),
-                    "tooltip": format!("Ouvrir le schéma XSD : {}", schema_path.display()),
+                    "tooltip": format!("Open XSD schema: {}", schema_path.display()),
                 },
                 {
                     "range": range((2, schema + 29), (2, schema + 54)),
                     "target": "https://example.com/x.xsd",
-                    "tooltip": "Ouvrir le schéma XSD : https://example.com/x.xsd",
+                    "tooltip": "Open XSD schema: https://example.com/x.xsd",
                 },
             ]))
         );
@@ -3911,10 +3908,10 @@ i:noNamespaceSchemaLocation=\"missing.xsd\">\r\n  \
             definition(4, 0, 42).unwrap()[0]["targetUri"],
             path_to_uri(&stylesheet_path)
         );
-        // URL et fichier absent : pas d'emplacement (l'URL reste un lien).
+        // URL and missing file: no location (the URL remains a link).
         assert_eq!(definition(5, 2, schema + 30), Some(json!([])));
         assert_eq!(definition(6, 3, 36), Some(json!([])));
-        // Hors des valeurs de lien, la définition d'élément est conservée.
+        // Outside link values, element definition is kept.
         let element = definition(7, 1, 5).expect("element definition should be found");
         assert_eq!(element[0]["uri"], uri);
         assert_eq!(element[0]["range"], range((1, 0), (1, 5)));
@@ -3993,7 +3990,7 @@ i:noNamespaceSchemaLocation=\"missing.xsd\">\r\n  \
         );
         notify("initialized", json!({}));
 
-        // Formatage complet : quatre espaces, CRLF, UTF-16, blancs finaux.
+        // Whole formatting: four spaces, CRLF, UTF-16, trailing whitespace.
         let uri = "file:///crlf.xml";
         let source = "<root>\r\n<outer><😀 a=\"1\"><b/></😀></outer>\r\n<c>t  \r\n</c>\r\n</root>";
         open(uri, source);
@@ -4038,7 +4035,7 @@ i:noNamespaceSchemaLocation=\"missing.xsd\">\r\n  \
             json!([]),
             "formatting twice must not change anything"
         );
-        // Plage sur un document déjà formaté : aucune modification.
+        // Range on an already formatted document: no change.
         assert_eq!(
             request(
                 4,
@@ -4052,8 +4049,8 @@ i:noNamespaceSchemaLocation=\"missing.xsd\">\r\n  \
             json!([])
         );
 
-        // Formatage de plage avec tabulations dans un document invalide hors
-        // de la plage.
+        // Range formatting with tabs in a document that is invalid outside
+        // the range.
         let uri = "file:///malformed.xml";
         let source = "<root>\n<broken>\n  <outer><é><b/></é></outer>\n<oops></root>\n";
         open(uri, source);
@@ -4070,21 +4067,21 @@ i:noNamespaceSchemaLocation=\"missing.xsd\">\r\n  \
             );
             formatting::apply_edits(source, &edits)
         };
-        // Élément imbriqué : `<b/>` commence à la colonne UTF-16 12.
+        // Nested element: `<b/>` starts at UTF-16 column 12.
         assert_eq!(
             format_range(5, range((2, 12), (2, 16))),
             "<root>\n<broken>\n  <outer><é>\n\t\t\t<b/>\n\t\t</é></outer>\n<oops></root>\n"
         );
-        // Plage commençant dans `<outer` et finissant dans `</é>` : étendue à
-        // l'élément `outer` complet.
+        // Range starting in `<outer` and ending in `</é>`: expanded to the
+        // whole `outer` element.
         let expanded = format_range(6, range((2, 4), (2, 17)));
         assert_eq!(
             expanded,
             "<root>\n<broken>\n\t<outer>\n\t\t<é>\n\t\t\t<b/>\n\t\t</é>\n\t</outer>\n<oops></root>\n"
         );
-        // La région invalide n'est jamais modifiée.
+        // The invalid region is never modified.
         assert_eq!(format_range(7, range((3, 0), (3, 6))), source);
-        // Idempotence du formatage de plage.
+        // Range formatting is idempotent.
         notify(
             DID_CHANGE_METHOD,
             json!({
@@ -4104,7 +4101,7 @@ i:noNamespaceSchemaLocation=\"missing.xsd\">\r\n  \
             ),
             json!([])
         );
-        // Le formatage complet refuse le document invalide.
+        // Whole formatting refuses the invalid document.
         assert_eq!(
             request(
                 9,
@@ -4198,7 +4195,7 @@ i:noNamespaceSchemaLocation=\"missing.xsd\">\r\n  \
                 {"range": range(2, 14, 18), "newText": "entry"},
             ]}}))
         );
-        // Préfixe : déclaration et utilisations, positions UTF-16.
+        // Prefix: declaration and uses, UTF-16 positions.
         assert_eq!(
             request(4, PREPARE_RENAME_METHOD, params(1, 4)).result,
             Some(json!({"range": range(1, 3, 5), "placeholder": "ns"}))
@@ -4216,7 +4213,7 @@ i:noNamespaceSchemaLocation=\"missing.xsd\">\r\n  \
             request(6, PREPARE_RENAME_METHOD, params(1, 8)).result,
             Some(json!({"range": range(1, 3, 9), "placeholder": "ns:é😀"}))
         );
-        // Contenu : rien à renommer.
+        // Content: nothing to rename.
         assert_eq!(
             request(7, PREPARE_RENAME_METHOD, params(2, 10)).result,
             Some(Value::Null)
@@ -4225,7 +4222,7 @@ i:noNamespaceSchemaLocation=\"missing.xsd\">\r\n  \
             request(8, RENAME_METHOD, rename_params(2, 10, "x")).result,
             Some(Value::Null)
         );
-        // Nom invalide : erreur InvalidParams.
+        // Invalid name: InvalidParams error.
         let invalid = request(9, RENAME_METHOD, rename_params(2, 16, "1 bad"));
         let error = invalid.error.expect("an error should be returned");
         assert_eq!(error.code, rename::INVALID_PARAMS);
@@ -4398,7 +4395,7 @@ i:noNamespaceSchemaLocation=\"missing.xsd\">\r\n  \
         match diagnostics_notification {
             Message::Notification(notification) => {
                 assert_eq!(notification.method, PUBLISH_DIAGNOSTICS_METHOD);
-                // Élément non fermé : signalé sur le nom de sa balise ouvrante.
+                // Unclosed element: reported on the name of its start tag.
                 assert_eq!(
                     notification.params["diagnostics"][0]["range"],
                     json!({
@@ -4901,7 +4898,7 @@ i:noNamespaceSchemaLocation=\"missing.xsd\">\r\n  \
             Some(json!({
                 "contents": {
                     "kind": "markdown",
-                    "value": format!("**Élément** `<order>`\n\n- Espace de noms : `urn:order`\n- Type : complexe anonyme\n\nA customer order.\n\nSource : [order.xsd]({schema_uri})"),
+                    "value": format!("**Element** `<order>`\n\n- Namespace: `urn:order`\n- Type: anonymous complex\n\nA customer order.\n\nSource: [order.xsd]({schema_uri})"),
                 },
                 "range": {"start": {"line": 3, "character": 2}, "end": {"line": 3, "character": 7}},
             }))
@@ -4912,18 +4909,15 @@ i:noNamespaceSchemaLocation=\"missing.xsd\">\r\n  \
             json!({"start": {"line": 2, "character": 3}, "end": {"line": 2, "character": 9}})
         );
         let status = status["contents"]["value"].as_str().unwrap();
-        assert!(status.contains("- Type : `o:Status` (restriction de `xs:string`)"));
+        assert!(status.contains("- Type: `o:Status` (restriction of `xs:string`)"));
         assert!(status.contains("Order status."), "{status}");
         let priority = request(4, HOVER_METHOD, params(&document_uri, 1, 50)).unwrap();
         let priority = priority["contents"]["value"].as_str().unwrap();
         assert!(
-            priority.starts_with("**Attribut** `priority`"),
+            priority.starts_with("**Attribute** `priority`"),
             "{priority}"
         );
-        assert!(
-            priority.contains("- Utilisation : obligatoire"),
-            "{priority}"
-        );
+        assert!(priority.contains("- Use: required"), "{priority}");
         assert!(priority.contains("Priority level."), "{priority}");
         let value = request(5, HOVER_METHOD, params(&document_uri, 2, 11)).unwrap();
         assert_eq!(
@@ -4932,11 +4926,11 @@ i:noNamespaceSchemaLocation=\"missing.xsd\">\r\n  \
         );
         let value = value["contents"]["value"].as_str().unwrap();
         assert!(value.contains("Not shipped yet."), "{value}");
-        assert!(value.contains("- Valeurs autorisées : `open`, `closed`"));
+        assert!(value.contains("- Allowed values: `open`, `closed`"));
         assert_eq!(
             request(6, HOVER_METHOD, params("file:///plain.xml", 0, 2)),
             Some(json!({
-                "contents": {"kind": "markdown", "value": "**Élément** `<note>`"},
+                "contents": {"kind": "markdown", "value": "**Element** `<note>`"},
                 "range": {"start": {"line": 0, "character": 1}, "end": {"line": 0, "character": 5}},
             }))
         );

@@ -1,26 +1,26 @@
-//! `textDocument/documentLink` et navigation vers les fichiers référencés,
-//! comme LemMinX.
+//! `textDocument/documentLink` and navigation to referenced files, like
+//! LemMinX.
 //!
-//! Sont reconnus, par espace de noms (le préfixe est résolu via les
-//! déclarations `xmlns`, les préfixes conventionnels `xsi`, `xs`/`xsd`, `xi`
-//! et `xsl` sont acceptés s'ils ne sont pas déclarés) :
+//! Recognized, by namespace (the prefix is resolved through `xmlns`
+//! declarations; the conventional `xsi`, `xs`/`xsd`, `xi` and `xsl` prefixes
+//! are accepted when undeclared):
 //!
-//! - chaque emplacement (un jeton sur deux) de `xsi:schemaLocation` et la
-//!   valeur de `xsi:noNamespaceSchemaLocation` ;
-//! - `schemaLocation` de `xs:include`, `xs:import`, `xs:redefine` et
-//!   `xs:override` ;
-//! - `href` de `xi:include` (XInclude) ;
-//! - `href` de `xsl:import` et `xsl:include` ;
-//! - le pseudo-attribut `href` des instructions `<?xml-stylesheet ...?>` et
-//!   `<?xml-model ...?>` ;
-//! - l'identifiant système de `<!DOCTYPE ... SYSTEM|PUBLIC ...>`.
+//! - each location (every other token) of `xsi:schemaLocation` and the
+//!   value of `xsi:noNamespaceSchemaLocation`;
+//! - `schemaLocation` of `xs:include`, `xs:import`, `xs:redefine` and
+//!   `xs:override`;
+//! - `href` of `xi:include` (XInclude);
+//! - `href` of `xsl:import` and `xsl:include`;
+//! - the `href` pseudo-attribute of the `<?xml-stylesheet ...?>` and
+//!   `<?xml-model ...?>` instructions;
+//! - the system identifier of `<!DOCTYPE ... SYSTEM|PUBLIC ...>`.
 //!
-//! Les chemins relatifs sont résolus par rapport au document (y compris sous
-//! forme encodée en pourcentage), les URL `http(s)` sont conservées telles
-//! quelles. Seuls les fichiers locaux existants et les URL `http(s)`
-//! produisent un lien. `textDocument/definition` sur ces mêmes valeurs mène
-//! au début du fichier cible (0:0), ce qui rend les liens utilisables par
-//! cmd-clic même sans `documentLink`.
+//! Relative paths are resolved against the document (including in
+//! percent-encoded form), `http(s)` URLs are kept as
+//! is. Only existing local files and `http(s)` URLs
+//! produce a link. `textDocument/definition` on the same values leads to
+//! the start of the target file (0:0), which makes the links usable with
+//! cmd-click even without `documentLink`.
 
 use std::{
     ops::Range,
@@ -41,19 +41,19 @@ use crate::{
     uri_to_path,
 };
 
-/// Espace de noms `xsi`.
+/// `xsi` namespace.
 pub const XSI_NAMESPACE: &str = "http://www.w3.org/2001/XMLSchema-instance";
-/// Espace de noms XInclude 1.0.
+/// XInclude 1.0 namespace.
 pub const XINCLUDE_NAMESPACE: &str = "http://www.w3.org/2001/XInclude";
-/// Ancien espace de noms XInclude (brouillon 2003), encore rencontré.
+/// Former XInclude namespace (2003 draft), still found in the wild.
 const XINCLUDE_2003_NAMESPACE: &str = "http://www.w3.org/2003/XInclude";
-/// Espace de noms XSLT.
+/// XSLT namespace.
 pub const XSLT_NAMESPACE: &str = "http://www.w3.org/1999/XSL/Transform";
 
-/// Nature d'une référence vers un autre fichier.
+/// Kind of a reference to another file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkKind {
-    /// Emplacement d'une paire de `xsi:schemaLocation`.
+    /// Location of an `xsi:schemaLocation` pair.
     SchemaLocation,
     /// `xsi:noNamespaceSchemaLocation`.
     NoNamespaceSchemaLocation,
@@ -71,7 +71,7 @@ pub enum LinkKind {
     Stylesheet,
     /// `<?xml-model href="..."?>`.
     XmlModel,
-    /// Identifiant système de `<!DOCTYPE>`.
+    /// System identifier of `<!DOCTYPE>`.
     Doctype,
     /// `xsl:import/@href`.
     XslImport,
@@ -82,47 +82,47 @@ pub enum LinkKind {
 impl LinkKind {
     fn label(self) -> &'static str {
         match self {
-            Self::SchemaLocation | Self::NoNamespaceSchemaLocation => "Ouvrir le schéma XSD",
-            Self::XsdInclude => "Ouvrir le schéma inclus",
-            Self::XsdImport => "Ouvrir le schéma importé",
-            Self::XsdRedefine => "Ouvrir le schéma redéfini",
-            Self::XsdOverride => "Ouvrir le schéma surchargé",
-            Self::XInclude => "Ouvrir le document inclus (XInclude)",
-            Self::Stylesheet => "Ouvrir la feuille de style",
-            Self::XmlModel => "Ouvrir le modèle (xml-model)",
-            Self::Doctype => "Ouvrir la DTD",
-            Self::XslImport => "Ouvrir la feuille XSLT importée",
-            Self::XslInclude => "Ouvrir la feuille XSLT incluse",
+            Self::SchemaLocation | Self::NoNamespaceSchemaLocation => "Open XSD schema",
+            Self::XsdInclude => "Open included schema",
+            Self::XsdImport => "Open imported schema",
+            Self::XsdRedefine => "Open redefined schema",
+            Self::XsdOverride => "Open overridden schema",
+            Self::XInclude => "Open included document (XInclude)",
+            Self::Stylesheet => "Open stylesheet",
+            Self::XmlModel => "Open model (xml-model)",
+            Self::Doctype => "Open DTD",
+            Self::XslImport => "Open imported XSLT stylesheet",
+            Self::XslInclude => "Open included XSLT stylesheet",
         }
     }
 }
 
-/// Référence lexicale vers un autre fichier.
+/// Lexical reference to another file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkReference {
     pub kind: LinkKind,
-    /// Étendue de la valeur dans la source (guillemets et espaces de bord
-    /// exclus).
+    /// Range of the value in the source (quotes and surrounding whitespace
+    /// excluded).
     pub range: Range<usize>,
-    /// Valeur, entités XML résolues.
+    /// Value, XML entities resolved.
     pub value: String,
-    /// Identifiant associé, utilisé par les catalogues XML : espace de noms
-    /// (`xsi:schemaLocation`, `xs:import`) ou identifiant public
+    /// Associated identifier, used by XML catalogs: namespace
+    /// (`xsi:schemaLocation`, `xs:import`) or public identifier
     /// (`<!DOCTYPE … PUBLIC>`).
     pub key: Option<String>,
 }
 
-/// Cible résolue d'une référence.
+/// Resolved target of a reference.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinkTarget {
-    /// Fichier local existant.
+    /// Existing local file.
     File(PathBuf),
-    /// URL `http` ou `https`, conservée telle quelle.
+    /// `http` or `https` URL, kept as is.
     Url(String),
 }
 
 impl LinkTarget {
-    /// URI de la cible (`file://...` ou l'URL).
+    /// URI of the target (`file://...` or the URL).
     pub fn uri(&self) -> String {
         match self {
             Self::File(path) => path_to_uri(path),
@@ -138,7 +138,7 @@ impl LinkTarget {
     }
 }
 
-/// Référence dont la cible a été résolue.
+/// Reference whose target has been resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DocumentLink {
     pub reference: LinkReference,
@@ -146,18 +146,14 @@ pub struct DocumentLink {
 }
 
 impl DocumentLink {
-    /// Info-bulle affichée par le client.
+    /// Tooltip shown by the client.
     pub fn tooltip(&self) -> String {
-        format!(
-            "{} : {}",
-            self.reference.kind.label(),
-            self.target.display()
-        )
+        format!("{}: {}", self.reference.kind.label(), self.target.display())
     }
 }
 
-/// Liste les références vers d'autres fichiers, dans l'ordre du document,
-/// sans résolution.
+/// Lists the references to other files, in document order, without
+/// resolution.
 pub fn link_references(source: &str) -> Vec<LinkReference> {
     let tree = XmlTagTree::parse(source);
     let attributes: Vec<Vec<XmlAttribute>> = tree
@@ -271,9 +267,9 @@ pub fn link_references(source: &str) -> Vec<LinkReference> {
     references
 }
 
-/// Résout les références du document `document_uri` (catalogues XML
-/// d'abord) ; ne garde que les fichiers locaux existants et les URL
-/// `http(s)`.
+/// Resolves the references of the document `document_uri` (XML catalogs
+/// first); keeps only existing local files and `http(s)`
+/// URLs.
 pub fn document_links(document_uri: &str, source: &str, catalogs: &Catalogs) -> Vec<DocumentLink> {
     link_references(source)
         .into_iter()
@@ -284,7 +280,7 @@ pub fn document_links(document_uri: &str, source: &str, catalogs: &Catalogs) -> 
         .collect()
 }
 
-/// Réponse JSON de `textDocument/documentLink`.
+/// JSON response of `textDocument/documentLink`.
 pub fn document_links_json(document_uri: &str, source: &str, catalogs: &Catalogs) -> Value {
     let lines = LineIndex::new(source);
     Value::Array(
@@ -301,11 +297,11 @@ pub fn document_links_json(document_uri: &str, source: &str, catalogs: &Catalogs
     )
 }
 
-/// Réponse de `textDocument/definition` si `offset` est sur une référence :
-/// le début du fichier local cible, ou une liste vide si la cible n'est pas
-/// un fichier local existant (une URL reste ouverte par `documentLink`).
-/// `None` si `offset` n'est sur aucune référence. Avec `link_support`, la
-/// réponse est un `LocationLink[]` dont l'origine est la valeur entière.
+/// Response of `textDocument/definition` if `offset` is on a reference: the
+/// start of the local target file, or an empty list if the target is not an
+/// existing local file (a URL stays opened by `documentLink`).
+/// `None` if `offset` is on no reference. With `link_support`, the
+/// response is a `LocationLink[]` whose origin is the whole value.
 pub fn definition(
     document_uri: &str,
     source: &str,
@@ -335,10 +331,10 @@ pub fn definition(
     })
 }
 
-/// Résout `reference` : d'abord par les catalogues XML (espace de noms de
-/// `xsi:schemaLocation`/`xs:import` via les entrées `uri`, identifiant
-/// public ou système du DOCTYPE, puis la valeur comme identifiant système ou
-/// URI) vers un fichier local existant, sinon comme [`resolve_target`].
+/// Resolves `reference`: first through the XML catalogs (namespace of
+/// `xsi:schemaLocation`/`xs:import` through `uri` entries, public or
+/// system identifier of the DOCTYPE, then the value as a system identifier
+/// or URI) to an existing local file, otherwise like [`resolve_target`].
 pub fn resolve_reference(
     document_uri: &str,
     reference: &LinkReference,
@@ -371,9 +367,9 @@ pub fn resolve_reference(
     resolve_target(document_uri, &reference.value)
 }
 
-/// Résout `value` par rapport au document `document_uri`. Retourne `None`
-/// pour un autre schéma d'URI qu'`http(s)`/`file`, un fichier absent ou un
-/// chemin relatif dans un document qui n'est pas un fichier local.
+/// Resolves `value` against the document `document_uri`. Returns `None`
+/// for a URI scheme other than `http(s)`/`file`, a missing file or a
+/// relative path in a document that is not a local file.
 pub fn resolve_target(document_uri: &str, value: &str) -> Option<LinkTarget> {
     let value = value.trim();
     if value.is_empty() {
@@ -417,7 +413,7 @@ fn lsp_range(lines: &LineIndex, source: &str, range: &Range<usize>) -> Value {
     })
 }
 
-/// Espace de noms usuel d'un préfixe non déclaré.
+/// Usual namespace of an undeclared prefix.
 fn conventional_namespace(prefix: &str) -> Option<&'static str> {
     match prefix {
         "xsi" => Some(XSI_NAMESPACE),
@@ -428,8 +424,8 @@ fn conventional_namespace(prefix: &str) -> Option<&'static str> {
     }
 }
 
-/// Ajoute la référence de valeur `range` (espaces de bord retirés), si elle
-/// n'est pas vide.
+/// Adds the reference with value `range` (surrounding whitespace removed),
+/// if it is not empty.
 fn push_value(
     source: &str,
     references: &mut Vec<LinkReference>,
@@ -451,7 +447,7 @@ fn push_value(
     });
 }
 
-/// Jetons séparés par des espaces dans `range`.
+/// Space-separated tokens in `range`.
 fn tokens(source: &str, range: Range<usize>) -> impl Iterator<Item = Range<usize>> + '_ {
     let bytes = source.as_bytes();
     let mut index = range.start;
@@ -470,8 +466,8 @@ fn tokens(source: &str, range: Range<usize>) -> impl Iterator<Item = Range<usize
     })
 }
 
-/// Premier jeton (sans espace ni `=`/guillemet) à partir de `start`, espaces
-/// de tête ignorés.
+/// First token (without space, `=` or quote) from `start`, leading
+/// whitespace ignored.
 fn scan_token(source: &str, start: usize, end: usize) -> Range<usize> {
     let bytes = source.as_bytes();
     let mut index = start;
@@ -488,8 +484,8 @@ fn scan_token(source: &str, start: usize, end: usize) -> Range<usize> {
     token_start..index
 }
 
-/// Valeur (guillemets exclus) du pseudo-attribut `name` d'une instruction
-/// de traitement, cherché dans `range`.
+/// Value (quotes excluded) of the `name` pseudo-attribute of a processing
+/// instruction, searched in `range`.
 fn pseudo_attribute(source: &str, range: Range<usize>, name: &str) -> Option<Range<usize>> {
     let bytes = source.as_bytes();
     let mut index = range.start;
@@ -500,7 +496,7 @@ fn pseudo_attribute(source: &str, range: Range<usize>, name: &str) -> Option<Ran
             index += 1;
         }
         if bytes.get(index) != Some(&b'=') || index >= range.end {
-            // Jeton isolé (ou caractère inattendu) : on passe au suivant.
+            // Isolated token (or unexpected character): skip to the next one.
             index = if key.is_empty() { index + 1 } else { index };
             continue;
         }
@@ -524,9 +520,9 @@ fn pseudo_attribute(source: &str, range: Range<usize>, name: &str) -> Option<Ran
     None
 }
 
-/// Littéraux public (éventuel) et système (guillemets exclus) d'une
-/// déclaration `DOCTYPE nom SYSTEM "..."` ou `DOCTYPE nom PUBLIC "..."
-/// "..."` ; `content` est le contenu de la déclaration (sans `<!` ni `>`).
+/// Public (optional) and system literals (quotes excluded) of a
+/// `DOCTYPE name SYSTEM "..."` or `DOCTYPE name PUBLIC "..."
+/// "..."` declaration; `content` is the content of the declaration (without `<!` or `>`).
 pub(crate) fn doctype_external_id(
     source: &str,
     content: Range<usize>,
@@ -565,8 +561,8 @@ pub(crate) fn doctype_external_id(
     Some((public, literal?))
 }
 
-/// Schéma d'URI de `value` (au moins deux caractères, pour ne pas confondre
-/// une lettre de lecteur Windows `C:` avec un schéma).
+/// URI scheme of `value` (at least two characters, so that a Windows drive
+/// letter `C:` is not mistaken for a scheme).
 pub(crate) fn uri_scheme(value: &str) -> Option<&str> {
     let (scheme, _) = value.split_once(':')?;
     let mut chars = scheme.chars();
@@ -580,7 +576,7 @@ fn strip_query_and_fragment(value: &str) -> &str {
     value.split(['?', '#']).next().unwrap_or(value)
 }
 
-/// Résout les entités prédéfinies et les références de caractères.
+/// Resolves predefined entities and character references.
 pub(crate) fn unescape(value: &str) -> String {
     if !value.contains('&') {
         return value.to_owned();
@@ -630,7 +626,7 @@ mod tests {
 
     use crate::catalog::Catalogs;
 
-    /// Répertoire temporaire propre au test, supprimé à la fin.
+    /// Test-specific temporary directory, removed at the end.
     struct TempDir(PathBuf);
 
     impl TempDir {
@@ -695,7 +691,7 @@ mod tests {
                     "none.xsd",
                     "none.xsd".to_owned()
                 ),
-                // Préfixe `xsi` non déclaré : espace de noms conventionnel.
+                // Undeclared `xsi` prefix: conventional namespace.
                 (LinkKind::SchemaLocation, "c.xsd", "c.xsd".to_owned()),
             ]
         );
@@ -852,7 +848,7 @@ mod tests {
         ] {
             assert_eq!(resolve_target(&document, missing), None, "{missing}");
         }
-        // Document non enregistré : pas de base pour un chemin relatif.
+        // Unsaved document: no base for a relative path.
         assert_eq!(resolve_target("untitled:Untitled-1", "c.xsd"), None);
     }
 
@@ -873,7 +869,7 @@ mod tests {
                         "end": {"line": 2, "character": a_start + 5},
                     },
                     "target": path_to_uri(&dir.0.join("a.xsd")),
-                    "tooltip": format!("Ouvrir le schéma XSD : {}", dir.0.join("a.xsd").display()),
+                    "tooltip": format!("Open XSD schema: {}", dir.0.join("a.xsd").display()),
                 },
                 {
                     "range": {
@@ -881,11 +877,11 @@ mod tests {
                         "end": {"line": 2, "character": a_start + 36},
                     },
                     "target": "http://example.com/b.xsd",
-                    "tooltip": "Ouvrir le schéma XSD : http://example.com/b.xsd",
+                    "tooltip": "Open XSD schema: http://example.com/b.xsd",
                 },
             ])
         );
-        // UTF-16 : l'emoji compte pour deux unités.
+        // UTF-16: the emoji counts as two code units.
         let emoji = "<a xmlns:xi=\"http://www.w3.org/2001/XInclude\"><xi:include href=\"😀/../a.xsd\"/></a>";
         let emoji_uri = dir.document_uri("emoji.xml");
         let range = &document_links_json(&emoji_uri, emoji, &Catalogs::default())[0]["range"];
@@ -932,7 +928,7 @@ mod tests {
             definition(&uri, source, missing, false, &Catalogs::default()),
             Some(json!([]))
         );
-        // Hors valeur : laissé à la définition d'élément.
+        // Outside a value: left to element definition.
         assert_eq!(
             definition(&uri, source, 2, false, &Catalogs::default()),
             None
@@ -996,7 +992,7 @@ mod tests {
                     Some("urn:other".to_owned()),
                     LinkTarget::File(by_system)
                 ),
-                // Cible de catalogue absente : l'URL d'origine est gardée.
+                // Missing catalog target: the original URL is kept.
                 (
                     LinkKind::SchemaLocation,
                     Some("urn:missing".to_owned()),

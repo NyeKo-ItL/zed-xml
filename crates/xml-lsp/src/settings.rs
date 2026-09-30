@@ -1,37 +1,37 @@
-//! Réglages utilisateur du serveur (section `xml`, nommage LemMinX).
+//! User settings of the server (`xml` section, LemMinX naming).
 //!
-//! Les réglages proviennent de `initializationOptions` (`{"settings": {"xml":
-//! …}}`, `{"xml": …}` ou directement le contenu de la section), puis de
-//! `workspace/configuration` (section `xml`) et de
-//! `workspace/didChangeConfiguration`. La lecture est tolérante : une clé
-//! absente ou d'un type inattendu garde sa valeur par défaut, et les valeurs
-//! par défaut reproduisent le comportement historique du serveur.
+//! Settings come from `initializationOptions` (`{"settings": {"xml":
+//! …}}`, `{"xml": …}` or directly the content of the section), then from
+//! `workspace/configuration` (`xml` section) and
+//! `workspace/didChangeConfiguration`. Reading is tolerant: a missing key
+//! or one of an unexpected type keeps its default value, and the defaults
+//! reproduce the historical behaviour of the server.
 
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 use xml_core::{EmptyElements, FormatOptions, SplitAttributes};
 
-/// Réglages `xml.*`.
+/// `xml.*` settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
     pub format: FormatSettings,
     pub validation: ValidationSettings,
-    /// `xml.completion.autoCloseTags` : propose la balise fermante après `>`.
+    /// `xml.completion.autoCloseTags`: offers the end tag after `>`.
     pub auto_close_tags: bool,
     /// `xml.symbols.enabled`.
     pub symbols_enabled: bool,
-    /// `xml.symbols.maxItemsComputed` (`None` : pas de limite).
+    /// `xml.symbols.maxItemsComputed` (`None`: no limit).
     pub symbols_max_items: Option<usize>,
     /// `xml.colors.enabled`.
     pub colors_enabled: bool,
-    /// `xml.catalogs` : chemins de catalogues XML OASIS, bruts (résolus par
-    /// [`crate::catalog::catalog_paths`] par rapport aux dossiers de
-    /// l'espace de travail).
+    /// `xml.catalogs`: raw OASIS XML catalog paths (resolved by
+    /// [`crate::catalog::catalog_paths`] against the workspace
+    /// folders).
     pub catalogs: Vec<String>,
-    /// `xml.autoDetectCatalogs` (extension, `false` par défaut) : utilise
-    /// aussi `catalog.xml` à la racine de chaque dossier de l'espace de
-    /// travail, s'il s'agit d'un catalogue OASIS.
+    /// `xml.autoDetectCatalogs` (extension, `false` by default): also uses
+    /// `catalog.xml` at the root of each workspace folder, when it is an
+    /// OASIS catalog.
     pub auto_detect_catalogs: bool,
     /// `xml.fileAssociations`.
     pub file_associations: Vec<FileAssociation>,
@@ -53,7 +53,7 @@ impl Default for Settings {
     }
 }
 
-/// Réglages `xml.format.*`.
+/// `xml.format.*` settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FormatSettings {
     /// `xml.format.enabled`.
@@ -64,8 +64,8 @@ pub struct FormatSettings {
     pub closing_bracket_new_line: bool,
     pub empty_elements: EmptyElements,
     pub preserve_attribute_line_breaks: bool,
-    /// Valeurs de repli lorsque la requête ne fournit pas l'option LSP
-    /// correspondante.
+    /// Fallback values when the request does not provide the matching LSP
+    /// option.
     pub insert_spaces: Option<bool>,
     pub tab_size: Option<usize>,
     pub trim_final_newlines: Option<bool>,
@@ -94,8 +94,8 @@ impl Default for FormatSettings {
 }
 
 impl FormatSettings {
-    /// Applique les réglages `xml.format.*` à des options par défaut (avant
-    /// les `FormattingOptions` de la requête, qui restent prioritaires).
+    /// Applies the `xml.format.*` settings to default options (before the
+    /// request's `FormattingOptions`, which take precedence).
     pub fn apply(&self, options: &mut FormatOptions) {
         options.split_attributes = self.split_attributes;
         options.max_line_width = self.max_line_width;
@@ -124,17 +124,17 @@ impl FormatSettings {
 /// `xml.validation.schema.enabled`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SchemaValidation {
-    /// Valide avec les schémas chargés et signale les erreurs de chargement.
+    /// Validates with the loaded schemas and reports loading errors.
     #[default]
     Always,
-    /// Aucune validation XSD.
+    /// No XSD validation.
     Never,
-    /// Valide seulement si tous les schémas se chargent sans erreur (les
-    /// erreurs de chargement restent signalées).
+    /// Validates only if all schemas load without error (loading errors
+    /// are still reported).
     OnValidSchema,
 }
 
-/// Sévérité du diagnostic `xml.validation.noGrammar`.
+/// Severity of the `xml.validation.noGrammar` diagnostic.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum NoGrammar {
     #[default]
@@ -145,7 +145,7 @@ pub enum NoGrammar {
 }
 
 impl NoGrammar {
-    /// Sévérité LSP (`None` : pas de diagnostic).
+    /// LSP severity (`None`: no diagnostic).
     pub fn severity(self) -> Option<u8> {
         match self {
             Self::Ignore => None,
@@ -156,18 +156,18 @@ impl NoGrammar {
     }
 }
 
-/// Réglages `xml.validation.*`.
+/// `xml.validation.*` settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidationSettings {
-    /// `xml.validation.enabled` : désactive tous les diagnostics.
+    /// `xml.validation.enabled`: disables all diagnostics.
     pub enabled: bool,
     pub schema: SchemaValidation,
     pub no_grammar: NoGrammar,
-    /// `xml.validation.disallowDocTypeDecl` : signale toute déclaration
-    /// `<!DOCTYPE>`.
+    /// `xml.validation.disallowDocTypeDecl`: reports any `<!DOCTYPE>`
+    /// declaration.
     pub disallow_doc_type_decl: bool,
-    /// `xml.validation.resolveExternalEntities` : les entités générales
-    /// externes référencées doivent être résolubles (jamais lues).
+    /// `xml.validation.resolveExternalEntities`: referenced external general
+    /// entities must be resolvable (never read).
     pub resolve_external_entities: bool,
 }
 
@@ -183,8 +183,8 @@ impl Default for ValidationSettings {
     }
 }
 
-/// Association `xml.fileAssociations` : les fichiers correspondant à
-/// `pattern` (glob) sont validés avec le schéma `system_id`.
+/// `xml.fileAssociations` association: files matching `pattern` (glob)
+/// are validated with the `system_id` schema.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileAssociation {
     pub pattern: String,
@@ -192,7 +192,7 @@ pub struct FileAssociation {
 }
 
 impl Settings {
-    /// Lit la section `xml` (ou son contenu) ; tolérant aux types invalides.
+    /// Reads the `xml` section (or its content); tolerant of invalid types.
     pub fn from_value(value: &Value) -> Self {
         let empty = Map::new();
         let root = xml_section(value)
@@ -255,8 +255,8 @@ impl Settings {
         if let Some(value) = flag("validation.enabled") {
             validation.enabled = value;
         }
-        // `xml.validation.schema` : objet `{enabled}` (LemMinX récent) ou
-        // booléen (anciennes versions).
+        // `xml.validation.schema`: `{enabled}` object (recent LemMinX) or
+        // boolean (older versions).
         let schema = match get("validation.schema") {
             Some(Value::Bool(enabled)) => Some(Value::Bool(*enabled)),
             _ => get("validation.schema.enabled").cloned(),
@@ -326,7 +326,7 @@ impl Settings {
         settings
     }
 
-    /// Les diagnostics publiés dépendent de ces réglages.
+    /// Published diagnostics depend on these settings.
     pub fn same_validation(&self, other: &Self) -> bool {
         self.validation == other.validation
             && self.file_associations == other.file_associations
@@ -335,8 +335,8 @@ impl Settings {
     }
 }
 
-/// Valeur d'une clé pointée (`format.enabled`), en acceptant aussi une clé
-/// plate (`"format.enabled": true`).
+/// Value of a dotted key (`format.enabled`), also accepting a flat key
+/// (`"format.enabled": true`).
 fn lookup<'a>(root: &'a Map<String, Value>, path: &str) -> Option<&'a Value> {
     if let Some(value) = root.get(path) {
         return Some(value);
@@ -345,8 +345,8 @@ fn lookup<'a>(root: &'a Map<String, Value>, path: &str) -> Option<&'a Value> {
     lookup(root.get(head)?.as_object()?, rest)
 }
 
-/// Section `xml` des réglages reçus : `{"settings": {"xml": …}}`,
-/// `{"xml": …}` ou le contenu de la section lui-même.
+/// `xml` section of the received settings: `{"settings": {"xml": …}}`,
+/// `{"xml": …}` or the content of the section itself.
 pub fn xml_section(value: &Value) -> Option<&Value> {
     let object = value.as_object()?;
     if let Some(settings) = object.get("settings").filter(|value| value.is_object()) {
@@ -358,8 +358,8 @@ pub fn xml_section(value: &Value) -> Option<&Value> {
     }
 }
 
-/// Fusion récursive : les objets sont fusionnés, les autres valeurs de
-/// `overlay` remplacent celles de `base`.
+/// Recursive merge: objects are merged, other values of `overlay` replace
+/// those of `base`.
 pub fn merge(base: &mut Value, overlay: &Value) {
     match (base, overlay) {
         (Value::Object(base), Value::Object(overlay)) => {
@@ -378,7 +378,7 @@ pub fn merge(base: &mut Value, overlay: &Value) {
     }
 }
 
-/// Limite le nombre de symboles (parcours préfixe, enfants compris).
+/// Limits the number of symbols (pre-order traversal, children included).
 pub fn limit_symbols(symbols: &mut Vec<Value>, limit: usize) {
     fn walk(symbols: &mut Vec<Value>, remaining: &mut usize) {
         let mut kept = 0;
@@ -398,15 +398,15 @@ pub fn limit_symbols(symbols: &mut Vec<Value>, limit: usize) {
     walk(symbols, &mut remaining);
 }
 
-/// Schémas associés à `document` par `xml.fileAssociations`.
+/// Schemas associated with `document` by `xml.fileAssociations`.
 ///
-/// Un motif sans `/` s'applique au nom du fichier ; sinon il est comparé au
-/// chemin relatif à chaque dossier de l'espace de travail, puis au chemin
-/// absolu. `**` couvre plusieurs segments, `*` et `?` un segment, `{a,b}`
-/// des alternatives. Le `systemId` est un chemin absolu, une URI `file://`
-/// ou un chemin relatif au dossier de l'espace de travail (au dossier du
-/// document hors espace de travail) ; une URL distante n'est retenue que si
-/// un catalogue XML (`catalogs`) l'associe à un fichier local.
+/// A pattern without `/` applies to the file name; otherwise it is matched
+/// against the path relative to each workspace folder, then against the
+/// absolute path. `**` spans several segments, `*` and `?` one segment,
+/// `{a,b}` alternatives. The `systemId` is an absolute path, a `file://`
+/// URI or a path relative to the workspace folder (to the document's
+/// directory outside a workspace); a remote URL is only kept if an XML
+/// catalog (`catalogs`) maps it to a local file.
 pub fn associated_schemas(
     associations: &[FileAssociation],
     roots: &[PathBuf],
@@ -464,9 +464,9 @@ fn slashes(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-/// Correspondance glob (`**`, `*`, `?`, `{a,b}`) sur des chemins à `/`.
+/// Glob matching (`**`, `*`, `?`, `{a,b}`) on `/`-separated paths.
 pub fn glob_match(pattern: &str, text: &str) -> bool {
-    // Développement des alternatives `{a,b}` (non imbriquées).
+    // Expansion of `{a,b}` alternatives (not nested).
     if let Some(open) = pattern.find('{')
         && let Some(close) = pattern[open..].find('}').map(|index| open + index)
     {
@@ -477,7 +477,7 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
     }
     let pattern = pattern.chars().collect::<Vec<_>>();
     let text = text.chars().collect::<Vec<_>>();
-    // Programmation dynamique : matches[j] = pattern[..i] couvre text[..j].
+    // Dynamic programming: matches[j] = pattern[..i] matches text[..j].
     let mut matches = vec![false; text.len() + 1];
     matches[0] = true;
     let mut index = 0;
@@ -485,8 +485,8 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
         let mut next = vec![false; text.len() + 1];
         match pattern[index] {
             '*' if pattern.get(index + 1) == Some(&'*') => {
-                // `**` couvre n'importe quelle suite ; `**/` zéro ou plusieurs
-                // segments complets.
+                // `**` matches any sequence; `**/` zero or more complete
+                // segments.
                 let slash = pattern.get(index + 2) == Some(&'/');
                 let mut reachable = false;
                 for position in 0..=text.len() {
@@ -557,7 +557,7 @@ mod tests {
             }})),
             defaults
         );
-        // Les valeurs par défaut du formatage sont celles de `FormatOptions`.
+        // The formatting defaults are those of `FormatOptions`.
         let mut options = FormatOptions::default();
         defaults.format.apply(&mut options);
         assert_eq!(options, FormatOptions::default());
@@ -634,8 +634,8 @@ mod tests {
 
     #[test]
     fn accepts_alternative_setting_shapes() {
-        // Contenu de la section, booléens des anciennes versions de LemMinX
-        // et clés pointées.
+        // Section content, booleans of older LemMinX versions and dotted
+        // keys.
         let settings = Settings::from_value(&json!({
             "format.splitAttributes": true,
             "validation": {"schema": false},
@@ -736,13 +736,13 @@ mod tests {
             associated_schemas(&associations, &roots, &root.join("other/app.xml"), &none)
                 .is_empty()
         );
-        // Hors espace de travail : relatif au dossier du document.
+        // Outside a workspace: relative to the document's directory.
         assert_eq!(
             associated_schemas(&associations, &[], Path::new("/tmp/x/a.pom"), &none),
             vec![PathBuf::from("/tmp/x/schemas/maven.xsd")]
         );
 
-        // Un catalogue rend l'URL distante utilisable.
+        // A catalog makes the remote URL usable.
         let directory =
             std::env::temp_dir().join(format!("xml-lsp-associations {}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();

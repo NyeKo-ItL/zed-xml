@@ -1,31 +1,31 @@
-//! Support DTD, comme LemMinX : grammaire du `<!DOCTYPE>` (sous-ensemble
-//! interne et DTD externe `SYSTEM`/`PUBLIC`) et fichiers `.dtd`/`.ent`.
+//! DTD support, like LemMinX: grammar of the `<!DOCTYPE>` (internal subset
+//! and external `SYSTEM`/`PUBLIC` DTD) and `.dtd`/`.ent` files.
 //!
-//! - Chargement ([`load`]) : la DTD externe et les entités paramètres
-//!   externes sont résolues par les catalogues XML (`xml.catalogs`), puis
-//!   relativement à la source déclarante ; seuls des fichiers locaux sont lus
-//!   (tampons ouverts d'abord, puis disque avec un cache par date de
-//!   modification), jamais une URL `http(s)` (avertissement qui renvoie vers
-//!   `xml.catalogs`). Le chargement de la DTD externe est actif par défaut,
-//!   comme dans LemMinX.
-//! - Diagnostics ([`diagnostics`]) : erreurs de la DTD (`dtd-grammar`),
-//!   références d'entités non déclarées ou invalides (`xml-entity`, aussi
-//!   sans DTD), validation du document (`dtd-validation`), en plus de la
-//!   validation XSD. `xml.validation.disallowDocTypeDecl` désactive le tout
-//!   pour un document qui a un `<!DOCTYPE>` ; avec
-//!   `xml.validation.resolveExternalEntities`, les entités générales externes
-//!   référencées doivent être résolubles (sans quoi elles ne sont jamais
-//!   lues).
-//! - Complétion ([`completions`]) : éléments permis par le modèle de contenu
-//!   du parent, attributs déclarés et valeurs énumérées (ID existants pour
-//!   IDREF), entités après `&` ; dans une DTD : mots-clés après `<!`, `#…`,
-//!   entités paramètres après `%`, noms d'éléments dans les déclarations.
-//! - Survol ([`hover`]) et définition ([`definition`]) : déclaration DTD d'un
-//!   élément, d'un attribut, d'une entité (`&nom;`, `%nom;`) ou d'une
-//!   notation, avec le commentaire qui la précède comme documentation.
-//! - Correctifs ([`code_actions`]) : déclarer une entité manquante, ajouter
-//!   un attribut requis, remplacer une valeur hors énumération ou fixe.
-//! - Symboles ([`document_symbols`]) d'un fichier `.dtd`.
+//! - Loading ([`load`]): the external DTD and external parameter entities
+//!   are resolved through the XML catalogs (`xml.catalogs`), then relative
+//!   to the declaring source; only local files are read (open buffers
+//!   first, then disk with a cache by modification time), never an
+//!   `http(s)` URL (warning pointing to `xml.catalogs`). Loading the
+//!   external DTD is enabled by default,
+//!   like in LemMinX.
+//! - Diagnostics ([`diagnostics`]): DTD errors (`dtd-grammar`), undeclared
+//!   or invalid entity references (`xml-entity`, also without a DTD),
+//!   document validation (`dtd-validation`), in addition to XSD
+//!   validation. `xml.validation.disallowDocTypeDecl` disables all of it
+//!   for a document that has a `<!DOCTYPE>`; with
+//!   `xml.validation.resolveExternalEntities`, referenced external general
+//!   entities must be resolvable (otherwise they are never
+//!   read).
+//! - Completion ([`completions`]): elements allowed by the parent's content
+//!   model, declared attributes and enumerated values (existing IDs for
+//!   IDREF), entities after `&`; in a DTD: keywords after `<!`, `#…`,
+//!   parameter entities after `%`, element names in declarations.
+//! - Hover ([`hover`]) and definition ([`definition`]): DTD declaration of an
+//!   element, an attribute, an entity (`&name;`, `%name;`) or a notation,
+//!   with the comment preceding it as documentation.
+//! - Fixes ([`code_actions`]): declare a missing entity, add a required
+//!   attribute, replace a value outside the enumeration or a fixed value.
+//! - Symbols ([`document_symbols`]) of a `.dtd` file.
 
 use std::{
     collections::HashMap,
@@ -55,38 +55,38 @@ use crate::{
     uri_to_path,
 };
 
-/// Taille maximale d'un fichier DTD lu sur disque.
+/// Maximum size of a DTD file read from disk.
 const MAX_DTD_SIZE: u64 = 4 * 1024 * 1024;
-/// Code des diagnostics d'une DTD (syntaxe, chargement).
+/// Code of the diagnostics of a DTD (syntax, loading).
 pub(crate) const GRAMMAR_CODE: &str = "dtd-grammar";
-/// Code des diagnostics de validation du document contre la DTD.
+/// Code of the document validation diagnostics against the DTD.
 pub(crate) const VALIDATION_CODE: &str = "dtd-validation";
-/// Code des diagnostics de références d'entités.
+/// Code of the entity reference diagnostics.
 pub(crate) const ENTITY_CODE: &str = "xml-entity";
-/// Nombre maximal de valeurs proposées en remplacement.
+/// Maximum number of values offered as replacements.
 const MAX_VALUE_ACTIONS: usize = 20;
 
-/// Textes des DTD lues sur disque, invalidés par date de modification et
-/// taille.
+/// Texts of the DTDs read from disk, invalidated by modification time and
+/// size.
 pub(crate) type DtdCache = HashMap<PathBuf, (SystemTime, u64, Arc<str>)>;
 
-/// Fichier DTD (`.dtd`, `.ent`).
+/// DTD file (`.dtd`, `.ent`).
 pub(crate) fn is_dtd_uri(uri: &str) -> bool {
     uri_to_path(uri).extension().is_some_and(|extension| {
         extension.eq_ignore_ascii_case("dtd") || extension.eq_ignore_ascii_case("ent")
     })
 }
 
-/// Contexte de chargement des DTD.
+/// DTD loading context.
 pub(crate) struct DtdContext<'a> {
-    /// Documents ouverts (URI -> contenu), prioritaires sur le disque.
+    /// Open documents (URI -> content), taking precedence over the disk.
     pub(crate) documents: &'a HashMap<String, String>,
     pub(crate) catalogs: &'a Catalogs,
     pub(crate) cache: &'a mut DtdCache,
 }
 
-/// Grammaire d'un document : `doctype` pour un document d'instance, `None`
-/// pour un fichier DTD (source 0 dans les deux cas).
+/// Grammar of a document: `doctype` for an instance document, `None` for a
+/// DTD file (source 0 in both cases).
 pub(crate) struct Grammar {
     pub(crate) doctype: Option<Doctype>,
     pub(crate) dtd: Dtd,
@@ -114,7 +114,7 @@ impl ExternalLoader for Loader<'_, '_> {
 
 fn not_found(path: &Path) -> LoadError {
     LoadError {
-        message: format!("DTD « {} » introuvable", path.display()),
+        message: format!("DTD '{}' not found", path.display()),
         remote: false,
     }
 }
@@ -123,9 +123,9 @@ fn is_available(context: &DtdContext<'_>, path: &Path) -> bool {
     path.is_file() || context.documents.contains_key(&path_to_uri(path))
 }
 
-/// Résout un identifiant externe : catalogues XML, puis URI `file:`, chemin
-/// absolu ou relatif à `base`. Une ressource distante n'est jamais
-/// téléchargée.
+/// Resolves an external identifier: XML catalogs, then `file:` URI,
+/// absolute path or path relative to `base`. A remote resource is never
+/// downloaded.
 fn resolve_external(
     context: &DtdContext<'_>,
     public: Option<&str>,
@@ -138,9 +138,7 @@ fn resolve_external(
             Some(path) if is_available(context, &path) => Ok(path),
             Some(path) => Err(not_found(&path)),
             None => Err(LoadError {
-                message: format!(
-                    "la cible de catalogue « {target} » est distante et n'est jamais téléchargée"
-                ),
+                message: format!("the catalog target '{target}' is remote and is never downloaded"),
                 remote: true,
             }),
         };
@@ -156,7 +154,7 @@ fn resolve_external(
         }
         return Err(LoadError {
             message: format!(
-                "DTD « {system} » non chargée : les ressources distantes ne sont jamais téléchargées, associez-la à un fichier local avec xml.catalogs"
+                "DTD '{system}' not loaded: remote resources are never downloaded, map it to a local file with xml.catalogs"
             ),
             remote: true,
         });
@@ -171,7 +169,7 @@ fn resolve_external(
             None => {
                 return Err(LoadError {
                     message: format!(
-                        "identifiant système relatif « {system} » non résolu : le document n'est pas un fichier local"
+                        "relative system identifier '{system}' not resolved: the document is not a local file"
                     ),
                     remote: false,
                 });
@@ -194,10 +192,10 @@ fn read_text(context: &mut DtdContext<'_>, path: &Path) -> Result<String, LoadEr
         remote: false,
     };
     let metadata = fs::metadata(path)
-        .map_err(|cause| error(format!("DTD « {} » illisible : {cause}", path.display())))?;
+        .map_err(|cause| error(format!("DTD '{}' is unreadable: {cause}", path.display())))?;
     if metadata.len() > MAX_DTD_SIZE {
         return Err(error(format!(
-            "DTD « {} » trop volumineuse (plus de {MAX_DTD_SIZE} octets)",
+            "DTD '{}' is too large (more than {MAX_DTD_SIZE} bytes)",
             path.display()
         )));
     }
@@ -209,7 +207,7 @@ fn read_text(context: &mut DtdContext<'_>, path: &Path) -> Result<String, LoadEr
         return Ok(text.to_string());
     }
     let text = fs::read_to_string(path)
-        .map_err(|cause| error(format!("DTD « {} » illisible : {cause}", path.display())))?;
+        .map_err(|cause| error(format!("DTD '{}' is unreadable: {cause}", path.display())))?;
     context.cache.insert(
         path.to_path_buf(),
         (modified, metadata.len(), Arc::from(text.as_str())),
@@ -217,8 +215,8 @@ fn read_text(context: &mut DtdContext<'_>, path: &Path) -> Result<String, LoadEr
     Ok(text)
 }
 
-/// Grammaire du document `uri` : DTD de son `<!DOCTYPE>` (`None` sans
-/// DOCTYPE) ou, pour un fichier `.dtd`, le fichier lui-même.
+/// Grammar of the document `uri`: DTD of its `<!DOCTYPE>` (`None` without a
+/// DOCTYPE) or, for a `.dtd` file, the file itself.
 pub(crate) fn load(context: &mut DtdContext<'_>, uri: &str, source: &str) -> Option<Grammar> {
     let path = document_path(uri);
     let mut loader = Loader { context };
@@ -260,7 +258,7 @@ fn diagnostic(
     })
 }
 
-/// Diagnostics DTD du document `uri` (voir le module).
+/// DTD diagnostics of the document `uri` (see the module).
 pub(crate) fn diagnostics(
     context: &mut DtdContext<'_>,
     uri: &str,
@@ -276,7 +274,7 @@ pub(crate) fn diagnostics(
         return diagnostics;
     }
     if validation.disallow_doc_type_decl && find_doctype(source).is_some() {
-        // Le DOCTYPE lui-même est signalé ; sa grammaire est ignorée.
+        // The DOCTYPE itself is reported; its grammar is ignored.
         return diagnostics;
     }
     let grammar = load(context, uri, source);
@@ -286,7 +284,7 @@ pub(crate) fn diagnostics(
     }
     let incomplete = dtd.is_some_and(|dtd| dtd.incomplete);
     for problem in check_entity_references(source, dtd) {
-        // Déclaration peut-être dans une DTD non chargée : avertissement.
+        // Declaration possibly in a DTD that was not loaded: warning.
         let severity =
             if incomplete && matches!(problem.kind, InstanceProblemKind::UndefinedEntity { .. }) {
                 2
@@ -306,8 +304,8 @@ pub(crate) fn diagnostics(
         if validation.resolve_external_entities {
             external_entity_diagnostics(context, dtd, source, &lines, &mut diagnostics);
         }
-        // Sans la DTD complète, toute déclaration peut manquer : pas de
-        // validation (l'échec de chargement est déjà signalé).
+        // Without the complete DTD, any declaration may be missing: no
+        // validation (the loading failure is already reported).
         if !dtd.incomplete {
             for problem in validate_instance(source, dtd) {
                 diagnostics.push(diagnostic(
@@ -324,9 +322,9 @@ pub(crate) fn diagnostics(
     diagnostics
 }
 
-/// Problèmes de la grammaire : ceux du document (sous-ensemble interne,
-/// fichier `.dtd`) à leur place, ceux d'un fichier externe résumés sur la
-/// référence qui l'a chargé.
+/// Problems of the grammar: those of the document (internal subset, `.dtd`
+/// file) in place, those of an external file summarized on the reference
+/// that loaded it.
 fn grammar_diagnostics(dtd: &Dtd, source: &str, lines: &LineIndex, out: &mut Vec<Value>) {
     let mut external: Vec<(Range<usize>, u8, Vec<String>)> = Vec::new();
     for problem in &dtd.problems {
@@ -375,10 +373,10 @@ fn grammar_diagnostics(dtd: &Dtd, source: &str, lines: &LineIndex, out: &mut Vec
     }
     for (range, severity, details) in external {
         let message = if details.len() == 1 {
-            format!("erreur dans la DTD : {}", details[0])
+            format!("error in the DTD: {}", details[0])
         } else {
             format!(
-                "{} erreurs dans la DTD, dont : {}",
+                "{} errors in the DTD, including: {}",
                 details.len(),
                 details[0]
             )
@@ -394,8 +392,8 @@ fn grammar_diagnostics(dtd: &Dtd, source: &str, lines: &LineIndex, out: &mut Vec
     }
 }
 
-/// `xml.validation.resolveExternalEntities` : références à des entités
-/// générales externes introuvables.
+/// `xml.validation.resolveExternalEntities`: references to external general
+/// entities that cannot be found.
 fn external_entity_diagnostics(
     context: &mut DtdContext<'_>,
     dtd: &Dtd,
@@ -424,7 +422,7 @@ fn external_entity_diagnostics(
                 &reference.range,
                 2,
                 (ENTITY_CODE, "xml", "externalEntity"),
-                format!("entité externe « {name} » non résolue : {}", error.message),
+                format!("external entity '{name}' not resolved: {}", error.message),
             ));
         }
     }
@@ -432,10 +430,10 @@ fn external_entity_diagnostics(
 
 // ---------------------------------------------------------------------------
 // Contextes
-// ---------------------------------------------------------------------------
+// Contexts
 
-/// Étendue du texte DTD du document : fichier entier ou sous-ensemble
-/// interne.
+/// Range of the DTD text of the document: whole file or internal
+/// subset.
 fn dtd_region(grammar: Option<&Grammar>, uri: &str, source: &str) -> Option<Range<usize>> {
     if is_dtd_uri(uri) {
         return Some(0..source.len());
@@ -443,8 +441,8 @@ fn dtd_region(grammar: Option<&Grammar>, uri: &str, source: &str) -> Option<Rang
     grammar?.doctype.as_ref()?.internal_subset.clone()
 }
 
-/// Le curseur est dans du texte DTD (fichier `.dtd` ou sous-ensemble
-/// interne du DOCTYPE).
+/// The cursor is in DTD text (`.dtd` file or internal subset of the
+/// DOCTYPE).
 pub(crate) fn in_dtd_text(
     grammar: Option<&Grammar>,
     uri: &str,
@@ -455,7 +453,7 @@ pub(crate) fn in_dtd_text(
         .is_some_and(|region| region.start <= offset && offset <= region.end)
 }
 
-/// Début du nom en cours de saisie avant `offset`.
+/// Start of the name being typed before `offset`.
 fn typed_start(source: &str, offset: usize) -> usize {
     source[..offset]
         .char_indices()
@@ -465,7 +463,7 @@ fn typed_start(source: &str, offset: usize) -> usize {
         .map_or(offset, |(index, _)| index)
 }
 
-/// Nom (suite de `NameChar`) qui contient `offset`.
+/// Name (run of `NameChar`s) containing `offset`.
 fn word_at(source: &str, offset: usize) -> Option<Range<usize>> {
     let start = typed_start(source, offset);
     let end = source[offset..]
@@ -483,15 +481,15 @@ fn floor_boundary(source: &str, offset: usize) -> usize {
     offset
 }
 
-/// Le curseur est à l'intérieur d'un commentaire, d'une section CDATA,
-/// d'une instruction de traitement ou d'une déclaration.
+/// The cursor is inside a comment, a CDATA section, a processing
+/// instruction or a declaration.
 fn in_markup(source: &str, offset: usize) -> bool {
     scan_markup(source)
         .iter()
         .any(|markup| markup.range.start < offset && (offset < markup.range.end || !markup.closed))
 }
 
-/// Contexte dans une balise ouvrante.
+/// Context in a start tag.
 #[derive(Debug, PartialEq, Eq)]
 enum TagContext<'s> {
     ElementName,
@@ -505,7 +503,7 @@ enum TagContext<'s> {
     },
 }
 
-/// Analyse le début de balise `fragment` (après `<`, jusqu'au curseur).
+/// Parses the tag start `fragment` (after `<`, up to the cursor).
 fn tag_context(fragment: &str) -> Option<TagContext<'_>> {
     if fragment.starts_with(['/', '!', '?']) {
         return None;
@@ -570,7 +568,7 @@ fn tag_context(fragment: &str) -> Option<TagContext<'_>> {
 }
 
 // ---------------------------------------------------------------------------
-// Complétion
+// Completion
 // ---------------------------------------------------------------------------
 
 fn item(
@@ -627,7 +625,7 @@ fn element_item(dtd: &Dtd, name: &str) -> Value {
     )
 }
 
-/// Entités générales (et prédéfinies) après `&`.
+/// General (and predefined) entities after `&`.
 fn entity_items(dtd: Option<&Dtd>) -> Vec<Value> {
     let mut items = dtd_core::PREDEFINED_ENTITIES
         .iter()
@@ -662,7 +660,7 @@ fn entity_items(dtd: Option<&Dtd>) -> Vec<Value> {
     items
 }
 
-/// Propositions DTD au curseur `offset` du document `uri`.
+/// DTD suggestions at the cursor `offset` of the document `uri`.
 pub(crate) fn completions(
     grammar: Option<&Grammar>,
     uri: &str,
@@ -772,7 +770,7 @@ pub(crate) fn completions(
     }
 }
 
-/// Valeurs des attributs de type ID du document.
+/// Values of the ID attributes of the document.
 fn document_ids(dtd: &Dtd, source: &str) -> Vec<String> {
     let mut ids = Vec::new();
     for tag in scan_tags(source) {
@@ -796,7 +794,7 @@ fn document_ids(dtd: &Dtd, source: &str) -> Vec<String> {
     ids
 }
 
-/// Propositions dans du texte DTD commençant en `region_start`.
+/// Suggestions in DTD text starting at `region_start`.
 fn dtd_text_completions(
     dtd: Option<&Dtd>,
     source: &str,
@@ -804,7 +802,7 @@ fn dtd_text_completions(
     offset: usize,
 ) -> Vec<Value> {
     let before = &source[region_start..offset];
-    // Dans un commentaire ou un littéral : rien.
+    // In a comment or a literal: nothing.
     if before
         .rfind("<!--")
         .is_some_and(|start| !before[start..].contains("-->"))
@@ -903,7 +901,7 @@ fn dtd_text_completions(
 }
 
 // ---------------------------------------------------------------------------
-// Survol et définition
+// Hover and definition
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, PartialEq, Eq)]
@@ -915,7 +913,7 @@ enum Target {
     Notation(String),
 }
 
-/// Construction DTD sous le curseur et son étendue.
+/// DTD construct under the cursor and its range.
 fn target_at(
     grammar: &Grammar,
     uri: &str,
@@ -1018,7 +1016,7 @@ fn target_at(
     })
 }
 
-/// Déclaration de la cible : texte, documentation et emplacement.
+/// Declaration of the target: text, documentation and location.
 fn declaration_of(dtd: &Dtd, target: &Target) -> Option<(String, Option<String>, Location)> {
     Some(match target {
         Target::Element(name) => {
@@ -1089,7 +1087,7 @@ fn escape_markdown(text: &str) -> String {
     escaped
 }
 
-/// Emplacement réel (URI, texte, étendue) d'une déclaration.
+/// Actual location (URI, text, range) of a declaration.
 fn resolve_location<'g>(
     grammar: &'g Grammar,
     uri: &str,
@@ -1108,7 +1106,7 @@ fn resolve_location<'g>(
     ))
 }
 
-/// Répond à `textDocument/hover` sur une construction déclarée par la DTD.
+/// Answers `textDocument/hover` on a construct declared by the DTD.
 pub(crate) fn hover(grammar: &Grammar, uri: &str, source: &str, offset: usize) -> Option<Value> {
     let (target, range) = target_at(grammar, uri, source, offset)?;
     let (text, documentation, location) = declaration_of(&grammar.dtd, &target)?;
@@ -1121,7 +1119,7 @@ pub(crate) fn hover(grammar: &Grammar, uri: &str, source: &str, offset: usize) -
         && let Some(name) = uri_to_path(&target_uri).file_name()
     {
         sections.push(format!(
-            "Source : [{}]({target_uri})",
+            "Source: [{}]({target_uri})",
             escape_markdown(&name.to_string_lossy())
         ));
     }
@@ -1135,8 +1133,8 @@ pub(crate) fn hover(grammar: &Grammar, uri: &str, source: &str, offset: usize) -
     }))
 }
 
-/// Répond à `textDocument/definition` : déclaration DTD de l'élément, de
-/// l'attribut, de l'entité ou de la notation sous le curseur.
+/// Answers `textDocument/definition`: DTD declaration of the element,
+/// attribute, entity or notation under the cursor.
 pub(crate) fn definition(
     grammar: &Grammar,
     uri: &str,
@@ -1157,7 +1155,7 @@ pub(crate) fn definition(
 }
 
 // ---------------------------------------------------------------------------
-// Correctifs
+// Fixes
 // ---------------------------------------------------------------------------
 
 fn escape_value(value: &str) -> String {
@@ -1167,7 +1165,7 @@ fn escape_value(value: &str) -> String {
         .replace('"', "&quot;")
 }
 
-/// Insertion de `<!ENTITY name "">` dans le DOCTYPE (créé au besoin).
+/// Inserts `<!ENTITY name "">` into the DOCTYPE (created if needed).
 fn declare_entity_edit(
     grammar: Option<&Grammar>,
     source: &str,
@@ -1218,7 +1216,7 @@ fn declare_entity_edit(
     }
 }
 
-/// Correctifs DTD de l'étendue demandée.
+/// DTD fixes for the requested range.
 pub(crate) fn code_actions(actions: &mut Actions<'_>, grammar: Option<&Grammar>) {
     if !actions.wants(QUICK_FIX) {
         return;
@@ -1237,7 +1235,7 @@ pub(crate) fn code_actions(actions: &mut Actions<'_>, grammar: Option<&Grammar>)
         };
         let diagnostics = actions.matching(ENTITY_CODE, "kind", problem.kind.id(), &problem.range);
         actions.push(
-            format!("Déclarer l'entité « &{name}; » dans le DOCTYPE"),
+            format!("Declare the entity '&{name};' in the DOCTYPE"),
             QUICK_FIX,
             vec![edit],
             diagnostics,
@@ -1260,7 +1258,7 @@ pub(crate) fn code_actions(actions: &mut Actions<'_>, grammar: Option<&Grammar>)
                 insert_at,
                 ..
             } => actions.push(
-                format!("Ajouter l'attribut requis « {attribute} »"),
+                format!("Add required attribute '{attribute}'"),
                 QUICK_FIX,
                 vec![(
                     *insert_at..*insert_at,
@@ -1272,7 +1270,7 @@ pub(crate) fn code_actions(actions: &mut Actions<'_>, grammar: Option<&Grammar>)
             InstanceProblemKind::InvalidEnumeration { values } => {
                 for value in values.iter().take(MAX_VALUE_ACTIONS) {
                     actions.push(
-                        format!("Remplacer par « {value} »"),
+                        format!("Replace with '{value}'"),
                         QUICK_FIX,
                         vec![(problem.range.clone(), escape_value(value))],
                         diagnostics.clone(),
@@ -1281,7 +1279,7 @@ pub(crate) fn code_actions(actions: &mut Actions<'_>, grammar: Option<&Grammar>)
                 }
             }
             InstanceProblemKind::FixedValue { expected } => actions.push(
-                format!("Remplacer par la valeur fixe « {expected} »"),
+                format!("Replace with the fixed value '{expected}'"),
                 QUICK_FIX,
                 vec![(problem.range.clone(), escape_value(expected))],
                 diagnostics,
@@ -1293,7 +1291,7 @@ pub(crate) fn code_actions(actions: &mut Actions<'_>, grammar: Option<&Grammar>)
 }
 
 // ---------------------------------------------------------------------------
-// Symboles
+// Symbols
 // ---------------------------------------------------------------------------
 
 mod symbol_kind {
@@ -1303,8 +1301,8 @@ mod symbol_kind {
     pub(super) const TYPE_PARAMETER: u8 = 26;
 }
 
-/// Symboles d'un fichier DTD : éléments (avec leurs attributs), entités et
-/// notations déclarés dans le fichier lui-même.
+/// Symbols of a DTD file: elements (with their attributes), entities and
+/// notations declared in the file itself.
 pub(crate) fn document_symbols(
     grammar: &Grammar,
     uri: &str,
@@ -1319,7 +1317,7 @@ pub(crate) fn document_symbols(
             "end": lines.position(source, range.end),
         })
     };
-    // Déclaration et nom ancrés dans le document, s'ils y sont.
+    // Declaration and name anchored in the document, when they are there.
     let local = |declaration: &Location, name: &Location| {
         let declaration = dtd.anchor(declaration);
         let name = dtd.anchor(name);
@@ -1435,7 +1433,7 @@ pub(crate) fn document_symbols(
 mod tests {
     use super::*;
 
-    /// Dossier temporaire propre au test.
+    /// Test-specific temporary directory.
     fn directory(name: &str) -> PathBuf {
         let directory =
             std::env::temp_dir().join(format!("xml-lsp-dtd {name} {}", std::process::id()));
@@ -1513,7 +1511,7 @@ mod tests {
         source.find(marker).expect("marker should exist")
     }
 
-    const MEMO: &str = "<?xml version=\"1.0\"?>\n<!DOCTYPE memo [\n  <!-- Un mémo. -->\n  <!ELEMENT memo (to+, from, body)>\n  <!ELEMENT to (#PCDATA)>\n  <!ELEMENT from (#PCDATA)>\n  <!ELEMENT body (#PCDATA | ref)*>\n  <!ELEMENT ref EMPTY>\n  <!-- Priorité du mémo. -->\n  <!ATTLIST memo priority (low | normal | high) \"normal\" id ID #REQUIRED>\n  <!ATTLIST ref target IDREF #REQUIRED>\n  <!ENTITY company \"ACME\">\n  <!ENTITY % shared \"x\">\n]>\n";
+    const MEMO: &str = "<?xml version=\"1.0\"?>\n<!DOCTYPE memo [\n  <!-- A memo. -->\n  <!ELEMENT memo (to+, from, body)>\n  <!ELEMENT to (#PCDATA)>\n  <!ELEMENT from (#PCDATA)>\n  <!ELEMENT body (#PCDATA | ref)*>\n  <!ELEMENT ref EMPTY>\n  <!-- Memo priority. -->\n  <!ATTLIST memo priority (low | normal | high) \"normal\" id ID #REQUIRED>\n  <!ATTLIST ref target IDREF #REQUIRED>\n  <!ENTITY company \"ACME\">\n  <!ENTITY % shared \"x\">\n]>\n";
 
     #[test]
     fn parses_tag_contexts() {
@@ -1547,24 +1545,24 @@ mod tests {
             completions(grammar.as_ref(), uri, source, source.len())
         };
 
-        // Racine : nom du DOCTYPE.
+        // Root: name of the DOCTYPE.
         let source = format!("{MEMO}<");
         assert_eq!(labels(&complete(&mut fixture, &source)), vec!["memo"]);
-        // Enfants permis après ceux déjà présents.
+        // Children allowed after the ones already present.
         let source = format!("{MEMO}<memo id=\"m1\"><to>a</to><");
         let items = complete(&mut fixture, &source);
         assert_eq!(labels(&items), vec!["from", "to"]);
         assert_eq!(items[0]["detail"], "<!ELEMENT from (#PCDATA)>");
         let source = format!("{MEMO}<memo id=\"m1\"><body>text <");
         assert_eq!(labels(&complete(&mut fixture, &source)), vec!["ref"]);
-        // Attributs non présents, avec documentation.
+        // Attributes not present yet, with documentation.
         let source = format!("{MEMO}<memo id=\"m1\" ");
         let items = complete(&mut fixture, &source);
         assert_eq!(labels(&items), vec!["priority"]);
         assert_eq!(items[0]["insertText"], "priority=\"$1\"");
         assert_eq!(items[0]["insertTextFormat"], 2);
-        assert_eq!(items[0]["documentation"]["value"], "Priorité du mémo.");
-        // Valeurs énumérées et ID existants pour IDREF.
+        assert_eq!(items[0]["documentation"]["value"], "Memo priority.");
+        // Enumerated values and existing IDs for IDREF.
         let source = format!("{MEMO}<memo id=\"m1\" priority=\"");
         assert_eq!(
             labels(&complete(&mut fixture, &source)),
@@ -1572,7 +1570,7 @@ mod tests {
         );
         let source = format!("{MEMO}<memo id=\"m1\"><body><ref target=\"");
         assert_eq!(labels(&complete(&mut fixture, &source)), vec!["m1"]);
-        // Entités après `&`, dans le texte et les valeurs d'attributs.
+        // Entities after `&`, in text and attribute values.
         let source = format!("{MEMO}<memo id=\"m1\"><to>&co");
         let items = complete(&mut fixture, &source);
         assert_eq!(
@@ -1581,10 +1579,10 @@ mod tests {
         );
         assert_eq!(items[5]["insertText"], "company;");
         assert_eq!(items[5]["detail"], "<!ENTITY company \"ACME\">");
-        // Sans DTD : entités prédéfinies seulement.
+        // Without a DTD: predefined entities only.
         let source = "<a b=\"&";
         assert_eq!(complete(&mut fixture, source).len(), 5);
-        // Rien dans un commentaire.
+        // Nothing in a comment.
         let source = format!("{MEMO}<memo id=\"m1\"><!-- &");
         assert!(complete(&mut fixture, &source).is_empty());
     }
@@ -1617,7 +1615,7 @@ mod tests {
         );
         assert_eq!(
             labels(&complete(&mut fixture, &format!("{base}<!ELEMENT q (p, "))),
-            // `q` est déjà déclaré par la déclaration en cours (récursion permise).
+            // `q` is already declared by the current declaration (recursion allowed).
             vec!["p", "b", "q"]
         );
         assert_eq!(
@@ -1633,7 +1631,7 @@ mod tests {
         );
         assert!(complete(&mut fixture, &format!("{base}<!ENTITY x \"<")).is_empty());
 
-        // Sous-ensemble interne d'un document d'instance.
+        // Internal subset of an instance document.
         let uri = "file:///tmp/doc.xml";
         let source = "<!DOCTYPE r [\n  <!ELEMENT r EMPTY>\n  <!";
         let grammar = fixture.grammar(uri, source);
@@ -1648,7 +1646,7 @@ mod tests {
     fn hovers_and_navigates_to_external_declarations() {
         let directory = directory("hover");
         let dtd_path = directory.join("memo.dtd");
-        let dtd_text = "<!-- Destinataire\n     du mémo. -->\n<!ELEMENT to (#PCDATA)>\n<!ELEMENT memo (to)>\n<!-- Niveau. -->\n<!ATTLIST memo level NMTOKEN #IMPLIED>\n<!ENTITY sign \"— ACME\">\n";
+        let dtd_text = "<!-- Recipient\n     of the memo. -->\n<!ELEMENT to (#PCDATA)>\n<!ELEMENT memo (to)>\n<!-- Level. -->\n<!ATTLIST memo level NMTOKEN #IMPLIED>\n<!ENTITY sign \"— ACME\">\n";
         fs::write(&dtd_path, dtd_text).expect("dtd should be written");
         let uri = path_to_uri(&directory.join("memo.xml"));
         let source =
@@ -1670,9 +1668,9 @@ mod tests {
             markdown.starts_with("```xml\n<!ELEMENT to (#PCDATA)>\n```"),
             "{markdown}"
         );
-        assert!(markdown.contains("Destinataire\ndu mémo."), "{markdown}");
+        assert!(markdown.contains("Recipient\nof the memo."), "{markdown}");
         assert!(
-            markdown.contains("Source : [memo.dtd](file://"),
+            markdown.contains("Source: [memo.dtd](file://"),
             "{markdown}"
         );
         assert_eq!(
@@ -1691,7 +1689,7 @@ mod tests {
             attribute["contents"]["value"]
                 .as_str()
                 .unwrap()
-                .contains("Niveau.")
+                .contains("Level.")
         );
         let entity = hover_on("&sign;", 2);
         assert!(
@@ -1722,7 +1720,7 @@ mod tests {
             json!({"line": 6, "character": 9})
         );
 
-        // Dans le fichier DTD lui-même : nom cité dans un modèle.
+        // In the DTD file itself: name referenced in a model.
         let dtd_uri = path_to_uri(&dtd_path);
         let dtd_grammar = fixture.grammar(&dtd_uri, dtd_text).expect("grammar");
         let offset = at(dtd_text, "(to)") + 1;
@@ -1735,8 +1733,8 @@ mod tests {
         let offset = at(dtd_text, "level");
         let hovered = hover(&dtd_grammar, &dtd_uri, dtd_text, offset).unwrap();
         let markdown = hovered["contents"]["value"].as_str().unwrap();
-        assert!(markdown.contains("Niveau."), "{markdown}");
-        // Pas de lien « Source » vers le fichier lui-même.
+        assert!(markdown.contains("Level."), "{markdown}");
+        // No "Source" link to the file itself.
         assert!(!markdown.contains("Source"), "{markdown}");
         let _ = fs::remove_dir_all(&directory);
     }
@@ -1757,7 +1755,7 @@ mod tests {
         let uri = path_to_uri(&directory.join("doc.xml"));
         let mut fixture = Fixture::new();
 
-        // Erreurs d'un fichier externe résumées sur l'identifiant système.
+        // Errors of an external file summarized on the system identifier.
         let source = "<!DOCTYPE r SYSTEM \"broken.dtd\"><r><a/><b/></r>";
         let diagnostics = fixture.diagnostics(&uri, source);
         assert_eq!(
@@ -1769,21 +1767,21 @@ mod tests {
             ]
         );
         let summary = diagnostics[0]["message"].as_str().unwrap();
-        assert!(summary.starts_with("2 erreurs dans la DTD"), "{summary}");
+        assert!(summary.starts_with("2 errors in the DTD"), "{summary}");
         assert!(summary.contains("(broken.dtd:3)"), "{summary}");
         assert_eq!(
             diagnostics[0]["range"],
             json!({"start": {"line": 0, "character": 20}, "end": {"line": 0, "character": 30}})
         );
 
-        // Document valide sauf une entité inconnue.
+        // Valid document except for an unknown entity.
         let source = "<!DOCTYPE r SYSTEM \"ok.dtd\"><r><a>&x; &amp;</a></r>";
         assert_eq!(
             kinds(&fixture.diagnostics(&uri, source)),
             vec![kind("xml-entity", "undefinedEntity", 1)]
         );
-        // DTD distante : avertissement, pas de validation, entités inconnues
-        // en avertissement.
+        // Remote DTD: warning, no validation, unknown entities as
+        // warnings.
         let source = "<!DOCTYPE r SYSTEM \"http://example.com/r.dtd\"><r><zzz>&x;</zzz></r>";
         let diagnostics = fixture.diagnostics(&uri, source);
         assert_eq!(
@@ -1799,18 +1797,18 @@ mod tests {
                 .unwrap()
                 .contains("xml.catalogs")
         );
-        // Fichier absent : erreur.
+        // Missing file: error.
         let source = "<!DOCTYPE r SYSTEM \"absent.dtd\"><r/>";
         assert_eq!(
             kinds(&fixture.diagnostics(&uri, source)),
             vec![kind("dtd-grammar", "externalLoad", 1)]
         );
-        // Sans DOCTYPE : entités inconnues seulement.
+        // Without a DOCTYPE: unknown entities only.
         assert_eq!(
             kinds(&fixture.diagnostics(&uri, "<r>&nbsp;</r>")),
             vec![kind("xml-entity", "undefinedEntity", 1)]
         );
-        // DOCTYPE interdit : aucune analyse DTD.
+        // DOCTYPE not allowed: no DTD analysis.
         let disallowed = ValidationSettings {
             disallow_doc_type_decl: true,
             ..ValidationSettings::default()
@@ -1821,7 +1819,7 @@ mod tests {
                 .diagnostics_with(&uri, source, &disallowed)
                 .is_empty()
         );
-        // `&x;` inconnue rend le contenu de `r` opaque : pas d'erreur EMPTY.
+        // Unknown `&x;` makes the content of `r` opaque: no EMPTY error.
         assert_eq!(
             kinds(&fixture.diagnostics(&uri, source)),
             vec![
@@ -1830,7 +1828,7 @@ mod tests {
             ]
         );
 
-        // Entités externes : vérifiées seulement avec resolveExternalEntities.
+        // External entities: checked only with resolveExternalEntities.
         let source = "<!DOCTYPE r [<!ELEMENT r ANY><!ENTITY chap SYSTEM \"chap.xml\"><!ENTITY here SYSTEM \"ok.dtd\">]><r>&chap;&here;</r>";
         assert!(fixture.diagnostics(&uri, source).is_empty());
         let resolving = ValidationSettings {
@@ -1842,7 +1840,7 @@ mod tests {
             vec![kind("xml-entity", "externalEntity", 2)]
         );
 
-        // Fichier DTD ouvert : erreurs à leur place.
+        // Open DTD file: errors in place.
         let dtd_uri = path_to_uri(&directory.join("edit.dtd"));
         let diagnostics = fixture.diagnostics(
             &dtd_uri,
@@ -1890,7 +1888,7 @@ mod tests {
             Some(directory.join("dtds/note.dtd").as_path())
         );
 
-        // Tampon ouvert prioritaire sur le disque (même non enregistré).
+        // Open buffer takes precedence over the disk (even when unsaved).
         let buffer = directory.join("buffer.dtd");
         fixture.documents.insert(
             path_to_uri(&buffer),
@@ -1928,7 +1926,7 @@ mod tests {
         assert_eq!(
             fixes(source, offset..offset),
             vec![(
-                "Déclarer l'entité « &x; » dans le DOCTYPE".to_owned(),
+                "Declare the entity '&x;' in the DOCTYPE".to_owned(),
                 "<!DOCTYPE r [\n  <!ELEMENT r ANY>\n  <!ENTITY x \"\">\n]>\n<r>&x;</r>".to_owned()
             )]
         );
@@ -1950,11 +1948,11 @@ mod tests {
             fixes(source, 0..source.len()),
             vec![
                 (
-                    "Ajouter l'attribut requis « kind »".to_owned(),
+                    "Add required attribute 'kind'".to_owned(),
                     source.replace("mode=\"y\"  />", "mode=\"y\" kind=\"a\"  />")
                 ),
                 (
-                    "Remplacer par la valeur fixe « x »".to_owned(),
+                    "Replace with the fixed value 'x'".to_owned(),
                     source.replace("mode=\"y\"", "mode=\"x\"")
                 ),
             ]
@@ -1976,7 +1974,7 @@ mod tests {
         let children = symbols[1]["children"].as_array().unwrap();
         assert_eq!(children.len(), 2);
         assert_eq!(children[0]["name"], "id");
-        // Attribut issu de `%common;` : sélection sur la référence.
+        // Attribute coming from `%common;`: selection on the reference.
         assert_eq!(
             children[0]["selectionRange"]["start"],
             json!({"line": 2, "character": 15})

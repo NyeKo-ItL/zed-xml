@@ -1,14 +1,14 @@
-//! Modèles de contenu (`<!ELEMENT>`) et automate de reconnaissance.
+//! Content models (`<!ELEMENT>`) and their recognition automaton.
 //!
-//! Un modèle `children` est compilé en automate fini non déterministe
-//! (construction de Thompson : une paire d'états par particule, transitions
-//! epsilon pour `?`, `*`, `+` et les choix) puis simulé par ensembles
-//! d'états. La taille de l'automate est linéaire en la taille du modèle et
-//! la reconnaissance en `O(états × enfants)`, sans retour arrière.
+//! A `children` model is compiled into a nondeterministic finite automaton
+//! (Thompson construction: one pair of states per particle, epsilon
+//! transitions for `?`, `*`, `+` and choices) and then simulated with sets of
+//! states. The automaton size is linear in the model size and recognition
+//! is `O(states × children)`, without backtracking.
 
 use std::fmt;
 
-/// Cardinalité d'une particule (`?`, `*`, `+` ou aucune).
+/// Cardinality of a particle (`?`, `*`, `+` or none).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Occurrence {
     Once,
@@ -28,7 +28,7 @@ impl Occurrence {
     }
 }
 
-/// Particule d'un modèle `children` : nom, séquence (`,`) ou choix (`|`).
+/// Particle of a `children` model: name, sequence (`,`) or choice (`|`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParticleKind {
     Name(String),
@@ -43,7 +43,7 @@ pub struct ContentParticle {
 }
 
 impl ContentParticle {
-    /// Noms d'éléments cités par la particule, dans l'ordre, sans doublon.
+    /// Element names referenced by the particle, in order, without duplicates.
     pub fn names(&self) -> Vec<&str> {
         let mut names = Vec::new();
         self.collect_names(&mut names);
@@ -90,22 +90,22 @@ impl fmt::Display for ContentParticle {
     }
 }
 
-/// Spécification de contenu d'une déclaration `<!ELEMENT>`.
+/// Content specification of an `<!ELEMENT>` declaration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContentSpec {
-    /// `EMPTY` : aucun contenu.
+    /// `EMPTY`: no content.
     Empty,
-    /// `ANY` : tout élément déclaré et du texte.
+    /// `ANY`: any declared element and text.
     Any,
-    /// `(#PCDATA | a | b)*` : texte et éléments cités, dans n'importe quel
-    /// ordre.
+    /// `(#PCDATA | a | b)*`: text and the listed elements, in any
+    /// order.
     Mixed(Vec<String>),
-    /// Modèle d'éléments seuls (espaces blancs permis entre les enfants).
+    /// Element-only model (whitespace allowed between children).
     Children(ContentParticle),
 }
 
 impl ContentSpec {
-    /// Noms d'éléments cités par le modèle.
+    /// Element names referenced by the model.
     pub fn names(&self) -> Vec<&str> {
         match self {
             ContentSpec::Empty | ContentSpec::Any => Vec::new(),
@@ -123,7 +123,7 @@ impl fmt::Display for ContentSpec {
             ContentSpec::Mixed(names) if names.is_empty() => formatter.write_str("(#PCDATA)"),
             ContentSpec::Mixed(names) => write!(formatter, "(#PCDATA | {})*", names.join(" | ")),
             ContentSpec::Children(particle) => {
-                // Un nom seul s'écrit entre parenthèses dans une déclaration.
+                // A single name is written between parentheses in a declaration.
                 if matches!(particle.kind, ParticleKind::Name(_)) {
                     write!(formatter, "({particle})")
                 } else {
@@ -140,7 +140,7 @@ struct State {
     transitions: Vec<(String, usize)>,
 }
 
-/// Automate de reconnaissance d'un modèle `children`.
+/// Recognition automaton of a `children` model.
 #[derive(Debug, Clone)]
 pub struct ContentAutomaton {
     states: Vec<State>,
@@ -166,7 +166,7 @@ impl ContentAutomaton {
         self.states.len() - 1
     }
 
-    /// Construit le fragment de `particle` ; retourne `(entrée, sortie)`.
+    /// Builds the fragment of `particle`; returns `(entry, exit)`.
     fn build(&mut self, particle: &ContentParticle) -> (usize, usize) {
         let (start, end) = match &particle.kind {
             ParticleKind::Name(name) => {
@@ -217,7 +217,7 @@ impl ContentAutomaton {
         }
     }
 
-    /// Fermeture epsilon de `states`, triée.
+    /// Epsilon closure of `states`, sorted.
     fn closure(&self, states: impl IntoIterator<Item = usize>) -> Vec<usize> {
         let mut seen = vec![false; self.states.len()];
         let mut stack = states.into_iter().collect::<Vec<_>>();
@@ -233,7 +233,7 @@ impl ContentAutomaton {
         closure
     }
 
-    /// Reconnaisseur positionné au début du contenu.
+    /// Recognizer positioned at the start of the content.
     pub fn matcher(&self) -> ContentMatcher<'_> {
         ContentMatcher {
             automaton: self,
@@ -241,14 +241,14 @@ impl ContentAutomaton {
         }
     }
 
-    /// Indique si la suite de noms `names` est un contenu valide.
+    /// Whether the sequence of names `names` is valid content.
     pub fn matches<'n>(&self, names: impl IntoIterator<Item = &'n str>) -> bool {
         let mut matcher = self.matcher();
         names.into_iter().all(|name| matcher.feed(name)) && matcher.accepts()
     }
 }
 
-/// Reconnaissance incrémentale d'une suite d'enfants.
+/// Incremental recognition of a sequence of children.
 #[derive(Debug, Clone)]
 pub struct ContentMatcher<'a> {
     automaton: &'a ContentAutomaton,
@@ -256,8 +256,8 @@ pub struct ContentMatcher<'a> {
 }
 
 impl ContentMatcher<'_> {
-    /// Consomme l'enfant `name`. Retourne `false` (et reste sur place) si
-    /// l'élément n'est pas permis à cette position.
+    /// Consumes the child `name`. Returns `false` (and stays in place) if the
+    /// element is not allowed at this position.
     pub fn feed(&mut self, name: &str) -> bool {
         let next = self
             .current
@@ -273,12 +273,12 @@ impl ContentMatcher<'_> {
         true
     }
 
-    /// Le contenu consommé jusqu'ici est complet.
+    /// The content consumed so far is complete.
     pub fn accepts(&self) -> bool {
         self.current.binary_search(&self.automaton.accept).is_ok()
     }
 
-    /// Noms d'éléments permis à la position courante, triés.
+    /// Element names allowed at the current position, sorted.
     pub fn expected(&self) -> Vec<String> {
         let mut names = self
             .current
@@ -364,7 +364,7 @@ mod tests {
         assert!(!automaton.matches(["a", "b", "b"]));
         assert!(!automaton.matches([]));
 
-        // ((a | b)*, c)* : ambiguïtés et boucles epsilon sans blocage.
+        // ((a | b)*, c)*: ambiguities and epsilon loops without getting stuck.
         let nested = group(
             false,
             vec![

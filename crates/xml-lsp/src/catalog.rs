@@ -1,28 +1,28 @@
-//! Catalogues XML OASIS 1.1 (réglage `xml.catalogs`, comme LemMinX).
+//! OASIS XML Catalogs 1.1 (`xml.catalogs` setting, like LemMinX).
 //!
-//! Un catalogue associe des identifiants (identifiant système ou public
-//! d'une DTD, URI d'un schéma ou espace de noms) à des fichiers locaux, ce
-//! qui permet de valider et compléter hors ligne un document dont
-//! `xsi:schemaLocation` pointe vers une URL `http(s)`.
+//! A catalog maps identifiers (system or public identifier of a DTD, URI of
+//! a schema or namespace) to local files, which makes it possible to
+//! validate and complete offline a document whose `xsi:schemaLocation`
+//! points to an `http(s)` URL.
 //!
-//! Entrées reconnues (espace de noms
-//! `urn:oasis:names:tc:entity:xmlns:xml:catalog`) : `system`, `public`,
+//! Recognized entries (namespace
+//! `urn:oasis:names:tc:entity:xmlns:xml:catalog`): `system`, `public`,
 //! `uri`, `rewriteSystem`, `rewriteURI`, `systemSuffix`, `uriSuffix`,
-//! `delegatePublic`, `delegateSystem`, `delegateURI`, `nextCatalog`, dans
-//! `catalog` et `group`, avec `xml:base` (sur tout élément) et `prefer`
-//! (`public` par défaut, comme Xerces). Les chemins relatifs sont résolus
-//! par rapport à `xml:base`, sinon au fichier catalogue. Les éléments d'un
-//! autre espace de noms sont ignorés avec leur contenu.
+//! `delegatePublic`, `delegateSystem`, `delegateURI`, `nextCatalog`, in
+//! `catalog` and `group`, with `xml:base` (on any element) and `prefer`
+//! (`public` by default, like Xerces). Relative paths are resolved against
+//! `xml:base`, otherwise against the catalog file. Elements of another
+//! namespace are ignored along with their content.
 //!
-//! Ordre de résolution (spécification OASIS, § 7) dans chaque catalogue de
-//! la liste : correspondance exacte, puis réécriture au plus long préfixe,
-//! puis suffixe le plus long, puis délégation (nouvelle liste formée des
-//! catalogues délégués, préfixes les plus longs d'abord) ; à défaut, les
-//! `nextCatalog` du catalogue (en profondeur, protégés contre les cycles),
-//! puis le catalogue suivant de la liste.
+//! Resolution order (OASIS specification, § 7) in each catalog of the
+//! list: exact match, then rewrite with the longest prefix, then the
+//! longest suffix, then delegation (new list made of the delegated
+//! catalogs, longest prefixes first); failing that, the catalog's
+//! `nextCatalog` entries (depth first, protected against cycles), then the
+//! next catalog of the list.
 //!
-//! Les catalogues sont relus lorsque leur date de modification ou leur
-//! taille change (voir [`Catalogs::refresh`]).
+//! Catalogs are reread when their modification time or size changes (see
+//! [`Catalogs::refresh`]).
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -40,15 +40,15 @@ use xsd_core::{SchemaLocation, SchemaLocationKind, file_uri_to_path};
 
 use crate::{links::unescape, path_to_uri};
 
-/// Espace de noms des catalogues XML OASIS.
+/// Namespace of OASIS XML catalogs.
 pub const CATALOG_NAMESPACE: &str = "urn:oasis:names:tc:entity:xmlns:xml:catalog";
-/// Profondeur maximale des délégations successives.
+/// Maximum depth of successive delegations.
 const MAX_DELEGATION_DEPTH: usize = 16;
-/// Nom du catalogue détecté à la racine des dossiers de l'espace de travail
+/// Name of the catalog detected at the root of the workspace folders
 /// (`xml.catalogsAutoDetect`).
 pub const AUTO_DETECTED_CATALOG: &str = "catalog.xml";
 
-/// Type d'entrée de catalogue.
+/// Catalog entry kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryKind {
     System,
@@ -65,7 +65,7 @@ pub enum EntryKind {
 }
 
 impl EntryKind {
-    /// Type, attribut clé et attribut cible d'un élément de catalogue.
+    /// Kind, key attribute and target attribute of a catalog element.
     fn from_element(local: &str) -> Option<(Self, Option<&'static str>, &'static str)> {
         Some(match local {
             "system" => (Self::System, Some("systemId"), "uri"),
@@ -87,7 +87,7 @@ impl EntryKind {
         })
     }
 
-    /// La cible est un autre catalogue.
+    /// The target is another catalog.
     pub fn targets_catalog(self) -> bool {
         matches!(
             self,
@@ -100,37 +100,37 @@ impl EntryKind {
     }
 }
 
-/// Entrée d'un catalogue.
+/// Catalog entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogEntry {
     pub kind: EntryKind,
-    /// Identifiant, préfixe ou suffixe comparé, normalisé (vide pour
+    /// Compared identifier, prefix or suffix, normalized (empty for
     /// `nextCatalog`).
     pub key: String,
-    /// URI absolue de la cible (fichier, préfixe de réécriture ou
-    /// catalogue), résolue contre `xml:base`.
+    /// Absolute URI of the target (file, rewrite prefix or catalog),
+    /// resolved against `xml:base`.
     pub target: String,
-    /// `prefer="public"` s'applique à l'entrée.
+    /// `prefer="public"` applies to the entry.
     pub prefer_public: bool,
-    /// Étendue de la valeur de l'attribut cible dans la source.
+    /// Range of the target attribute value in the source.
     pub target_range: Range<usize>,
 }
 
-/// Catalogue analysé.
+/// Parsed catalog.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Catalog {
     pub entries: Vec<CatalogEntry>,
 }
 
-/// Le document est un catalogue OASIS (élément racine `catalog` dans
-/// l'espace de noms des catalogues).
+/// The document is an OASIS catalog (`catalog` root element in the
+/// catalog namespace).
 pub fn is_catalog(source: &str) -> bool {
-    // Test rapide avant l'analyse.
+    // Quick check before parsing.
     source.contains(CATALOG_NAMESPACE) && parse_catalog(source, "file:///").is_ok()
 }
 
-/// Analyse un catalogue ; `base_uri` est l'URI du fichier catalogue.
-/// Tolérant : un catalogue mal formé garde les entrées reconnaissables.
+/// Parses a catalog; `base_uri` is the URI of the catalog file.
+/// Tolerant: a malformed catalog keeps the recognizable entries.
 pub fn parse_catalog(source: &str, base_uri: &str) -> Result<Catalog, String> {
     let tree = XmlTagTree::parse(source);
     let elements = tree.elements();
@@ -166,16 +166,16 @@ pub fn parse_catalog(source: &str, base_uri: &str) -> Result<Catalog, String> {
     match elements.iter().position(|element| element.parent.is_none()) {
         Some(root)
             if local_name(root) == "catalog" && namespace_of(root) == Some(CATALOG_NAMESPACE) => {}
-        _ => return Err("le document n'est pas un catalogue XML OASIS".to_owned()),
+        _ => return Err("the document is not an OASIS XML catalog".to_owned()),
     }
 
-    // Base et préférence de chaque élément (`None` : élément ignoré).
+    // Base and preference of each element (`None`: element ignored).
     let mut contexts: Vec<Option<(String, bool)>> = Vec::with_capacity(elements.len());
     let mut catalog = Catalog::default();
     for (index, element) in elements.iter().enumerate() {
         let inherited = match element.parent {
             Some(parent) => contexts[parent].clone(),
-            // Seule la première racine compte ; le contenu après elle est ignoré.
+            // Only the first root counts; content after it is ignored.
             None if index == 0 => Some((base_uri.to_owned(), true)),
             None => None,
         };
@@ -227,14 +227,14 @@ pub fn parse_catalog(source: &str, base_uri: &str) -> Result<Catalog, String> {
     Ok(catalog)
 }
 
-/// Normalise un identifiant public (espaces de bord retirés, suites
-/// d'espaces réduites à une espace).
+/// Normalizes a public identifier (surrounding whitespace removed, runs of
+/// whitespace collapsed to one space).
 pub fn normalize_public_id(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Normalise un identifiant système ou une URI (OASIS § 6.3) : encode les
-/// caractères interdits dans une URI (espaces, non-ASCII…).
+/// Normalizes a system identifier or a URI (OASIS § 6.3): encodes the
+/// characters not allowed in a URI (spaces, non-ASCII…).
 pub fn normalize_uri(value: &str) -> String {
     let mut normalized = String::with_capacity(value.len());
     for byte in value.trim().bytes() {
@@ -253,7 +253,7 @@ pub fn normalize_uri(value: &str) -> String {
     normalized
 }
 
-/// Décode un URN `urn:publicid:` en identifiant public (OASIS § 6.4).
+/// Decodes a `urn:publicid:` URN into a public identifier (OASIS § 6.4).
 pub fn unwrap_public_id_urn(value: &str) -> Option<String> {
     let rest = value
         .get(..13)
@@ -294,8 +294,8 @@ pub fn unwrap_public_id_urn(value: &str) -> Option<String> {
     Some(normalize_public_id(&result))
 }
 
-/// Schéma d'URI (au moins deux caractères, pour ne pas confondre une lettre
-/// de lecteur Windows).
+/// URI scheme (at least two characters, so that a Windows drive letter is
+/// not mistaken for one).
 fn uri_scheme(value: &str) -> Option<&str> {
     let (scheme, _) = value.split_once(':')?;
     let mut chars = scheme.chars();
@@ -305,14 +305,14 @@ fn uri_scheme(value: &str) -> Option<&str> {
     .then_some(scheme)
 }
 
-/// Résout la référence `reference` contre l'URI absolue `base` (RFC 3986,
-/// simplifiée : pas de requête ni de fragment dans la base).
+/// Resolves the reference `reference` against the absolute URI `base` (RFC
+/// 3986, simplified: no query or fragment in the base).
 pub fn resolve_uri_reference(base: &str, reference: &str) -> String {
     let reference = reference.trim();
     if uri_scheme(reference).is_some() {
         return reference.to_owned();
     }
-    // Chemin Windows absolu (`C:\…`, `C:/…`).
+    // Absolute Windows path (`C:\…`, `C:/…`).
     if reference.as_bytes().get(1) == Some(&b':') && reference.as_bytes()[0].is_ascii_alphabetic() {
         return path_to_uri(Path::new(reference));
     }
@@ -368,17 +368,17 @@ fn remove_dot_segments(path: &str) -> String {
     output.join("/")
 }
 
-/// Fichier local désigné par une URI de catalogue (`file:` uniquement).
+/// Local file designated by a catalog URI (`file:` only).
 pub fn target_path(target: &str) -> Option<PathBuf> {
     uri_scheme(target)
         .filter(|scheme| scheme.eq_ignore_ascii_case("file"))
         .map(|_| file_uri_to_path(target))
 }
 
-/// Chemins des catalogues configurés (`xml.catalogs`) : chemin absolu, URI
-/// `file:`, `~/…` ou chemin relatif au premier dossier de l'espace de
-/// travail qui le contient (au premier dossier sinon). Avec `auto_detect`,
-/// `catalog.xml` à la racine de chaque dossier est ajouté s'il existe.
+/// Paths of the configured catalogs (`xml.catalogs`): absolute path, `file:`
+/// URI, `~/…` or a path relative to the first workspace folder containing
+/// it (the first folder otherwise). With `auto_detect`, `catalog.xml` at
+/// the root of each folder is added when it exists.
 pub fn catalog_paths(configured: &[String], roots: &[PathBuf], auto_detect: bool) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     for value in configured {
@@ -427,7 +427,7 @@ pub fn catalog_paths(configured: &[String], roots: &[PathBuf], auto_detect: bool
     paths
 }
 
-/// Retire les composants `.` et `..` d'un chemin.
+/// Removes the `.` and `..` components of a path.
 fn normalize_path(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {
@@ -461,7 +461,7 @@ struct LoadedCatalog {
     catalog: Result<Arc<Catalog>, String>,
 }
 
-/// Recherche dans un catalogue.
+/// Lookup in a catalog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Query {
     External {
@@ -477,8 +477,8 @@ enum Lookup {
     NotFound,
 }
 
-/// Catalogues configurés et catalogues atteignables (`nextCatalog`,
-/// délégations), mis en cache par date de modification et taille.
+/// Configured catalogs and reachable catalogs (`nextCatalog`,
+/// delegations), cached by modification time and size.
 #[derive(Debug, Clone, Default)]
 pub struct Catalogs {
     roots: Vec<PathBuf>,
@@ -486,7 +486,7 @@ pub struct Catalogs {
 }
 
 impl Catalogs {
-    /// Catalogues construits à partir de `roots` (chargés immédiatement).
+    /// Catalogs built from `roots` (loaded immediately).
     #[cfg(test)]
     pub fn new(roots: Vec<PathBuf>) -> Self {
         let mut catalogs = Self::default();
@@ -494,26 +494,26 @@ impl Catalogs {
         catalogs
     }
 
-    /// Aucun catalogue configuré.
+    /// No catalog configured.
     pub fn is_empty(&self) -> bool {
         self.roots.is_empty()
     }
 
-    /// Tous les fichiers catalogues connus (configurés et atteignables),
-    /// triés.
+    /// All known catalog files (configured and reachable),
+    /// sorted.
     pub fn files(&self) -> Vec<PathBuf> {
         let mut files = self.files.keys().cloned().collect::<Vec<_>>();
         files.sort();
         files
     }
 
-    /// `path` est l'un des catalogues connus.
+    /// `path` is one of the known catalogs.
     #[cfg(test)]
     pub fn contains(&self, path: &Path) -> bool {
         self.files.contains_key(path)
     }
 
-    /// Erreurs de lecture ou d'analyse, par fichier.
+    /// Read or parse errors, by file.
     pub fn errors(&self) -> Vec<(PathBuf, String)> {
         let mut errors = self
             .files
@@ -530,17 +530,17 @@ impl Catalogs {
         errors
     }
 
-    /// Remplace les catalogues de premier niveau ; retourne `true` si la
-    /// résolution peut avoir changé.
+    /// Replaces the top-level catalogs; returns `true` if resolution may
+    /// have changed.
     pub fn set_roots(&mut self, roots: Vec<PathBuf>) -> bool {
         let changed = roots != self.roots;
         self.roots = roots;
         self.refresh() || changed
     }
 
-    /// Relit les catalogues modifiés sur disque (date ou taille), charge les
-    /// catalogues nouvellement atteignables et oublie les autres. Retourne
-    /// `true` si un catalogue a changé.
+    /// Rereads the catalogs modified on disk (time or size), loads the
+    /// newly reachable catalogs and forgets the others. Returns `true` if a
+    /// catalog changed.
     pub fn refresh(&mut self) -> bool {
         let mut changed = false;
         let mut reachable = HashSet::new();
@@ -557,7 +557,7 @@ impl Catalogs {
             if !up_to_date {
                 let catalog = match fs::read_to_string(&path) {
                     Ok(source) => parse_catalog(&source, &path_to_uri(&path)).map(Arc::new),
-                    Err(error) => Err(format!("catalogue illisible : {error}")),
+                    Err(error) => Err(format!("unreadable catalog: {error}")),
                 };
                 self.files.insert(
                     path.clone(),
@@ -589,8 +589,8 @@ impl Catalogs {
             .and_then(|loaded| loaded.catalog.as_deref().ok())
     }
 
-    /// Résout une URI (`uri`, `rewriteURI`, `uriSuffix`, `delegateURI`) ;
-    /// retourne l'URI cible.
+    /// Resolves a URI (`uri`, `rewriteURI`, `uriSuffix`, `delegateURI`);
+    /// returns the target URI.
     pub fn resolve_uri(&self, uri: &str) -> Option<String> {
         if self.is_empty() || uri.trim().is_empty() {
             return None;
@@ -605,13 +605,13 @@ impl Catalogs {
         self.resolve_in(&self.roots, &query, &mut HashSet::new(), 0)
     }
 
-    /// Résout un identifiant système (DTD, entité, emplacement de schéma).
+    /// Resolves a system identifier (DTD, entity, schema location).
     pub fn resolve_system(&self, system: &str) -> Option<String> {
         self.resolve_external(None, Some(system))
     }
 
-    /// Résout un identifiant externe (`PUBLIC "…" "…"` ou `SYSTEM "…"`) :
-    /// entrées système d'abord, puis publiques selon `prefer`.
+    /// Resolves an external identifier (`PUBLIC "…" "…"` or `SYSTEM "…"`):
+    /// system entries first, then public ones according to `prefer`.
     pub fn resolve_external(&self, public: Option<&str>, system: Option<&str>) -> Option<String> {
         if self.is_empty() {
             return None;
@@ -678,8 +678,8 @@ impl Catalogs {
         None
     }
 
-    /// Emplacement quelconque (identifiant système, puis URI) vers un
-    /// fichier local.
+    /// Any location (system identifier, then URI) to a local
+    /// file.
     pub fn resolve_location(&self, location: &str) -> Option<PathBuf> {
         self.resolve_system(location)
             .and_then(|target| target_path(&target))
@@ -689,10 +689,10 @@ impl Catalogs {
             })
     }
 
-    /// Résolveur d'emplacements de schéma pour `xsd_core` : l'espace de
-    /// noms (entrées `uri`) est prioritaire, comme dans Xerces/LemMinX, puis
-    /// l'emplacement (entrées système, puis `uri`). `xs:include` n'est
-    /// résolu que par son emplacement.
+    /// Schema location resolver for `xsd_core`: the namespace (`uri`
+    /// entries) takes precedence, as in Xerces/LemMinX, then the location
+    /// (system entries, then `uri`). `xs:include` is only resolved by its
+    /// location.
     pub fn resolve_schema(&self, request: &SchemaLocation<'_>) -> Option<PathBuf> {
         if self.is_empty() {
             return None;
@@ -709,8 +709,8 @@ impl Catalogs {
     }
 }
 
-/// Entrée de `entries` dont la clé (préfixe ou suffixe selon `matches`) est
-/// la plus longue ; la première en cas d'égalité.
+/// Entry of `entries` whose key (prefix or suffix according to `matches`)
+/// is the longest; the first one in case of a tie.
 fn longest<'e>(
     entries: impl Iterator<Item = &'e CatalogEntry>,
     matches: impl Fn(&str) -> bool,
@@ -733,7 +733,7 @@ fn delegates<'e>(
     if matching.is_empty() {
         return None;
     }
-    // Tri stable : préfixes les plus longs d'abord, ordre du document sinon.
+    // Stable sort: longest prefixes first, document order otherwise.
     matching.sort_by_key(|entry| std::cmp::Reverse(entry.key.len()));
     let mut paths = Vec::new();
     for path in matching
@@ -781,8 +781,8 @@ fn lookup(catalog: &Catalog, query: &Query) -> Lookup {
                 }
             }
             if let Some(public) = public {
-                // Avec un identifiant système, seules les entrées publiques
-                // sous `prefer="public"` sont considérées.
+                // With a system identifier, only public entries under
+                // `prefer="public"` are considered.
                 let eligible = |entry: &&CatalogEntry| system.is_none() || entry.prefer_public;
                 if let Some(entry) = of(EntryKind::Public)
                     .filter(eligible)
@@ -820,16 +820,16 @@ fn lookup(catalog: &Catalog, query: &Query) -> Lookup {
     }
 }
 
-/// Problème d'un catalogue ouvert : cible locale introuvable.
+/// Problem of an open catalog: local target not found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogProblem {
     pub range: Range<usize>,
     pub message: String,
 }
 
-/// Cibles locales introuvables du catalogue `source` (vide si le document
-/// n'est pas un catalogue). `document_uri` sert de base aux chemins
-/// relatifs.
+/// Missing local targets of the catalog `source` (empty if the document is
+/// not a catalog). `document_uri` is the base of relative
+/// paths.
 pub fn catalog_problems(document_uri: &str, source: &str) -> Vec<CatalogProblem> {
     if !source.contains(CATALOG_NAMESPACE) {
         return Vec::new();
@@ -844,23 +844,23 @@ pub fn catalog_problems(document_uri: &str, source: &str) -> Vec<CatalogProblem>
             let path = target_path(&entry.target)?;
             let message = match entry.kind {
                 EntryKind::RewriteSystem | EntryKind::RewriteUri => {
-                    // Seul un préfixe de dossier (`…/`) est vérifiable.
+                    // Only a directory prefix (`…/`) can be checked.
                     if !entry.target.ends_with('/') || path.is_dir() {
                         return None;
                     }
-                    format!("Dossier introuvable : {}", path.display())
+                    format!("Directory not found: {}", path.display())
                 }
                 kind if kind.targets_catalog() => {
                     if path.is_file() {
                         return None;
                     }
-                    format!("Catalogue introuvable : {}", path.display())
+                    format!("Catalog not found: {}", path.display())
                 }
                 _ => {
                     if path.is_file() {
                         return None;
                     }
-                    format!("Fichier introuvable : {}", path.display())
+                    format!("File not found: {}", path.display())
                 }
             };
             Some(CatalogProblem {
@@ -881,7 +881,7 @@ mod tests {
         format!("{HEADER}>\n{body}\n</catalog>")
     }
 
-    /// Dossier temporaire propre au test.
+    /// Test-specific temporary directory.
     fn directory(name: &str) -> PathBuf {
         let directory =
             std::env::temp_dir().join(format!("xml-lsp-catalog {name} {}", std::process::id()));
@@ -951,7 +951,7 @@ mod tests {
         );
         assert!(!is_catalog("<root/>"));
         assert!(is_catalog(&catalog("")));
-        // Préfixe explicite.
+        // Explicit prefix.
         assert!(is_catalog(
             "<c:catalog xmlns:c=\"urn:oasis:names:tc:entity:xmlns:xml:catalog\"><c:uri name=\"a\" uri=\"b\"/></c:catalog>"
         ));
@@ -1071,7 +1071,7 @@ mod tests {
             catalogs.resolve_system("http://x/a/b/exact.dtd"),
             Some(at("exact.dtd"))
         );
-        // Réécriture : le préfixe le plus long l'emporte, puis le premier.
+        // Rewrite: the longest prefix wins, then the first one.
         assert_eq!(
             catalogs.resolve_system("http://x/a/b/c.dtd"),
             Some(at("long/b/c.dtd"))
@@ -1080,7 +1080,7 @@ mod tests {
             catalogs.resolve_system("http://x/z.dtd"),
             Some(at("short/z.dtd"))
         );
-        // Suffixes (après les réécritures) : le plus long l'emporte.
+        // Suffixes (after rewrites): the longest wins.
         assert_eq!(
             catalogs.resolve_system("http://y/tail.dtd"),
             Some(at("long-suffix.dtd"))
@@ -1101,7 +1101,7 @@ mod tests {
             Some(at("end.xsd"))
         );
         assert_eq!(catalogs.resolve_uri("http://x/a/b/exact.dtd"), None);
-        // Identifiants publics et `prefer`.
+        // Public identifiers and `prefer`.
         assert_eq!(
             catalogs.resolve_external(Some("-//P//EN"), None),
             Some(at("public.dtd"))
@@ -1118,12 +1118,12 @@ mod tests {
             catalogs.resolve_external(Some("-//S//EN"), Some("unknown.ent")),
             None
         );
-        // Le système l'emporte sur le public.
+        // System wins over public.
         assert_eq!(
             catalogs.resolve_external(Some("-//P//EN"), Some("http://x/a/b/exact.dtd")),
             Some(at("exact.dtd"))
         );
-        // URN publicid.
+        // publicid URN.
         assert_eq!(
             catalogs.resolve_system("urn:publicid:-:P:EN"),
             Some(at("public.dtd"))
@@ -1183,9 +1183,9 @@ mod tests {
             catalogs.resolve_uri("urn:second"),
             Some(format!("{base}/sub/second.xsd"))
         );
-        // Cycle first -> second -> first : terminaison.
+        // Cycle first -> second -> first: terminates.
         assert_eq!(catalogs.resolve_uri("urn:none"), None);
-        // Délégation : nouvelle liste, préfixe le plus long d'abord.
+        // Delegation: new list, longest prefix first.
         assert_eq!(
             catalogs.resolve_uri("http://d/long/x"),
             Some(format!("{base}/from-long.xsd"))
@@ -1194,7 +1194,7 @@ mod tests {
             catalogs.resolve_uri("http://d/long/y"),
             Some(format!("{base}/from-short-y.xsd"))
         );
-        // Délégations circulaires : profondeur bornée.
+        // Circular delegations: bounded depth.
         assert_eq!(catalogs.resolve_uri("http://cycle/x"), None);
         assert!(catalogs.contains(&root.join("sub/second.xml")));
         assert!(catalogs.contains(&root.join("missing.xml")));
@@ -1270,7 +1270,7 @@ mod tests {
             )),
             Some(root.join("by-system.xsd"))
         );
-        // Cible distante : non résolue localement.
+        // Remote target: not resolved locally.
         assert_eq!(catalogs.resolve_location("http://remote/only"), None);
         assert_eq!(
             Catalogs::default().resolve_schema(&request(Kind::Import, Some("urn:ns"), None)),
@@ -1336,9 +1336,9 @@ mod tests {
             .map(|problem| &source[problem.range.clone()])
             .collect::<Vec<_>>();
         assert_eq!(texts, vec!["absent.xsd", "nodir/", "nocatalog.xml"]);
-        assert!(problems[0].message.starts_with("Fichier introuvable"));
-        assert!(problems[1].message.starts_with("Dossier introuvable"));
-        assert!(problems[2].message.starts_with("Catalogue introuvable"));
+        assert!(problems[0].message.starts_with("File not found"));
+        assert!(problems[1].message.starts_with("Directory not found"));
+        assert!(problems[2].message.starts_with("Catalog not found"));
         assert!(catalog_problems(&uri, "<root/>").is_empty());
         let _ = fs::remove_dir_all(&root);
     }

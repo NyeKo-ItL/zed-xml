@@ -1,33 +1,33 @@
-//! Modèle de composants XSD conservant l'arborescence du schéma et la
-//! documentation `xs:annotation/xs:documentation`.
+//! XSD component model keeping the schema tree and the
+//! `xs:annotation/xs:documentation` documentation.
 //!
-//! [`XsdSchema`](crate::XsdSchema) aplatit le schéma par nom local pour la
-//! validation ; ce modèle garde au contraire les déclarations globales et
-//! locales, les types nommés et anonymes, les groupes et les facettes, avec
-//! les noms qualifiés résolus. Il sert au survol (`textDocument/hover`) :
-//! résolution d'une déclaration d'élément dans son contexte (chemin des
-//! ancêtres), des attributs d'un type et des facettes d'un type simple.
+//! [`XsdSchema`](crate::XsdSchema) flattens the schema by local name for
+//! validation; this model instead keeps the global and local declarations,
+//! named and anonymous types, groups and facets, with resolved qualified
+//! names. It serves hover (`textDocument/hover`): resolution of an element
+//! declaration in its context (path of ancestors), of the attributes of a
+//! type and of the facets of a simple type.
 //!
-//! La documentation est normalisée : un bloc `xs:documentation` sans
-//! `xml:lang` ou en anglais est préféré, les blocs multiples sont concaténés,
-//! le balisage imbriqué (XHTML...) est réduit à son texte et les espaces sont
-//! regroupés en paragraphes. `xs:appinfo` est ignoré.
+//! Documentation is normalized: an `xs:documentation` block without
+//! `xml:lang` or in English is preferred, multiple blocks are concatenated,
+//! nested markup (XHTML...) is reduced to its text and whitespace is
+//! grouped into paragraphs. `xs:appinfo` is ignored.
 
 use std::{collections::HashMap, sync::Arc};
 
 use quick_xml::{Reader, events::Event};
 
-/// Espace de noms de XML Schema.
+/// XML Schema namespace.
 pub const XSD_NAMESPACE: &str = "http://www.w3.org/2001/XMLSchema";
-/// Espace de noms réservé du préfixe `xml`.
+/// Reserved namespace of the `xml` prefix.
 pub const XML_NAMESPACE: &str = "http://www.w3.org/XML/1998/namespace";
 
-/// Profondeur maximale suivie dans les références (groupes, dérivations),
-/// pour se protéger des schémas cycliques.
+/// Maximum depth followed through references (groups, derivations), to
+/// guard against cyclic schemas.
 const MAX_DEPTH: usize = 32;
 
-/// Nom qualifié lu dans une valeur d'attribut du schéma (`type`, `ref`,
-/// `base`...), avec son espace de noms résolu.
+/// Qualified name read from a schema attribute value (`type`, `ref`,
+/// `base`...), with its resolved namespace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XsdQName {
     pub prefix: Option<String>,
@@ -36,7 +36,7 @@ pub struct XsdQName {
 }
 
 impl XsdQName {
-    /// Nom tel qu'écrit dans le schéma (`prefix:local`).
+    /// Name as written in the schema (`prefix:local`).
     pub fn display(&self) -> String {
         match &self.prefix {
             Some(prefix) => format!("{prefix}:{}", self.local),
@@ -44,13 +44,13 @@ impl XsdQName {
         }
     }
 
-    /// Indique si le nom désigne un composant de XML Schema (`xs:string`...).
+    /// Whether the name designates an XML Schema component (`xs:string`...).
     pub fn is_builtin(&self) -> bool {
         self.namespace.as_deref() == Some(XSD_NAMESPACE)
     }
 }
 
-/// Utilisation d'un attribut (`use`).
+/// Attribute usage (`use`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum XsdUse {
     #[default]
@@ -59,13 +59,13 @@ pub enum XsdUse {
     Prohibited,
 }
 
-/// Déclaration d'élément, globale ou locale (éventuellement `ref`).
+/// Element declaration, global or local (possibly a `ref`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XsdElementDecl {
-    /// Nom local (celui de la référence pour un `ref`).
+    /// Local name (that of the reference for a `ref`).
     pub name: String,
     pub reference: Option<XsdQName>,
-    /// Espace de noms effectif des instances (`form`, `elementFormDefault`).
+    /// Effective namespace of the instances (`form`, `elementFormDefault`).
     pub namespace: Option<String>,
     pub type_name: Option<XsdQName>,
     pub anonymous_type: Option<Box<XsdTypeDef>>,
@@ -80,12 +80,12 @@ pub struct XsdElementDecl {
     pub documentation: Option<String>,
 }
 
-/// Déclaration d'attribut, globale ou locale (éventuellement `ref`).
+/// Attribute declaration, global or local (possibly a `ref`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XsdAttributeDecl {
     pub name: String,
     pub reference: Option<XsdQName>,
-    /// Espace de noms effectif (`form`, `attributeFormDefault`).
+    /// Effective namespace (`form`, `attributeFormDefault`).
     pub namespace: Option<String>,
     pub type_name: Option<XsdQName>,
     pub anonymous_type: Option<Box<XsdTypeDef>>,
@@ -96,7 +96,7 @@ pub struct XsdAttributeDecl {
     pub documentation: Option<String>,
 }
 
-/// Mode de dérivation d'un type.
+/// Derivation method of a type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum XsdDerivation {
     Restriction,
@@ -105,14 +105,14 @@ pub enum XsdDerivation {
     Union,
 }
 
-/// Valeur d'énumération et sa documentation.
+/// Enumeration value and its documentation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XsdEnumeration {
     pub value: String,
     pub documentation: Option<String>,
 }
 
-/// Facettes d'une restriction de type simple (valeurs brutes du schéma).
+/// Facets of a simple type restriction (raw schema values).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct XsdFacets {
     pub enumerations: Vec<XsdEnumeration>,
@@ -130,13 +130,13 @@ pub struct XsdFacets {
 }
 
 impl XsdFacets {
-    /// Indique si aucune facette n'est définie.
+    /// Whether no facet is defined.
     pub fn is_empty(&self) -> bool {
         *self == Self::default()
     }
 
-    /// Complète les facettes absentes avec celles du type de base (les
-    /// facettes du type dérivé restent prioritaires).
+    /// Fills in missing facets with those of the base type (the facets of
+    /// the derived type take precedence).
     fn inherit(&mut self, base: &XsdFacets) {
         if self.enumerations.is_empty() {
             self.enumerations = base.enumerations.clone();
@@ -166,7 +166,7 @@ impl XsdFacets {
     }
 }
 
-/// Compositeur d'un groupe de modèle.
+/// Compositor of a model group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum XsdCompositor {
     Sequence,
@@ -174,7 +174,7 @@ pub enum XsdCompositor {
     All,
 }
 
-/// Particule d'un modèle de contenu.
+/// Particle of a content model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum XsdParticle {
     Element(Box<XsdElementDecl>),
@@ -186,7 +186,7 @@ pub enum XsdParticle {
     Any,
 }
 
-/// Définition de type simple ou complexe, nommée ou anonyme.
+/// Simple or complex type definition, named or anonymous.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct XsdTypeDef {
     pub name: Option<String>,
@@ -195,13 +195,13 @@ pub struct XsdTypeDef {
     pub mixed: bool,
     pub simple_content: bool,
     pub derivation: Option<XsdDerivation>,
-    /// Type de base (`restriction`/`extension`).
+    /// Base type (`restriction`/`extension`).
     pub base: Option<XsdQName>,
-    /// Type des items d'une liste (`itemType`).
+    /// Item type of a list (`itemType`).
     pub item_type: Option<XsdQName>,
-    /// Types membres d'une union (`memberTypes`).
+    /// Member types of a union (`memberTypes`).
     pub member_types: Vec<XsdQName>,
-    /// Types simples anonymes de la restriction, de la liste ou de l'union.
+    /// Anonymous simple types of the restriction, list or union.
     pub inline_types: Vec<XsdTypeDef>,
     pub content: Option<XsdParticle>,
     pub attributes: Vec<XsdAttributeDecl>,
@@ -211,7 +211,7 @@ pub struct XsdTypeDef {
     pub documentation: Option<String>,
 }
 
-/// Groupe de modèle nommé (`xs:group`).
+/// Named model group (`xs:group`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XsdGroupDef {
     pub name: String,
@@ -220,7 +220,7 @@ pub struct XsdGroupDef {
     pub documentation: Option<String>,
 }
 
-/// Groupe d'attributs nommé (`xs:attributeGroup`).
+/// Named attribute group (`xs:attributeGroup`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XsdAttributeGroupDef {
     pub name: String,
@@ -231,7 +231,7 @@ pub struct XsdAttributeGroupDef {
     pub documentation: Option<String>,
 }
 
-/// Composants d'un document XSD.
+/// Components of an XSD document.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct XsdModel {
     pub target_namespace: Option<String>,
@@ -245,14 +245,14 @@ pub struct XsdModel {
     pub attribute_groups: Vec<XsdAttributeGroupDef>,
 }
 
-/// Analyse un document XSD en modèle de composants documentés.
+/// Parses an XSD document into a model of documented components.
 pub fn parse_xsd_model(source: &str) -> Result<XsdModel, String> {
     if source.len() > crate::MAX_XSD_SOURCE_BYTES {
-        return Err("schéma XSD trop volumineux".to_owned());
+        return Err("XSD schema too large".to_owned());
     }
     let (root, scopes) = build_tree(source)?;
     if !is_xsd(&root, "schema") {
-        return Err("la racine n'est pas un xs:schema".to_owned());
+        return Err("the root is not an xs:schema".to_owned());
     }
     let target_namespace = root.attribute("targetNamespace").filter(|v| !v.is_empty());
     let context = Context {
@@ -274,7 +274,7 @@ pub fn parse_xsd_model(source: &str) -> Result<XsdModel, String> {
     Ok(model)
 }
 
-/// Élément de l'arbre XML minimal construit pour l'interprétation.
+/// Element of the minimal XML tree built for interpretation.
 struct Node {
     local: String,
     namespace: Option<String>,
@@ -289,7 +289,7 @@ enum Child {
 }
 
 impl Node {
-    /// Attribut non préfixé.
+    /// Unprefixed attribute.
     fn attribute(&self, name: &str) -> Option<String> {
         self.attributes
             .iter()
@@ -309,8 +309,8 @@ impl Node {
     }
 }
 
-/// Élément XSD : espace de noms XML Schema, ou aucun (préfixe non déclaré,
-/// toléré comme le fait la validation).
+/// XSD element: XML Schema namespace, or none (undeclared prefix,
+/// tolerated as validation does).
 fn is_xsd(node: &Node, local: &str) -> bool {
     node.local == local
         && node
@@ -329,7 +329,7 @@ fn build_tree(source: &str) -> Result<(Node, Vec<Scope>), String> {
     loop {
         let event = reader
             .read_event()
-            .map_err(|error| format!("erreur XSD : {error}"))?;
+            .map_err(|error| format!("XSD error: {error}"))?;
         let empty = matches!(event, Event::Empty(_));
         match event {
             Event::Start(element) | Event::Empty(element) => {
@@ -657,7 +657,7 @@ impl Context<'_> {
         definition
     }
 
-    /// Modèle de contenu et attributs portés directement par `node`.
+    /// Content model and attributes carried directly by `node`.
     fn type_body(&self, node: &Node, definition: &mut XsdTypeDef) {
         for child in node.elements() {
             match child.local.as_str() {
@@ -743,7 +743,7 @@ impl Context<'_> {
         }
     }
 
-    /// Premier groupe de modèle (`sequence`, `choice`, `all`) de `node`.
+    /// First model group (`sequence`, `choice`, `all`) of `node`.
     fn content_of(&self, node: &Node) -> Option<XsdParticle> {
         node.elements()
             .filter(|child| matches!(child.local.as_str(), "sequence" | "choice" | "all"))
@@ -774,7 +774,7 @@ impl Context<'_> {
     }
 }
 
-/// Blocs de mise en page XHTML séparés par un paragraphe dans le texte.
+/// XHTML layout blocks separated by a paragraph in the text.
 const BLOCK_ELEMENTS: &[&str] = &[
     "p",
     "div",
@@ -797,8 +797,8 @@ const BLOCK_ELEMENTS: &[&str] = &[
     "blockquote",
 ];
 
-/// Documentation `xs:annotation/xs:documentation` directement portée par
-/// `node`, normalisée.
+/// `xs:annotation/xs:documentation` documentation carried directly by
+/// `node`, normalized.
 fn documentation(node: &Node) -> Option<String> {
     let blocks = node
         .xsd_children("annotation")
@@ -846,8 +846,8 @@ fn collect_text(node: &Node, text: &mut String) {
     }
 }
 
-/// Regroupe les lignes non vides consécutives en paragraphes séparés par
-/// une ligne vide, avec des espaces normalisés.
+/// Groups consecutive non-empty lines into paragraphs separated by a blank
+/// line, with normalized whitespace.
 pub fn normalize_documentation(text: &str) -> String {
     let mut paragraphs = Vec::new();
     let mut current: Vec<String> = Vec::new();
@@ -868,7 +868,7 @@ pub fn normalize_documentation(text: &str) -> String {
     paragraphs.join("\n\n")
 }
 
-/// Élément d'un modèle et index du schéma qui le déclare.
+/// Model element and index of the schema declaring it.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Located<'a, T> {
     pub schema: usize,
@@ -883,65 +883,65 @@ impl<T> Clone for Located<'_, T> {
 
 impl<T> Copy for Located<'_, T> {}
 
-/// Type résolu : définition (nommée ou anonyme) ou type prédéfini.
+/// Resolved type: definition (named or anonymous) or built-in type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct XsdTypeRef<'a> {
     pub schema: usize,
-    /// Nom du type tel que référencé (`None` pour un type anonyme).
+    /// Type name as referenced (`None` for an anonymous type).
     pub name: Option<&'a XsdQName>,
-    /// Définition (`None` pour un type prédéfini ou introuvable).
+    /// Definition (`None` for a built-in or missing type).
     pub definition: Option<&'a XsdTypeDef>,
 }
 
-/// Déclaration d'élément résolue dans son contexte.
+/// Element declaration resolved in its context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolvedElement<'a> {
-    /// Particule trouvée dans le modèle de contenu (éventuellement `ref`).
+    /// Particle found in the content model (possibly a `ref`).
     pub particle: Located<'a, XsdElementDecl>,
-    /// Déclaration effective (déclaration globale pour un `ref`).
+    /// Effective declaration (global declaration for a `ref`).
     pub declaration: Located<'a, XsdElementDecl>,
-    /// Type effectif (`xsi:type` compris).
+    /// Effective type (`xsi:type` included).
     pub element_type: Option<XsdTypeRef<'a>>,
-    /// `xsi:type` appliqué à l'instance.
+    /// `xsi:type` applied to the instance.
     pub xsi_type: Option<&'a XsdTypeDef>,
 }
 
-/// Déclaration d'attribut résolue.
+/// Resolved attribute declaration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolvedAttribute<'a> {
-    /// Utilisation locale (porte `use`), éventuellement `ref`.
+    /// Local usage (carries `use`), possibly a `ref`.
     pub usage: Located<'a, XsdAttributeDecl>,
-    /// Déclaration effective (déclaration globale pour un `ref`).
+    /// Effective declaration (global declaration for a `ref`).
     pub declaration: Located<'a, XsdAttributeDecl>,
 }
 
-/// Étape du chemin d'un élément d'instance, de la racine vers l'élément.
+/// Step of the path of an instance element, from the root to the element.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XsdInstanceStep {
     pub namespace: Option<String>,
     pub local: String,
-    /// `xsi:type` (espace de noms, nom local) porté par l'élément.
+    /// `xsi:type` (namespace, local name) carried by the element.
     pub xsi_type: Option<(Option<String>, String)>,
 }
 
-/// Synthèse d'un type simple : facettes cumulées le long des restrictions.
+/// Summary of a simple type: facets accumulated along the restrictions.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct XsdSimpleTypeInfo {
     pub facets: XsdFacets,
-    /// Type prédéfini d'origine (`xs:string`...).
+    /// Original built-in type (`xs:string`...).
     pub builtin: Option<XsdQName>,
     pub item_type: Option<String>,
     pub member_types: Vec<String>,
 }
 
-/// Ensemble de schémas chargés ensemble (inclusions et imports compris).
+/// Set of schemas loaded together (includes and imports included).
 #[derive(Debug, Clone, Default)]
 pub struct XsdModelSet {
     models: Vec<Arc<XsdModel>>,
 }
 
-/// Espaces de noms comparés strictement, puis sur le seul nom local en
-/// repli (schémas « caméléon », documents sans espace de noms...).
+/// Namespaces are compared strictly, then on the local name alone as a
+/// fallback ("chameleon" schemas, documents without a namespace...).
 fn namespace_matches(strict: bool, expected: Option<&str>, actual: Option<&str>) -> bool {
     !strict || expected == actual
 }
@@ -975,7 +975,7 @@ impl XsdModelSet {
         })
     }
 
-    /// Déclaration d'élément globale.
+    /// Global element declaration.
     pub fn global_element(
         &self,
         namespace: Option<&str>,
@@ -989,7 +989,7 @@ impl XsdModelSet {
         )
     }
 
-    /// Déclaration d'attribut globale.
+    /// Global attribute declaration.
     pub fn global_attribute(
         &self,
         namespace: Option<&str>,
@@ -1003,7 +1003,7 @@ impl XsdModelSet {
         )
     }
 
-    /// Type global nommé.
+    /// Named global type.
     pub fn global_type(
         &self,
         namespace: Option<&str>,
@@ -1022,7 +1022,7 @@ impl XsdModelSet {
         )
     }
 
-    /// Groupe de modèle nommé.
+    /// Named model group.
     pub fn group(&self, namespace: Option<&str>, local: &str) -> Option<Located<'_, XsdGroupDef>> {
         self.find(
             namespace,
@@ -1032,7 +1032,7 @@ impl XsdModelSet {
         )
     }
 
-    /// Groupe d'attributs nommé.
+    /// Named attribute group.
     pub fn attribute_group(
         &self,
         namespace: Option<&str>,
@@ -1046,7 +1046,7 @@ impl XsdModelSet {
         )
     }
 
-    /// Résout un nom de type : type prédéfini ou type global.
+    /// Resolves a type name: built-in type or global type.
     pub fn resolve_type<'a>(&'a self, schema: usize, name: &'a XsdQName) -> XsdTypeRef<'a> {
         if name.is_builtin() {
             return XsdTypeRef {
@@ -1069,8 +1069,8 @@ impl XsdModelSet {
         }
     }
 
-    /// Déclaration effective d'une particule : suit un `ref` vers la
-    /// déclaration globale.
+    /// Effective declaration of a particle: follows a `ref` to the global
+    /// declaration.
     pub fn element_target<'a>(
         &'a self,
         particle: Located<'a, XsdElementDecl>,
@@ -1085,8 +1085,8 @@ impl XsdModelSet {
             .unwrap_or(particle)
     }
 
-    /// Type d'une déclaration d'élément (`type`, type anonyme ou type de la
-    /// tête de substitution).
+    /// Type of an element declaration (`type`, anonymous type or the type of
+    /// the substitution group head).
     pub fn element_type<'a>(
         &'a self,
         declaration: Located<'a, XsdElementDecl>,
@@ -1119,7 +1119,7 @@ impl XsdModelSet {
         None
     }
 
-    /// Type d'un attribut (`type` ou type simple anonyme).
+    /// Type of an attribute (`type` or anonymous simple type).
     pub fn attribute_type<'a>(
         &'a self,
         declaration: Located<'a, XsdAttributeDecl>,
@@ -1135,13 +1135,13 @@ impl XsdModelSet {
         })
     }
 
-    /// Type de base d'une définition dérivée.
+    /// Base type of a derived definition.
     pub fn base_type<'a>(&'a self, reference: XsdTypeRef<'a>) -> Option<XsdTypeRef<'a>> {
         let definition = reference.definition?;
         if let Some(base) = &definition.base {
             return Some(self.resolve_type(reference.schema, base));
         }
-        // Restriction d'un type simple anonyme (`<xs:restriction><xs:simpleType>`).
+        // Restriction of an anonymous simple type (`<xs:restriction><xs:simpleType>`).
         (definition.derivation == Some(XsdDerivation::Restriction))
             .then(|| definition.inline_types.first())
             .flatten()
@@ -1152,11 +1152,11 @@ impl XsdModelSet {
             })
     }
 
-    /// Résout la déclaration d'un élément d'instance à partir du chemin de
-    /// ses ancêtres (racine en premier) : déclarations locales des modèles de
-    /// contenu, références, groupes, extensions, groupes de substitution et
-    /// `xsi:type`. Repli sur les déclarations globales (`xs:any`, contenu
-    /// inconnu).
+    /// Resolves the declaration of an instance element from the path of its
+    /// ancestors (root first): local declarations of content models,
+    /// references, groups, extensions, substitution groups and
+    /// `xsi:type`. Falls back to global declarations (`xs:any`, unknown
+    /// content).
     pub fn resolve_element_path(&self, path: &[XsdInstanceStep]) -> Option<ResolvedElement<'_>> {
         let (first, rest) = path.split_first()?;
         let particle = self.global_element(first.namespace.as_deref(), &first.local)?;
@@ -1197,7 +1197,7 @@ impl XsdModelSet {
         }
     }
 
-    /// Particules de contenu d'un type, contenu hérité par extension compris.
+    /// Content particles of a type, including content inherited by extension.
     fn content_particles<'a>(
         &'a self,
         reference: XsdTypeRef<'a>,
@@ -1258,7 +1258,7 @@ impl XsdModelSet {
                         item: declaration,
                     });
                 }
-                // Membre d'un groupe de substitution dont la particule est la tête.
+                // Member of a substitution group whose head is the particle.
                 let head = self.element_target(Located {
                     schema,
                     item: declaration,
@@ -1306,7 +1306,7 @@ impl XsdModelSet {
         }
     }
 
-    /// Déclarations globales d'éléments de tous les schémas.
+    /// Global element declarations of all schemas.
     pub fn global_elements(&self) -> impl Iterator<Item = Located<'_, XsdElementDecl>> {
         self.models.iter().enumerate().flat_map(|(schema, model)| {
             model
@@ -1316,10 +1316,10 @@ impl XsdModelSet {
         })
     }
 
-    /// Éléments autorisés dans le contenu d'un type, dans l'ordre du modèle :
-    /// particules (groupes et références de groupes dépliés, contenu hérité
-    /// par extension compris, `ref` résolus) puis membres non abstraits des
-    /// groupes de substitution. Sans doublon de nom qualifié.
+    /// Elements allowed in the content of a type, in model order: particles
+    /// (groups and group references expanded, content inherited by
+    /// extension included, `ref`s resolved) then non-abstract members of
+    /// substitution groups. Without duplicate qualified names.
     pub fn child_elements<'a>(
         &'a self,
         parent: XsdTypeRef<'a>,
@@ -1379,8 +1379,8 @@ impl XsdModelSet {
         }
     }
 
-    /// Attributs utilisables sur un type : attributs propres, groupes
-    /// d'attributs et attributs hérités du type de base.
+    /// Attributes usable on a type: own attributes, attribute groups and
+    /// attributes inherited from the base type.
     pub fn attribute_uses<'a>(
         &'a self,
         reference: XsdTypeRef<'a>,
@@ -1418,7 +1418,7 @@ impl XsdModelSet {
             let own = uses.len();
             let mut inherited = Vec::new();
             self.collect_attribute_uses(base, depth + 1, &mut inherited);
-            // Une redéclaration (restriction) masque l'attribut hérité.
+            // A redeclaration (restriction) hides the inherited attribute.
             inherited.retain(|candidate| {
                 !uses[..own]
                     .iter()
@@ -1453,8 +1453,8 @@ impl XsdModelSet {
         }
     }
 
-    /// Résout un attribut d'instance sur un élément résolu, puis parmi les
-    /// attributs globaux (attributs qualifiés comme `xml:lang`).
+    /// Resolves an instance attribute on a resolved element, then among the
+    /// global attributes (qualified attributes such as `xml:lang`).
     pub fn resolve_attribute<'a>(
         &'a self,
         element: Option<&ResolvedElement<'a>>,
@@ -1487,8 +1487,8 @@ impl XsdModelSet {
         Some(ResolvedAttribute { usage, declaration })
     }
 
-    /// Facettes cumulées, type prédéfini d'origine, liste et union d'un type
-    /// simple (ou du contenu simple d'un type complexe).
+    /// Accumulated facets, original built-in type, list and union of a simple
+    /// type (or of the simple content of a complex type).
     pub fn simple_type_info(&self, reference: XsdTypeRef<'_>) -> XsdSimpleTypeInfo {
         let mut info = XsdSimpleTypeInfo::default();
         let mut current = Some(reference);
@@ -1508,7 +1508,7 @@ impl XsdModelSet {
                             .item_type
                             .as_ref()
                             .map(XsdQName::display)
-                            .unwrap_or_else(|| "type anonyme".to_owned()),
+                            .unwrap_or_else(|| "anonymous type".to_owned()),
                     );
                     break;
                 }
@@ -1521,7 +1521,7 @@ impl XsdModelSet {
                             definition
                                 .inline_types
                                 .iter()
-                                .map(|_| "type anonyme".to_owned()),
+                                .map(|_| "anonymous type".to_owned()),
                         )
                         .collect();
                     break;
@@ -1533,7 +1533,7 @@ impl XsdModelSet {
         info
     }
 
-    /// Documentation d'une valeur d'énumération le long des restrictions.
+    /// Documentation of an enumeration value along the restrictions.
     pub fn enumeration<'a>(
         &'a self,
         reference: XsdTypeRef<'a>,
@@ -1928,7 +1928,7 @@ mod tests {
             name: None,
             definition: Some(union.item),
         });
-        assert_eq!(info.member_types, ["xs:int", "Code", "type anonyme"]);
+        assert_eq!(info.member_types, ["xs:int", "Code", "anonymous type"]);
     }
 
     #[test]

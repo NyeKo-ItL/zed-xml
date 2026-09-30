@@ -53,7 +53,7 @@ fn validates_restrictions_from_shared_fixtures() {
     assert!(
         validate_document(RESTRICTED, &schema)
             .iter()
-            .any(|diagnostic| diagnostic.message.contains("trop court"))
+            .any(|diagnostic| diagnostic.message.contains("too short"))
     );
     assert!(validate_document("<code>valid</code>", &schema).is_empty());
 }
@@ -65,7 +65,7 @@ fn validates_pattern_from_shared_fixtures() {
     assert!(
         validate_document(PATTERN_INVALID, &schema)
             .iter()
-            .any(|diagnostic| diagnostic.message.contains("motif"))
+            .any(|diagnostic| diagnostic.message.contains("pattern"))
     );
     assert!(validate_document("<code>ABC</code>", &schema).is_empty());
 }
@@ -96,7 +96,7 @@ fn validates_sequence_children_against_the_shared_schema() {
     assert!(validate_document("<catalog><book /></catalog>", &schema).is_empty());
     assert_eq!(
         validate_document(INVALID_CHILD, &schema)[0].message,
-        "élément <magazine> interdit dans <catalog>"
+        "element <magazine> not allowed in <catalog>"
     );
 }
 
@@ -107,7 +107,7 @@ fn validates_roots_against_the_shared_schema() {
     assert!(validate_root("catalog", &schema).is_empty());
     assert_eq!(
         validate_root("unknown", &schema)[0].message,
-        "élément racine <unknown> absent du schéma XSD"
+        "root element <unknown> not declared in the XSD schema"
     );
     assert_eq!(XsdOccurs::default().max, Some(1));
 }

@@ -50,9 +50,9 @@ impl XmlExtension {
         output.status == Some(0) && Self::version_output_matches(&output.stdout)
     }
 
-    /// Configuration `workspace/configuration` : la section `xml` des
-    /// réglages Zed `lsp.xml-lsp.settings`, écrits avec ou sans la clé `xml`
-    /// (`{"xml": {"format": …}}` ou `{"format": …}`).
+    /// `workspace/configuration` configuration: the `xml` section of the Zed
+    /// `lsp.xml-lsp.settings` settings, written with or without the `xml` key
+    /// (`{"xml": {"format": …}}` or `{"format": …}`).
     fn workspace_configuration(settings: Option<Value>) -> Option<Value> {
         let settings = settings.filter(|settings| !settings.is_null())?;
         if settings.get("xml").is_some() {
@@ -61,10 +61,10 @@ impl XmlExtension {
         Some(zed::serde_json::json!({ "xml": settings }))
     }
 
-    /// `initializationOptions` : celles de `lsp.xml-lsp.initialization_options`
-    /// si elles existent, sinon les réglages (convention LemMinX
-    /// `{"settings": {"xml": …}}`) pour que le serveur les applique dès
-    /// l'initialisation.
+    /// `initializationOptions`: those of `lsp.xml-lsp.initialization_options`
+    /// when present, otherwise the settings (LemMinX convention
+    /// `{"settings": {"xml": …}}`) so that the server applies them from
+    /// initialization onwards.
     fn initialization_options(
         initialization_options: Option<Value>,
         settings: Option<Value>,
@@ -319,9 +319,7 @@ mod tests {
 
     #[test]
     fn recognizes_windows_file_in_use_errors() {
-        assert!(
-            "Le processus ne peut pas accéder au fichier (os error 32)".contains("os error 32")
-        );
+        assert!("The process cannot access the file (os error 32)".contains("os error 32"));
         assert!(!"download failed with status 404".contains("os error 32"));
     }
 }
