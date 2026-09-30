@@ -5,6 +5,7 @@ pub mod datatypes;
 pub mod identity;
 pub mod model;
 pub mod pattern;
+pub mod schema_check;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -813,6 +814,11 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
         .models
         .iter()
         .flat_map(|model| model.problems.iter().cloned())
+        .chain(
+            schema_check::check_schema_document(source)
+                .into_iter()
+                .map(|problem| problem.message),
+        )
         .collect();
 
     Ok(schema)
@@ -3608,9 +3614,11 @@ mod tests {
             )),
             ["the keyref 'r' has 2 field(s) but the key 'k' it refers to has 1"]
         );
-        assert_eq!(
-            problems(r#"<xs:unique name="u"><xs:field xpath="@a"/></xs:unique>"#),
-            ["xs:unique 'u': unexpected xs:field"]
+        // A constraint without selector (structure checked by `schema_check`).
+        assert!(
+            problems(r#"<xs:unique name="u"><xs:field xpath="@a"/></xs:unique>"#)
+                .iter()
+                .any(|message| message.contains("xs:selector")),
         );
         // The schema stays usable.
         let source = r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
