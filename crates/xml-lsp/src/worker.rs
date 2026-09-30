@@ -20,7 +20,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     sync::mpsc::{self, Receiver, RecvTimeoutError, Sender},
     thread::{self, JoinHandle},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use serde_json::{Value, json};
@@ -113,8 +113,9 @@ struct Worker<P> {
     replica: XmlLanguageServer,
     jobs: Receiver<Job>,
     publish: P,
-    /// Documents to validate, in the order of their changes.
-    dirty: Vec<String>,
+    /// Documents to validate with the time their validation is due, in
+    /// the order of their changes.
+    dirty: Vec<(String, Instant)>,
     /// Schemas whose change requires validating the documents using them.
     changed_schemas: Vec<String>,
     /// Versions reported by the client.
@@ -123,6 +124,7 @@ struct Worker<P> {
     generations: HashMap<String, u64>,
     /// Incremented on each settings or workspace change.
     epoch: u64,
+    #[cfg(test)]
     flushes: Vec<Sender<()>>,
     /// Set when the request loop has gone.
     disconnected: bool,
@@ -139,6 +141,7 @@ impl<P: Fn(Value) -> bool> Worker<P> {
             versions: HashMap::new(),
             generations: HashMap::new(),
             epoch: 0,
+            #[cfg(test)]
             flushes: Vec::new(),
             disconnected: false,
         }
@@ -148,7 +151,10 @@ impl<P: Fn(Value) -> bool> Worker<P> {
         while !self.disconnected {
             let deadline = self.deadline();
             let job = match deadline {
-                None => self.jobs.recv().ok(),
+                None => match self.jobs.recv() {
+                    Ok(job) => Some(job),
+                    Err(_) => break,
+                },
                 Some(deadline) => {
                     match self
                         .jobs
@@ -160,15 +166,12 @@ impl<P: Fn(Value) -> bool> Worker<P> {
                     }
                 }
             };
-            match job {
-                Some(job) => self.apply(job),
-                None if deadline.is_none() => break,
-                None => {}
+            if let Some(job) = job {
+                self.apply(job);
             }
             self.absorb();
-            if self.due() {
-                self.validate_dirty();
-            }
+            self.validate_due();
+            #[cfg(test)]
             if self.dirty.is_empty() && self.changed_schemas.is_empty() {
                 for flush in self.flushes.drain(..) {
                     let _ = flush.send(());
@@ -177,16 +180,20 @@ impl<P: Fn(Value) -> bool> Worker<P> {
         }
     }
 
-    /// When the pending validations are due (`None` when there are none).
-    fn deadline(&self) -> Option<Instant> {
-        (!self.dirty.is_empty() || !self.changed_schemas.is_empty()).then(Instant::now)
+    /// Validations wait for all pending ones (tests only).
+    fn flushing(&self) -> bool {
+        #[cfg(test)]
+        return !self.flushes.is_empty();
+        #[cfg(not(test))]
+        false
     }
 
-    fn due(&self) -> bool {
-        !self.flushes.is_empty()
-            || self
-                .deadline()
-                .is_some_and(|deadline| deadline <= Instant::now())
+    /// When the next validation is due (`None` when there is none).
+    fn deadline(&self) -> Option<Instant> {
+        if !self.changed_schemas.is_empty() || (self.flushing() && !self.dirty.is_empty()) {
+            return Some(Instant::now());
+        }
+        self.dirty.iter().map(|(_, due)| *due).min()
     }
 
     /// Applies the jobs already queued, without waiting.
@@ -213,16 +220,24 @@ impl<P: Fn(Value) -> bool> Worker<P> {
                 };
                 match text {
                     Some(text) => {
-                        self.replica.documents.insert(uri.clone(), text);
+                        // A change is validated once the user pauses
+                        // (`xml.validation.debounce`); an opened document
+                        // at once.
+                        let opened = self.replica.documents.insert(uri.clone(), text).is_none();
                         if is_xsd_uri(&uri) && !self.changed_schemas.contains(&uri) {
                             self.changed_schemas.push(uri.clone());
                         }
-                        self.mark(uri);
+                        let delay = if opened {
+                            Duration::ZERO
+                        } else {
+                            Duration::from_millis(self.replica.settings.validation.debounce_ms)
+                        };
+                        self.postpone(uri, Instant::now() + delay);
                     }
                     None => {
                         self.replica.documents.remove(&uri);
                         self.versions.remove(&uri);
-                        self.dirty.retain(|dirty| *dirty != uri);
+                        self.dirty.retain(|(dirty, _)| *dirty != uri);
                         (self.publish)(json!({"uri": uri, "diagnostics": []}));
                     }
                 }
@@ -243,9 +258,20 @@ impl<P: Fn(Value) -> bool> Worker<P> {
         }
     }
 
+    /// Validates `uri` at `due` (later than a validation already planned).
+    fn postpone(&mut self, uri: String, due: Instant) {
+        match self.dirty.iter_mut().find(|(dirty, _)| *dirty == uri) {
+            Some((_, planned)) => *planned = due,
+            None => self.dirty.push((uri, due)),
+        }
+    }
+
+    /// Validates `uri` as soon as possible.
     fn mark(&mut self, uri: String) {
-        if !self.dirty.contains(&uri) {
-            self.dirty.push(uri);
+        let now = Instant::now();
+        match self.dirty.iter_mut().find(|(dirty, _)| *dirty == uri) {
+            Some((_, planned)) => *planned = (*planned).min(now),
+            None => self.dirty.push((uri, now)),
         }
     }
 
@@ -257,9 +283,27 @@ impl<P: Fn(Value) -> bool> Worker<P> {
         }
     }
 
-    /// Validates the pending documents, publishing only up-to-date results.
-    fn validate_dirty(&mut self) {
-        if !self.replica.catalogs.is_empty() && self.replica.catalogs.refresh() {
+    /// Next document whose validation is due.
+    fn take_due(&mut self) -> Option<String> {
+        let now = Instant::now();
+        let flushing = self.flushing();
+        let index = self
+            .dirty
+            .iter()
+            .position(|(_, due)| flushing || *due <= now)?;
+        Some(self.dirty.remove(index).0)
+    }
+
+    /// Validates the documents whose validation is due, publishing only
+    /// up-to-date results.
+    fn validate_due(&mut self) {
+        if self
+            .deadline()
+            .is_none_or(|deadline| deadline > Instant::now())
+        {
+            return;
+        }
+        if self.replica.refresh_catalog_files() {
             self.mark_all();
         }
         for schema in std::mem::take(&mut self.changed_schemas) {
@@ -275,8 +319,7 @@ impl<P: Fn(Value) -> bool> Worker<P> {
                 self.mark(uri);
             }
         }
-        while !self.dirty.is_empty() {
-            let uri = self.dirty.remove(0);
+        while let Some(uri) = self.take_due() {
             let Some(source) = self.replica.documents.get(&uri).cloned() else {
                 continue;
             };
@@ -295,8 +338,11 @@ impl<P: Fn(Value) -> bool> Worker<P> {
                 }
             };
             if self.generations.get(&uri).copied() != generation || self.epoch != epoch {
-                // Changed meanwhile: the newer snapshot is validated instead.
-                self.mark(uri);
+                // Changed meanwhile: the newer snapshot is validated
+                // instead (already planned by the change).
+                if !self.dirty.iter().any(|(dirty, _)| *dirty == uri) {
+                    self.mark(uri);
+                }
                 continue;
             }
             if let Some(version) = self.versions.get(&uri) {

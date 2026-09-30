@@ -177,6 +177,23 @@ jobs:
       - run: cargo test --release -p xml-conformance
       - run: cargo test --release -p xml-lsp fixture_smoke
 
+  benchmarks:
+    name: Benchmarks
+    if: github.event_name == 'pull_request' && github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # Quick mode checks that every benchmark builds and runs, and prints
+      # its timings in the log; it compares nothing, so it cannot flake on
+      # a noisy runner.
+      - run: >-
+          cargo bench
+          -p xml-core --bench xml_core
+          -p xsd-core --bench xsd_core
+          -p xml-lsp --bench server
+          -- --quick --noplot
+
   prepare_release_pr:
     name: Prepare release version PR
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')

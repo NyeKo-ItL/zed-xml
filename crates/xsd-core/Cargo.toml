@@ -12,3 +12,10 @@ path = "src/lib.rs"
 quick-xml = "0.38"
 regex = "1"
 xml-core = { path = "../xml-core" }
+
+[dev-dependencies]
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "xsd_core"
+harness = false

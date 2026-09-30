@@ -15,8 +15,14 @@ const HIGHLIGHT_KIND_READ: u8 = 2;
 /// tags of the pair are returned (only one for a self-closing element, an
 /// unclosed element or an orphan end tag). Anywhere else, the list is
 /// empty.
+#[cfg(test)]
 pub fn document_highlights(source: &str, offset: usize) -> Vec<Value> {
-    let Some(pair) = XmlTagTree::parse(source).tag_pair_at(offset) else {
+    highlights_in(source, &XmlTagTree::parse(source), offset)
+}
+
+/// [`document_highlights`] with the tag tree of `source` already built.
+pub fn highlights_in(source: &str, tree: &XmlTagTree, offset: usize) -> Vec<Value> {
+    let Some(pair) = tree.tag_pair_at(offset) else {
         return Vec::new();
     };
     pair.name_ranges()

@@ -77,8 +77,18 @@ pub struct Fold {
 }
 
 /// Returns the LSP folding ranges (`FoldingRange[]`) of `source`.
+#[cfg(test)]
 pub fn folding_ranges(source: &str, settings: &FoldingSettings) -> Vec<Value> {
-    folds(source, settings.range_limit)
+    folding_ranges_in(source, &XmlTagTree::parse(source), settings)
+}
+
+/// [`folding_ranges`] with the tag tree of `source` already built.
+pub fn folding_ranges_in(
+    source: &str,
+    tree: &XmlTagTree,
+    settings: &FoldingSettings,
+) -> Vec<Value> {
+    folds_in(source, tree, settings.range_limit)
         .into_iter()
         .map(|fold| {
             let mut range = Map::new();
@@ -103,7 +113,13 @@ struct Candidate {
 }
 
 /// Computes the folding ranges sorted by start line.
+#[cfg(test)]
 pub fn folds(source: &str, range_limit: Option<usize>) -> Vec<Fold> {
+    folds_in(source, &XmlTagTree::parse(source), range_limit)
+}
+
+/// [`folds`] with the tag tree of `source` already built.
+pub fn folds_in(source: &str, tree: &XmlTagTree, range_limit: Option<usize>) -> Vec<Fold> {
     let lines = LineIndex::new(source);
     let mut candidates = Vec::new();
     // The end line is the one before the closing delimiter; an empty or
@@ -124,7 +140,7 @@ pub fn folds(source: &str, range_limit: Option<usize>) -> Vec<Fold> {
         }
     };
 
-    for element in XmlTagTree::parse(source).elements() {
+    for element in tree.elements() {
         let close = match (&element.end_tag, element.start_tag.kind) {
             (Some(end_tag), _) if end_tag.closed => end_tag.range.end - 1,
             (Some(end_tag), _) => end_tag.range.start,

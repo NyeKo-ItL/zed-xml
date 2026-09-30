@@ -1,5 +1,6 @@
 //! Native XML LSP server.
 
+mod analysis;
 mod catalog;
 mod code_actions;
 mod colors;
@@ -16,6 +17,7 @@ mod linked_editing;
 mod links;
 mod positions;
 mod rename;
+mod schemas;
 mod selection;
 mod settings;
 mod symbols;
@@ -24,9 +26,8 @@ mod worker;
 use std::{
     collections::{HashMap, HashSet},
     error::Error,
-    fs,
     path::PathBuf,
-    time::{SystemTime, UNIX_EPOCH},
+    sync::Arc,
 };
 
 use lsp_server::{Connection, ErrorCode, Message, Notification, RequestId, Response};
@@ -37,9 +38,8 @@ use xml_core::format_xml;
 use xml_core::{XmlDiagnostic, auto_close_tag, complete_xml, parse_xml};
 use xsd_core::{
     LocatedXsdDiagnostic, XsdDiagnosticKind, XsdSchema, complete_attribute_values,
-    complete_attributes, complete_elements, identity_links, is_remote_location, merge_schemas,
-    parse_xsd, percent_decode, resolve_schema_dependencies_with, resolve_schema_locations_with,
-    validate_document_located,
+    complete_attributes, complete_elements, identity_links, percent_decode,
+    resolve_schema_dependencies_with, resolve_schema_locations_with, validate_document_located,
 };
 
 #[cfg(test)]
@@ -68,6 +68,18 @@ const WORKSPACE_SYMBOL_METHOD: &str = "workspace/symbol";
 const DOCUMENT_COLOR_METHOD: &str = "textDocument/documentColor";
 const COLOR_PRESENTATION_METHOD: &str = "textDocument/colorPresentation";
 
+/// Requests answered with an empty result for documents larger than
+/// `xml.maxFileSize`: their cost grows with the whole document on each
+/// call (cursor moves for code actions).
+const LARGE_FILE_SKIPPED_METHODS: &[&str] = &[
+    SYMBOL_METHOD,
+    FOLDING_RANGE_METHOD,
+    SELECTION_RANGE_METHOD,
+    DOCUMENT_LINK_METHOD,
+    CODE_ACTION_METHOD,
+    DOCUMENT_COLOR_METHOD,
+];
+
 const DID_CHANGE_WORKSPACE_FOLDERS_METHOD: &str = "workspace/didChangeWorkspaceFolders";
 const DID_CHANGE_WATCHED_FILES_METHOD: &str = "workspace/didChangeWatchedFiles";
 const REGISTER_CAPABILITY_METHOD: &str = "client/registerCapability";
@@ -75,22 +87,12 @@ const UNREGISTER_CAPABILITY_METHOD: &str = "client/unregisterCapability";
 const DID_CHANGE_CONFIGURATION_METHOD: &str = "workspace/didChangeConfiguration";
 const CONFIGURATION_METHOD: &str = "workspace/configuration";
 
-type SchemaCache = HashMap<PathBuf, (SystemTime, XsdSchema)>;
-
-#[derive(Debug)]
-struct SchemaLoadError {
-    path: PathBuf,
-    message: String,
-    offset: usize,
-    /// Remote schema (`http(s)`) that no catalog resolves: reported as a
-    /// warning.
-    remote: bool,
-}
-
 struct XmlLanguageServer {
     documents: HashMap<String, String>,
-    schema_cache: SchemaCache,
-    schema_index: HashMap<String, Vec<PathBuf>>,
+    /// Flat XSD models of the schema sets (validation, completion).
+    schemas: schemas::SchemaStore,
+    /// Analyses of the open documents cached per version.
+    analyses: analysis::AnalysisCache,
     model_cache: hover::ModelCache,
     folding_settings: folding::FoldingSettings,
     /// The client accepts `LocationLink`s in response to `textDocument/definition`.
@@ -127,8 +129,8 @@ impl XmlLanguageServer {
     fn new() -> Self {
         Self {
             documents: HashMap::new(),
-            schema_cache: HashMap::new(),
-            schema_index: HashMap::new(),
+            schemas: schemas::SchemaStore::default(),
+            analyses: analysis::AnalysisCache::default(),
             model_cache: HashMap::new(),
             folding_settings: folding::FoldingSettings::default(),
             definition_link_support: false,
@@ -190,8 +192,27 @@ impl XmlLanguageServer {
         let changed = self.catalogs.set_roots(paths);
         if changed {
             self.log_catalog_errors();
+            self.forget_resolutions();
         }
         changed
+    }
+
+    /// Rereads the catalogs modified on disk; returns `true` if resolution
+    /// may have changed.
+    fn refresh_catalog_files(&mut self) -> bool {
+        if self.catalogs.is_empty() || !self.catalogs.refresh() {
+            return false;
+        }
+        self.log_catalog_errors();
+        self.forget_resolutions();
+        true
+    }
+
+    /// Drops the cached schema graphs, whose dependencies were resolved
+    /// through the previous catalogs.
+    fn forget_resolutions(&mut self) {
+        self.schemas.clear();
+        self.model_cache.clear();
     }
 
     fn log_catalog_errors(&self) {
@@ -206,10 +227,9 @@ impl XmlLanguageServer {
         &mut self,
         connection: &Connection,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        if self.catalogs.is_empty() || !self.catalogs.refresh() {
+        if !self.refresh_catalog_files() {
             return Ok(());
         }
-        self.log_catalog_errors();
         self.register_catalog_watchers(connection)?;
         self.send_to_worker(worker::Job::ValidateAll);
         Ok(())
@@ -379,6 +399,16 @@ impl XmlLanguageServer {
         if !validation.enabled {
             return json!({"uri": uri, "diagnostics": []});
         }
+        if self.settings.is_large(source) {
+            // Beyond `xml.maxFileSize`: well-formedness only (linear).
+            let diagnostics = if dtd::is_dtd_uri(uri) {
+                Vec::new()
+            } else {
+                parse_xml(source).diagnostics
+            };
+            let notice = large_file_diagnostic(source.len(), self.settings.max_file_size);
+            return diagnostics_params(uri, source, &diagnostics, &[notice]);
+        }
         if dtd::is_dtd_uri(uri) {
             // DTD file: neither XML well-formedness nor schema.
             let diagnostics = self.dtd_diagnostics(uri, source);
@@ -533,6 +563,7 @@ impl XmlLanguageServer {
             DID_CLOSE_METHOD => {
                 if let Some(uri) = document_uri(params) {
                     self.documents.remove(uri);
+                    self.analyses.invalidate(uri);
                     self.send_to_worker(worker::Job::Document {
                         uri: uri.to_owned(),
                         version: None,
@@ -560,6 +591,7 @@ impl XmlLanguageServer {
                         text: Some(text.clone()),
                     });
                 }
+                self.analyses.invalidate(&uri);
                 self.documents.insert(uri, text);
             }
             _ => {}
@@ -629,62 +661,28 @@ impl XmlLanguageServer {
                 "insertText": completion.insert_text,
             }));
         }
-        items.extend(self.schema_completions(uri, &source, offset));
-        items.extend(self.schema_attributes(uri, &source, offset));
-        items.extend(self.schema_attribute_values(uri, &source, offset));
+        if let Some(schema) = self.load_schema(uri, &source) {
+            let schema_items = complete_elements(&source, offset, &schema)
+                .into_iter()
+                .chain(complete_attributes(&source, offset, &schema))
+                .chain(complete_attribute_values(&source, offset, &schema))
+                .map(|completion| {
+                    json!({
+                        "label": completion.label,
+                        "insertText": completion.insert_text,
+                    })
+                });
+            items.extend(schema_items);
+        }
         items.extend(dtd::completions(grammar.as_ref(), uri, &source, offset));
         deduplicate_completion_items(&mut items);
         Some(json!({"isIncomplete": false, "items": items}))
     }
 
-    fn load_schema(&mut self, uri: &str, source: &str) -> Option<XsdSchema> {
+    /// Merged schema set of the document (cached, see [`schemas`]).
+    fn load_schema(&mut self, uri: &str, source: &str) -> Option<Arc<XsdSchema>> {
         let references = self.schema_references(uri, source).unwrap_or_default();
-        let (schemas, _) = load_schema_graph(
-            references,
-            &mut self.schema_cache,
-            &mut self.schema_index,
-            &self.catalogs,
-        );
-        (!schemas.is_empty()).then(|| merge_schemas(schemas))
-    }
-
-    fn schema_completions(&mut self, uri: &str, source: &str, offset: usize) -> Vec<Value> {
-        self.load_schema(uri, source)
-            .into_iter()
-            .flat_map(|schema| complete_elements(source, offset, &schema))
-            .map(|completion| {
-                json!({
-                    "label": completion.label,
-                    "insertText": completion.insert_text,
-                })
-            })
-            .collect()
-    }
-
-    fn schema_attributes(&mut self, uri: &str, source: &str, offset: usize) -> Vec<Value> {
-        self.load_schema(uri, source)
-            .into_iter()
-            .flat_map(|schema| complete_attributes(source, offset, &schema))
-            .map(|completion| {
-                json!({
-                    "label": completion.label,
-                    "insertText": completion.insert_text,
-                })
-            })
-            .collect()
-    }
-
-    fn schema_attribute_values(&mut self, uri: &str, source: &str, offset: usize) -> Vec<Value> {
-        self.load_schema(uri, source)
-            .into_iter()
-            .flat_map(|schema| complete_attribute_values(source, offset, &schema))
-            .map(|completion| {
-                json!({
-                    "label": completion.label,
-                    "insertText": completion.insert_text,
-                })
-            })
-            .collect()
+        self.schemas.load(references, &self.catalogs).merged
     }
 
     fn references_schema(&self, document_uri: &str, schema_uri: &str) -> bool {
@@ -706,12 +704,8 @@ impl XmlLanguageServer {
             Ok(references) => references,
             Err(error) => return vec![xsd_error_diagnostic(error)],
         };
-        let (schemas, errors) = load_schema_graph(
-            references,
-            &mut self.schema_cache,
-            &mut self.schema_index,
-            &self.catalogs,
-        );
+        let schemas::LoadedSchemas { merged, errors } =
+            self.schemas.load(references, &self.catalogs);
         let schema_errors = !errors.is_empty();
         let mut diagnostics = errors
             .into_iter()
@@ -722,8 +716,8 @@ impl XmlLanguageServer {
         {
             return diagnostics;
         }
-        if !schemas.is_empty() {
-            let schema = merge_schemas(schemas);
+        if let Some(schema) = merged {
+            let lines = selection::LineIndex::new(source);
             // Values outside an enumeration are published by
             // `code_actions::enumeration_diagnostics`, whose ranges and
             // messages the enumeration quick fixes match.
@@ -731,7 +725,7 @@ impl XmlLanguageServer {
                 validate_document_located(source, &schema)
                     .iter()
                     .filter(|diagnostic| diagnostic.kind != XsdDiagnosticKind::InvalidEnumeration)
-                    .map(|diagnostic| xsd_error_diagnostic_at(diagnostic, source)),
+                    .map(|diagnostic| xsd_error_diagnostic_at(diagnostic, source, &lines)),
             );
             let mut context = self.hover_context(uri);
             diagnostics.extend(code_actions::enumeration_diagnostics(
@@ -773,14 +767,16 @@ impl XmlLanguageServer {
                 },
             }));
         }
+        let lines = selection::LineIndex::new(&source);
+        let needle = format!("<{name}");
         let mut search_from = 0usize;
-        while let Some(relative) = source[search_from..].find(&format!("<{name}")) {
+        while let Some(relative) = source[search_from..].find(&needle) {
             let start = search_from + relative;
             locations.push(json!({
                 "uri": uri,
                 "range": {
-                    "start": position_at(&source, start),
-                    "end": position_at(&source, start + name.len() + 1),
+                    "start": lines.position(&source, start),
+                    "end": lines.position(&source, start + name.len() + 1),
                 },
             }));
             search_from = start + name.len() + 1;
@@ -957,24 +953,28 @@ impl XmlLanguageServer {
         hover::hover(&mut context, uri, &source, offset)
     }
 
-    fn document_highlight(&self, params: &Value) -> Option<Value> {
+    fn document_highlight(&mut self, params: &Value) -> Option<Value> {
         let uri = params.get("textDocument")?.get("uri")?.as_str()?;
         let source = self.documents.get(uri)?;
+        let tree = self.analyses.tree(uri, source);
         let position = params.get("position")?;
         let line = position.get("line")?.as_u64()? as usize;
         let character = position.get("character")?.as_u64()? as usize;
         let offset = offset_at(source, line, character);
-        Some(Value::Array(highlight::document_highlights(source, offset)))
+        Some(Value::Array(highlight::highlights_in(
+            source, &tree, offset,
+        )))
     }
 
-    fn linked_editing_range(&self, params: &Value) -> Option<Value> {
+    fn linked_editing_range(&mut self, params: &Value) -> Option<Value> {
         let uri = params.get("textDocument")?.get("uri")?.as_str()?;
         let source = self.documents.get(uri)?;
+        let tree = self.analyses.tree(uri, source);
         let position = params.get("position")?;
         let line = position.get("line")?.as_u64()? as usize;
         let character = position.get("character")?.as_u64()? as usize;
         let offset = offset_at(source, line, character);
-        linked_editing::linked_editing_ranges(source, offset)
+        linked_editing::linked_editing_ranges_in(source, &tree, offset)
     }
 
     fn prepare_rename(&self, params: &Value) -> Option<Value> {
@@ -1033,11 +1033,13 @@ impl XmlLanguageServer {
         Ok(Some(json!({"changes": changes})))
     }
 
-    fn folding_range(&self, params: &Value) -> Option<Value> {
+    fn folding_range(&mut self, params: &Value) -> Option<Value> {
         let uri = params.get("textDocument")?.get("uri")?.as_str()?;
         let source = self.documents.get(uri)?;
-        Some(Value::Array(folding::folding_ranges(
+        let tree = self.analyses.tree(uri, source);
+        Some(Value::Array(folding::folding_ranges_in(
             source,
+            &tree,
             &self.folding_settings,
         )))
     }
@@ -1071,7 +1073,7 @@ impl XmlLanguageServer {
                 .map(|grammar| dtd::document_symbols(&grammar, uri, source, hierarchical))
                 .unwrap_or_default()
         } else if self.hierarchical_document_symbols {
-            symbols::document_symbols(source)
+            symbols::document_symbols_in(source, self.analyses.tree(uri, source))
         } else {
             match xml_symbols(source) {
                 Value::Array(symbols) => symbols,
@@ -1260,106 +1262,15 @@ fn xsd_element_name_offset(source: &str, expected_name: &str) -> Option<usize> {
     }
 }
 
-fn load_schema_graph(
-    references: Vec<xsd_core::SchemaReference>,
-    cache: &mut SchemaCache,
-    index: &mut HashMap<String, Vec<PathBuf>>,
-    catalogs: &catalog::Catalogs,
-) -> (Vec<XsdSchema>, Vec<SchemaLoadError>) {
-    let mut queue = references;
-    let mut visited = HashSet::new();
-    let mut schemas = Vec::new();
-    let mut errors = Vec::new();
-
-    while let Some(reference) = queue.pop() {
-        let path = reference.path;
-        if !visited.insert(path.clone()) {
-            continue;
-        }
-        let modified = fs::metadata(&path)
-            .and_then(|metadata| metadata.modified())
-            .unwrap_or(UNIX_EPOCH);
-        if is_remote_location(&path) {
-            errors.push(SchemaLoadError {
-                message: format!(
-                    "unresolved remote schema: {} (map it to a local file with an XML catalog, xml.catalogs setting)",
-                    path.display()
-                ),
-                path,
-                offset: 0,
-                remote: true,
-            });
-            continue;
-        }
-        let schema_source = match xml_core::text::read_text_file(&path) {
-            Ok(source) => source,
-            Err(error) => {
-                errors.push(SchemaLoadError {
-                    path: path.clone(),
-                    message: format!("cannot read the schema: {error}"),
-                    offset: 0,
-                    remote: false,
-                });
-                continue;
-            }
-        };
-        let schema = if let Some((cached_time, schema)) = cache.get(&path)
-            && *cached_time == modified
-        {
-            schema.clone()
-        } else {
-            let schema = match parse_xsd(&schema_source) {
-                Ok(schema) => schema,
-                Err(error) => {
-                    errors.push(SchemaLoadError {
-                        path: path.clone(),
-                        message: format!("invalid XSD schema: {error}"),
-                        offset: xsd_parse_error_offset(&schema_source),
-                        remote: false,
-                    });
-                    continue;
-                }
-            };
-            cache.insert(path.clone(), (modified, schema.clone()));
-            schema
-        };
-        // Component errors: the schema is invalid but still used.
-        for problem in &schema.problems {
-            errors.push(SchemaLoadError {
-                path: path.clone(),
-                message: format!("invalid XSD schema: {problem}"),
-                offset: 0,
-                remote: false,
-            });
-        }
-        if let Some(namespace) = &schema.target_namespace {
-            let paths = index.entry(namespace.clone()).or_default();
-            if !paths.contains(&path) {
-                paths.push(path.clone());
-            }
-        }
-        match resolve_schema_dependencies_with(&schema_source, &path, &|request| {
-            catalogs.resolve_schema(request)
-        }) {
-            Ok(dependencies) => queue.extend(dependencies),
-            Err(error) => errors.push(SchemaLoadError {
-                path: path.clone(),
-                message: format!("invalid XSD dependencies: {error}"),
-                offset: xsd_parse_error_offset(&schema_source),
-                remote: false,
-            }),
-        }
-        schemas.push(schema);
-    }
-
-    (schemas, errors)
-}
-
-fn xsd_error_diagnostic_at(diagnostic: &LocatedXsdDiagnostic, source: &str) -> Value {
+fn xsd_error_diagnostic_at(
+    diagnostic: &LocatedXsdDiagnostic,
+    source: &str,
+    lines: &selection::LineIndex,
+) -> Value {
     json!({
         "range": {
-            "start": position_at(source, diagnostic.offset),
-            "end": position_at(source, diagnostic.end),
+            "start": lines.position(source, diagnostic.offset),
+            "end": lines.position(source, diagnostic.end),
         },
         "severity": 1,
         "source": "xml-lsp",
@@ -1369,7 +1280,7 @@ fn xsd_error_diagnostic_at(diagnostic: &LocatedXsdDiagnostic, source: &str) -> V
     })
 }
 
-fn xsd_schema_error_diagnostic(error: SchemaLoadError) -> Value {
+fn xsd_schema_error_diagnostic(error: schemas::SchemaLoadError) -> Value {
     json!({
         "range": {
             "start": {"line": 0, "character": 0},
@@ -1432,6 +1343,27 @@ fn doctype_diagnostics(source: &str) -> Vec<Value> {
         .collect()
 }
 
+/// Information on a document larger than `xml.maxFileSize`: what is
+/// disabled and how to change the limit.
+fn large_file_diagnostic(size: usize, limit: Option<usize>) -> Value {
+    let megabytes = |bytes: usize| bytes as f64 / (1024.0 * 1024.0);
+    json!({
+        "range": {
+            "start": {"line": 0, "character": 0},
+            "end": {"line": 0, "character": 0},
+        },
+        "severity": 3,
+        "source": "xml-lsp",
+        "code": "large-file",
+        "data": {"category": "xml", "kind": "largeFile", "size": size, "limit": limit},
+        "message": format!(
+            "Large document ({:.1} MiB, xml.maxFileSize is {:.1} MiB): only well-formedness is checked; schema and DTD validation, document symbols, folding, colors, links, selection ranges and code actions are disabled for this file.",
+            megabytes(size),
+            megabytes(limit.unwrap_or(0)),
+        ),
+    })
+}
+
 /// `xml.validation.noGrammar` diagnostic on the name of the root element.
 fn no_grammar_diagnostic(source: &str, severity: u8) -> Option<Value> {
     let tree = xml_core::tags::XmlTagTree::parse(source);
@@ -1464,17 +1396,6 @@ fn xsd_error_diagnostic(diagnostic: impl Into<String>) -> Value {
     })
 }
 
-fn xsd_parse_error_offset(source: &str) -> usize {
-    let mut reader = Reader::from_str(source);
-    loop {
-        match reader.read_event() {
-            Ok(Event::Eof) => return source.len(),
-            Err(_) => return reader.buffer_position() as usize,
-            Ok(_) => {}
-        }
-    }
-}
-
 fn element_name_at(source: &str, offset: usize) -> Option<String> {
     let prefix = &source[..offset.min(source.len())];
     let opening = prefix.rfind('<')?;
@@ -1488,6 +1409,7 @@ fn xml_symbols(source: &str) -> Value {
     let mut stack: Vec<(String, usize)> = Vec::new();
     let mut search_from = 0usize;
     let mut symbols = Vec::new();
+    let lines = selection::LineIndex::new(source);
     loop {
         match reader.read_event() {
             Ok(Event::Start(element)) => {
@@ -1507,7 +1429,7 @@ fn xml_symbols(source: &str) -> Value {
                     .unwrap_or(search_from);
                 search_from = start + name.len() + 1;
                 let end = reader.buffer_position() as usize;
-                symbols.push(symbol_value(&name, start, end, source));
+                symbols.push(symbol_value(&name, start, end, source, &lines));
             }
             Ok(Event::End(_)) => {
                 if let Some((name, start)) = stack.pop() {
@@ -1516,6 +1438,7 @@ fn xml_symbols(source: &str) -> Value {
                         start,
                         reader.buffer_position() as usize,
                         source,
+                        &lines,
                     ));
                 }
             }
@@ -1526,12 +1449,18 @@ fn xml_symbols(source: &str) -> Value {
     Value::Array(symbols)
 }
 
-fn symbol_value(name: &str, start: usize, end: usize, source: &str) -> Value {
+fn symbol_value(
+    name: &str,
+    start: usize,
+    end: usize,
+    source: &str,
+    lines: &selection::LineIndex,
+) -> Value {
     json!({
         "name": name,
         "kind": 13,
-        "range": {"start": position_at(source, start), "end": position_at(source, end)},
-        "selectionRange": {"start": position_at(source, start), "end": position_at(source, start + name.len() + 1)},
+        "range": {"start": lines.position(source, start), "end": lines.position(source, end)},
+        "selectionRange": {"start": lines.position(source, start), "end": lines.position(source, start + name.len() + 1)},
     })
 }
 
@@ -1592,11 +1521,12 @@ fn diagnostics_params(
     diagnostics: &[XmlDiagnostic],
     schema_diagnostics: &[Value],
 ) -> Value {
+    let lines = selection::LineIndex::new(source);
     let diagnostics = diagnostics.iter().map(|diagnostic| {
         let mut value = json!({
             "range": {
-                "start": position_at(source, diagnostic.offset),
-                "end": position_at(source, diagnostic.end),
+                "start": lines.position(source, diagnostic.offset),
+                "end": lines.position(source, diagnostic.end),
             },
             "severity": 1,
             "source": "xml-lsp",
@@ -1625,6 +1555,18 @@ impl XmlLanguageServer {
         params: &Value,
     ) -> Result<Value, dispatch::RequestError> {
         let empty = || json!([]);
+        if LARGE_FILE_SKIPPED_METHODS.contains(&method)
+            && document_uri(params)
+                .and_then(|uri| self.documents.get(uri))
+                .is_some_and(|source| self.settings.is_large(source))
+        {
+            // Whole-document features beyond `xml.maxFileSize` (reported by
+            // the `large-file` diagnostic).
+            return Ok(match method {
+                SELECTION_RANGE_METHOD => Value::Null,
+                _ => empty(),
+            });
+        }
         Ok(match method {
             COMPLETION_METHOD => self
                 .completion(params)
@@ -5386,7 +5328,7 @@ i:noNamespaceSchemaLocation=\"missing.xsd\">\r\n  \
     #[test]
     fn locates_xsd_parse_errors() {
         let source = r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"><xs:element name="root"></xs:schema>"#;
-        let offset = xsd_parse_error_offset(source);
+        let offset = schemas::xsd_parse_error_offset(source);
         assert!(offset > source.find("</xs:schema>").unwrap());
         assert!(offset <= source.len());
     }
@@ -5423,7 +5365,8 @@ i:noNamespaceSchemaLocation=\"missing.xsd\">\r\n  \
         );
         assert!(
             server
-                .schema_index
+                .schemas
+                .index
                 .get("urn:test")
                 .is_some_and(|paths| paths.contains(&schema_path))
         );
@@ -5757,5 +5700,151 @@ i:noNamespaceSchemaLocation=\"missing.xsd\">\r\n  \
         assert_eq!(client.request(3, "shutdown", Value::Null), Value::Null);
         client.notify(EXIT_METHOD, Value::Null);
         assert_eq!(server_thread.join().expect("server should stop"), 0);
+    }
+
+    #[test]
+    fn debounces_the_validation_of_changes() {
+        let (client, _, server_thread) = start_server(
+            json!({"initializationOptions": {"xml": {"validation": {"debounce": 300}}}}),
+        );
+        let uri = "file:///debounce.xml";
+        // Opening validates at once.
+        let opened = std::time::Instant::now();
+        client.notify(
+            DID_OPEN_METHOD,
+            json!({"textDocument": {"uri": uri, "version": 1, "text": "<a>"}}),
+        );
+        let receive_publication = || match client
+            .connection
+            .receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("diagnostics should be published")
+        {
+            Message::Notification(notification)
+                if notification.method == PUBLISH_DIAGNOSTICS_METHOD =>
+            {
+                notification.params
+            }
+            message => panic!("unexpected message {message:?}"),
+        };
+        assert_eq!(receive_publication()["version"], 1);
+        assert!(opened.elapsed() < std::time::Duration::from_millis(250));
+        // A burst of changes: one validation, of the last version, once the
+        // typing pauses.
+        let mut changed = std::time::Instant::now();
+        for version in 2..=6 {
+            changed = std::time::Instant::now();
+            client.notify(
+                DID_CHANGE_METHOD,
+                json!({
+                    "textDocument": {"uri": uri, "version": version},
+                    "contentChanges": [{"text": "<a>".repeat(version as usize)}],
+                }),
+            );
+        }
+        let publication = receive_publication();
+        assert!(changed.elapsed() >= std::time::Duration::from_millis(300));
+        assert_eq!(publication["version"], 6);
+        assert!(
+            client.take_diagnostics(1).is_empty(),
+            "a single publication"
+        );
+        // Requests are answered during the debounce delay.
+        client.notify(
+            DID_CHANGE_METHOD,
+            json!({
+                "textDocument": {"uri": uri, "version": 7},
+                "contentChanges": [{"text": "<a/>"}],
+            }),
+        );
+        let started = std::time::Instant::now();
+        client.request(
+            2,
+            DOCUMENT_HIGHLIGHT_METHOD,
+            json!({"textDocument": {"uri": uri}, "position": {"line": 0, "character": 1}}),
+        );
+        assert!(started.elapsed() < std::time::Duration::from_millis(250));
+        let published = client.take_diagnostics(3);
+        assert_eq!(published.last().expect("diagnostics")["version"], 7);
+        assert_eq!(client.request(4, "shutdown", Value::Null), Value::Null);
+        client.notify(EXIT_METHOD, Value::Null);
+        assert_eq!(server_thread.join().expect("server should stop"), 0);
+    }
+
+    #[test]
+    fn limits_documents_larger_than_max_file_size_to_well_formedness() {
+        let directory =
+            std::env::temp_dir().join(format!("xml-lsp-large-file-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("directory should be created");
+        std::fs::write(
+            directory.join("a.xsd"),
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"><xs:element name="a"/></xs:schema>"#,
+        )
+        .expect("schema should be written");
+        let uri = path_to_uri(&directory.join("large.xml"));
+        let text = format!(
+            "<a xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:noNamespaceSchemaLocation=\"a.xsd\">\n{}<b></c>\n</a>\n",
+            "  <!-- padding -->\n".repeat(20)
+        );
+        let (client, _, server_thread) = start_server(json!({
+            "initializationOptions": {"xml": {"maxFileSize": 200}},
+            "capabilities": {"textDocument": {"documentSymbol": {"hierarchicalDocumentSymbolSupport": true}}},
+        }));
+        client.notify(
+            DID_OPEN_METHOD,
+            json!({"textDocument": {"uri": uri, "version": 1, "text": text}}),
+        );
+        let published = client.take_diagnostics(1);
+        let publication = published.last().expect("diagnostics");
+        // The mismatched end tag is still reported; `<b>` (not declared by
+        // the schema) is not validated.
+        assert_eq!(
+            codes(publication),
+            ["xml-structure", "large-file"],
+            "{publication}"
+        );
+        let notice = &publication["diagnostics"][1];
+        assert_eq!(notice["severity"], 3);
+        assert_eq!(notice["data"]["kind"], "largeFile");
+        assert!(
+            notice["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("xml.maxFileSize")),
+            "{notice}"
+        );
+        let document = json!({"textDocument": {"uri": uri}});
+        assert_eq!(
+            client.request(2, FOLDING_RANGE_METHOD, document.clone()),
+            json!([])
+        );
+        assert_eq!(
+            client.request(3, SYMBOL_METHOD, document.clone()),
+            json!([])
+        );
+        // Features proportional to the request still work.
+        let highlights = client.request(
+            4,
+            DOCUMENT_HIGHLIGHT_METHOD,
+            json!({"textDocument": {"uri": uri}, "position": {"line": 0, "character": 1}}),
+        );
+        assert_eq!(highlights.as_array().map(Vec::len), Some(2));
+        // Raising the limit restores validation and the features.
+        client.notify(
+            DID_CHANGE_CONFIGURATION_METHOD,
+            json!({"settings": {"xml": {"maxFileSize": 0}}}),
+        );
+        let published = client.take_diagnostics(5);
+        let publication = published.last().expect("diagnostics");
+        assert!(
+            codes(publication).contains(&"xsd-validation".to_owned()),
+            "{publication}"
+        );
+        assert!(!codes(publication).contains(&"large-file".to_owned()));
+        assert_ne!(client.request(6, SYMBOL_METHOD, document), json!([]));
+        assert_eq!(client.request(7, "shutdown", Value::Null), Value::Null);
+        client.notify(EXIT_METHOD, Value::Null);
+        assert_eq!(server_thread.join().expect("server should stop"), 0);
+        let _ = std::fs::remove_dir_all(&directory);
     }
 }
