@@ -327,14 +327,15 @@ mod tests {
         // Unchanged files: the same merged schema is reused.
         let second = store.load(reference(), &catalogs).merged.unwrap();
         assert!(Arc::ptr_eq(&merged, &second));
-        // A modified file (other length) is read again.
+        // A modified file is read again (its length differs: the modification time
+        // alone is too coarse on some file systems).
         fs::write(
             &part,
-            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"><xs:element name="c"/></xs:schema>"#,
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"><xs:element name="ccc"/></xs:schema>"#,
         )
         .unwrap();
         let third = store.load(reference(), &catalogs).merged.unwrap();
-        assert_eq!(names(&third), ["a", "c"]);
+        assert_eq!(names(&third), ["a", "ccc"]);
         // Parse errors are reported each time, from the cache.
         fs::write(&part, "<xs:schema").unwrap();
         for _ in 0..2 {
