@@ -1,0 +1,11 @@
+name: zed-xml CodeQL configuration
+
+# Test code builds paths from `std::env::temp_dir()`, which CodeQL treats as
+# user-controlled (rust/path-injection). Unit tests live in `tests.rs` files
+# (`#[cfg(test)] mod tests;`), so they can be excluded by path.
+paths-ignore:
+  - "**/tests.rs"
+  - "**/tests/**"
+  - "**/benches/**"
+  - crates/xml-conformance/**
+  - crates/xml-lsp/src/fixture_smoke.rs
