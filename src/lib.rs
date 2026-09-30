@@ -2,7 +2,11 @@ mod sha256;
 
 use std::fs;
 
-use zed_extension_api::{self as zed, serde_json::Value, settings::LspSettings};
+use zed_extension_api::{
+    self as zed,
+    serde_json::Value,
+    settings::{CommandSettings, LspSettings},
+};
 
 const LANGUAGE_SERVER_ID: &str = "xml-lsp";
 const EXPECTED_LSP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -92,11 +96,36 @@ impl XmlExtension {
         language_server_id: &zed::LanguageServerId,
         worktree: &zed::Worktree,
     ) -> zed::Result<zed::Command> {
-        if let Some(path) = Self::environment(worktree, XML_LSP_PATH_ENV) {
-            return Ok(Self::command(path));
-        }
+        let binary = Self::lsp_settings(worktree).binary;
+        let configured_path = binary
+            .as_ref()
+            .and_then(|binary| binary.path.clone())
+            .filter(|path| !path.trim().is_empty());
+        let mut command = if let Some(path) = configured_path {
+            Self::command(path)
+        } else if let Some(path) = Self::environment(worktree, XML_LSP_PATH_ENV) {
+            Self::command(path)
+        } else {
+            Self::downloaded_command(language_server_id, worktree)?
+        };
+        Self::apply_binary_settings(&mut command, binary);
+        Ok(command)
+    }
 
-        Self::downloaded_command(language_server_id, worktree)
+    /// Applies `lsp.xml-lsp.binary.arguments` (replacing the default
+    /// `--stdio`) and `lsp.xml-lsp.binary.env`, whichever binary is started.
+    fn apply_binary_settings(command: &mut zed::Command, binary: Option<CommandSettings>) {
+        let Some(binary) = binary else {
+            return;
+        };
+        if let Some(arguments) = binary.arguments {
+            command.args = arguments;
+        }
+        if let Some(env) = binary.env {
+            let mut env = env.into_iter().collect::<Vec<_>>();
+            env.sort();
+            command.env.extend(env);
+        }
     }
 
     fn command(path: String) -> zed::Command {
@@ -645,6 +674,148 @@ mod tests {
             ),
             Some(json!({"settings": {"xml": {"format": {"enabled": false}}}}))
         );
+    }
+
+    /// The `[[capabilities]]` entries of `extension.toml` of the given kind,
+    /// as `key = value` lines.
+    fn manifest_capabilities(kind: &str) -> Vec<Vec<(&'static str, &'static str)>> {
+        let manifest = include_str!("../extension.toml");
+        manifest
+            .split("[[capabilities]]")
+            .skip(1)
+            .map(|block| {
+                block
+                    .lines()
+                    .take_while(|line| !line.trim_start().starts_with('['))
+                    .filter_map(|line| line.split_once('='))
+                    .map(|(key, value)| (key.trim(), value.trim()))
+                    .collect::<Vec<_>>()
+            })
+            .filter(|entries| entries.contains(&("kind", &*format!("\"{kind}\""))))
+            .collect()
+    }
+
+    /// The strings of a TOML array of strings such as `["a", "b"]`.
+    fn toml_strings(value: &str) -> Vec<&str> {
+        value.split('"').skip(1).step_by(2).collect()
+    }
+
+    /// Mirrors Zed's `DownloadFileCapability::allows`.
+    fn download_allowed(host: &str, path: &[&str], url: &str) -> bool {
+        let Some(rest) = url.strip_prefix("https://") else {
+            return false;
+        };
+        let (url_host, url_path) = rest.split_once('/').unwrap_or((rest, ""));
+        if host != "*" && host != url_host {
+            return false;
+        }
+        let segments = url_path.split('/').collect::<Vec<_>>();
+        for (index, segment) in path.iter().enumerate() {
+            if *segment == "**" {
+                return true;
+            }
+            if index >= segments.len() || (*segment != "*" && *segment != segments[index]) {
+                return false;
+            }
+        }
+        path.len() >= segments.len()
+    }
+
+    #[test]
+    fn the_manifest_declares_the_version_of_the_extension() {
+        let manifest = include_str!("../extension.toml");
+        assert!(manifest.contains(&format!("\nversion = \"{EXPECTED_LSP_VERSION}\"\n")));
+        assert!(manifest.contains("\nschema_version = 1\n"));
+        assert!(manifest.contains(&format!(
+            "\nrepository = \"https://github.com/{RELEASE_REPOSITORY}\"\n"
+        )));
+    }
+
+    #[test]
+    fn the_manifest_allows_running_the_cached_binaries() {
+        let capabilities = manifest_capabilities("process:exec");
+        for os in [zed::Os::Linux, zed::Os::Windows] {
+            let executable = format!("\"{}\"", XmlExtension::executable_name(os));
+            assert!(
+                capabilities.iter().any(|entries| {
+                    entries.contains(&("command", executable.as_str()))
+                        && entries.contains(&("args", "[\"--version\"]"))
+                }),
+                "no process:exec capability for {executable} --version"
+            );
+        }
+    }
+
+    #[test]
+    fn the_manifest_allows_downloading_the_release_assets() {
+        let capabilities = manifest_capabilities("download_file");
+        assert_eq!(capabilities.len(), 1, "{capabilities:?}");
+        let entries = &capabilities[0];
+        let value = |key: &str| {
+            entries
+                .iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| *value)
+                .unwrap_or_default()
+        };
+        let host = value("host").trim_matches('"');
+        let path = toml_strings(value("path"));
+        for platform in SUPPORTED_PLATFORMS {
+            let url = XmlExtension::release_url(platform.asset);
+            assert!(download_allowed(host, &path, &url), "{url} is not allowed");
+            let checksum = format!("{url}.sha256");
+            assert!(download_allowed(host, &path, &checksum), "{checksum}");
+        }
+        // Scoped to this repository and version.
+        assert!(!download_allowed(
+            host,
+            &path,
+            "https://github.com/NyeKo-ItL/zed-xml/releases/download/v0.0.0/xml-lsp"
+        ));
+        assert!(!download_allowed(
+            host,
+            &path,
+            "https://example.com/NyeKo-ItL/zed-xml/releases/download/v0.0.0/xml-lsp"
+        ));
+    }
+
+    #[test]
+    fn applies_the_binary_settings() {
+        let mut command = XmlExtension::command("xml-lsp".to_owned());
+        XmlExtension::apply_binary_settings(&mut command, None);
+        assert_eq!(command.args, ["--stdio"]);
+
+        XmlExtension::apply_binary_settings(
+            &mut command,
+            Some(CommandSettings {
+                path: None,
+                arguments: None,
+                env: Some(
+                    [("B", "2"), ("A", "1")]
+                        .into_iter()
+                        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                        .collect(),
+                ),
+            }),
+        );
+        assert_eq!(command.args, ["--stdio"]);
+        assert_eq!(
+            command.env,
+            [
+                ("A".to_owned(), "1".to_owned()),
+                ("B".to_owned(), "2".to_owned())
+            ]
+        );
+
+        XmlExtension::apply_binary_settings(
+            &mut command,
+            Some(CommandSettings {
+                path: Some("/opt/xml-lsp".to_owned()),
+                arguments: Some(vec!["--stdio".to_owned(), "--verbose".to_owned()]),
+                env: None,
+            }),
+        );
+        assert_eq!(command.args, ["--stdio", "--verbose"]);
     }
 
     #[test]

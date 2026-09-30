@@ -29,3 +29,11 @@ args = ["--version"]
 kind = "process:exec"
 command = "xml-lsp-0.12.0"
 args = ["--version"]
+
+# Downloads the xml-lsp binary and its .sha256 file from this repository's
+# release matching the extension version (the version-sync job of ci.yml keeps
+# the version segment in step with `version`).
+[[capabilities]]
+kind = "download_file"
+host = "github.com"
+path = ["NyeKo-ItL", "zed-xml", "releases", "download", "v0.12.0", "*"]

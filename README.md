@@ -32,6 +32,7 @@ Install the extension from Zed's extensions page (`zed: extensions`), or from a 
 - DTD support (LemMinX-style, new `dtd-core` crate): the `<!DOCTYPE>` internal subset and the external DTD (`SYSTEM`/`PUBLIC`, resolved through `xml.catalogs`, then relative to the document; local files only, remote DTDs are never downloaded and reported as a warning) with parameter entities, external parameter entities and `INCLUDE`/`IGNORE` conditional sections. Diagnostics: DTD syntax errors (in the internal subset, in `.dtd`/`.ent` files, or summarized on the DOCTYPE system identifier for an external DTD), undeclared entity references `&foo;` (also without a DTD; the five predefined entities are always allowed), and validation against the DTD (root name, undeclared elements/attributes, content models `EMPTY`/`ANY`/mixed/`(a, (b | c)*, d?)+` via an NFA, `#REQUIRED`/`#FIXED`/enumerated/`NOTATION` attributes, unique `ID`s and existing `IDREF(S)` targets, `NMTOKEN(S)`, `ENTITY/ENTITIES`), alongside XSD validation when both are present. Completion of elements allowed by the parent's content model at the cursor, attributes, enumerated values (and existing IDs for `IDREF`), entities after `&`, and in DTDs `<!ELEMENT`/`<!ATTLIST`/… snippets, `#PCDATA`/`#REQUIRED`/…, `%parameter;` entities and element names. Hover shows the DTD declaration (with the element's attribute list and the preceding `<!-- comment -->` as documentation); go to definition jumps from elements, attributes and `&entity;`/`%entity;` references to their declaration; quick fixes declare a missing entity, add a missing required attribute or replace an invalid enumerated/fixed value. `.dtd`/`.ent` files get their own DTD language (tree-sitter-xml `dtd` grammar) with declaration symbols. Entity expansion is bounded (1 MiB per general entity, 4 MiB of parameter-entity text, depth 32) against "billion laughs" attacks; external general entities are never read (`xml.validation.resolveExternalEntities` only checks that they resolve).
 - Workspace-aware revalidation when an open XSD changes.
 - Verified server downloads: prebuilt `xml-lsp` binaries for Linux (static musl builds, any distribution), macOS and Windows on x86_64 and arm64, each published with a SHA-256 checksum that the extension checks before starting the binary; unsupported platforms get an error listing the supported ones.
+- Standard Zed language server binary settings: `lsp.xml-lsp.binary.path`, `arguments` and `env` (see [Language server](#language-server)).
 - LemMinX-style `xml.*` settings (formatting, validation, file associations, completion, symbols, colors) from Zed `lsp.xml-lsp.settings`, applied live (see [Configuration](#configuration)).
 
 ## Language server
@@ -40,9 +41,22 @@ The extension runs the `xml-lsp` server from `crates/xml-lsp`. The server is a n
 
 The extension looks for the server in this order:
 
-1. `XML_LSP_PATH`, containing the path to a local `xml-lsp` executable;
-2. the cached native binary, when its `--version` output matches the extension version and it still matches the checksum recorded at download time;
-3. a native binary downloaded from the matching GitHub release.
+1. the `lsp.xml-lsp.binary.path` Zed setting;
+2. `XML_LSP_PATH`, containing the path to a local `xml-lsp` executable;
+3. the cached native binary, when its `--version` output matches the extension version and it still matches the checksum recorded at download time;
+4. a native binary downloaded from the matching GitHub release.
+
+`lsp.xml-lsp.binary.arguments` replaces the default `--stdio` argument and `lsp.xml-lsp.binary.env` adds environment variables, whichever binary is started:
+
+```json
+{
+  "lsp": {
+    "xml-lsp": {
+      "binary": { "path": "/path/to/xml-lsp", "arguments": ["--stdio"] }
+    }
+  }
+}
+```
 
 Every release asset `xml-lsp-<target>[.exe]` is published with a `xml-lsp-<target>[.exe].sha256` file (and a `SHA256SUMS` file listing them all). The extension downloads the checksum first, then the binary, and deletes and rejects a binary whose SHA-256 differs; it then checks the binary with `--version`. On Linux it uses the statically linked musl builds, which do not depend on the distribution's glibc version (the glibc builds are published too, for other clients).
 
@@ -136,7 +150,7 @@ See [docs/configuration.md](docs/configuration.md) for the full reference.
 - **The server does not start**: run `zed: open log` and look for `xml-lsp` messages. A failed download mentions the release asset name; set `XML_LSP_PATH` to a locally built binary (`cargo build -p xml-lsp --release`) to work around it. Restart the server with `editor: restart language server`.
 - **Checksum mismatch**: the log says `SHA-256 mismatch` when the downloaded binary differs from the published checksum (truncated download, proxy rewriting the response, tampered mirror). The binary is deleted and downloaded again at the next start; if it persists, check your proxy or use `XML_LSP_PATH`.
 - **Unsupported platform**: the error lists the platforms with prebuilt binaries; elsewhere, build the server (`cargo build -p xml-lsp --release`) and set `XML_LSP_PATH`.
-- **Wrong or outdated binary**: `XML_LSP_PATH` always wins, so make sure it points at an up-to-date build or unset it. Without it, a cached binary whose `xml-lsp --version` differs from the extension version is replaced by the matching release. `XML_LSP_PATH`, `XML_LSP_DOWNLOAD_URL` and `XML_LSP_DOWNLOAD_SHA256` are read from the shell environment of the project, so set them in the shell Zed is launched from.
+- **Wrong or outdated binary**: `lsp.xml-lsp.binary.path`, then `XML_LSP_PATH`, always win, so make sure they point at an up-to-date build or remove them. Without them, a cached binary whose `xml-lsp --version` differs from the extension version is replaced by the matching release. `XML_LSP_PATH`, `XML_LSP_DOWNLOAD_URL` and `XML_LSP_DOWNLOAD_SHA256` are read from the shell environment of the project, so set them in the shell Zed is launched from.
 - **No XSD validation or completion**: check that the document declares `xsi:schemaLocation`/`xsi:noNamespaceSchemaLocation`, or add an `xml.fileAssociations` entry. Remote (`http(s)://`) schemas are not downloaded: map them with `xml.catalogs` (a warning diagnostic points at unmapped locations).
 - **Formatting does nothing**: make sure `formatter` is `language_server` for XML (see [Editor settings](#editor-settings)) and that `xml.format.enabled` is not `false`. Regions that are not well-formed are left untouched by range formatting.
 - **Folding ranges from the server are not used**: set `document_folding_ranges` to `"on"` for XML.
