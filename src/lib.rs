@@ -41,13 +41,29 @@ impl XmlExtension {
             == format!("{LANGUAGE_SERVER_ID} {EXPECTED_LSP_VERSION}")
     }
 
-    fn installed_version_matches(executable: &str) -> bool {
+    fn installed_version(executable: &str) -> zed::Result<String> {
         let mut command = zed::process::Command::new(executable.to_owned()).arg("--version");
-        let Ok(output) = command.output() else {
-            return false;
-        };
+        let output = command
+            .output()
+            .map_err(|error| format!("could not run --version: {error}"))?;
+        if output.status != Some(0) {
+            return Err(format!("--version exited with status {:?}", output.status));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    }
 
-        output.status == Some(0) && Self::version_output_matches(&output.stdout)
+    fn check_installed_version(executable: &str) -> zed::Result<()> {
+        let version = Self::installed_version(executable)?;
+        let expected = format!("{LANGUAGE_SERVER_ID} {EXPECTED_LSP_VERSION}");
+        if Self::version_output_matches(version.as_bytes()) {
+            Ok(())
+        } else {
+            Err(format!("reports {version:?}, expected {expected:?}"))
+        }
+    }
+
+    fn installed_version_matches(executable: &str) -> bool {
+        Self::check_installed_version(executable).is_ok()
     }
 
     /// `workspace/configuration` configuration: the `xml` section of the Zed
@@ -80,24 +96,26 @@ impl XmlExtension {
         LspSettings::for_worktree(LANGUAGE_SERVER_ID, worktree).unwrap_or_default()
     }
 
-    fn release_asset(
-        os: zed::Os,
-        architecture: zed::Architecture,
-    ) -> zed::Result<(&'static str, &'static str)> {
+    fn release_asset(os: zed::Os, architecture: zed::Architecture) -> zed::Result<&'static str> {
         match (os, architecture) {
             (zed::Os::Windows, zed::Architecture::X8664) => {
-                Ok(("xml-lsp-x86_64-pc-windows-msvc.exe", "xml-lsp.exe"))
+                Ok("xml-lsp-x86_64-pc-windows-msvc.exe")
             }
-            (zed::Os::Linux, zed::Architecture::X8664) => {
-                Ok(("xml-lsp-x86_64-unknown-linux-gnu", "xml-lsp"))
-            }
-            (zed::Os::Mac, zed::Architecture::Aarch64) => {
-                Ok(("xml-lsp-aarch64-apple-darwin", "xml-lsp"))
-            }
+            (zed::Os::Linux, zed::Architecture::X8664) => Ok("xml-lsp-x86_64-unknown-linux-gnu"),
+            (zed::Os::Mac, zed::Architecture::Aarch64) => Ok("xml-lsp-aarch64-apple-darwin"),
             _ => Err(
                 "Unsupported platform for xml-lsp. Set XML_LSP_PATH to a native binary.".to_owned(),
             ),
         }
+    }
+
+    fn executable_name(os: zed::Os) -> String {
+        let extension = if matches!(os, zed::Os::Windows) {
+            ".exe"
+        } else {
+            ""
+        };
+        format!("{LANGUAGE_SERVER_ID}-{EXPECTED_LSP_VERSION}{extension}")
     }
 
     fn downloaded_command(
@@ -105,15 +123,16 @@ impl XmlExtension {
         worktree: &zed::Worktree,
     ) -> zed::Result<zed::Command> {
         let (os, architecture) = zed::current_platform();
-        let (asset_name, executable) = Self::release_asset(os, architecture)?;
+        let asset_name = Self::release_asset(os, architecture)?;
+        let executable = Self::executable_name(os);
         let override_url = Self::environment(worktree, XML_LSP_DOWNLOAD_URL_ENV);
 
-        if Self::installed_version_matches(executable) {
+        if Self::installed_version_matches(&executable) {
             zed::set_language_server_installation_status(
                 language_server_id,
                 &zed::LanguageServerInstallationStatus::None,
             );
-            return Ok(Self::command(executable.to_owned()));
+            return Ok(Self::command(executable));
         }
 
         zed::set_language_server_installation_status(
@@ -124,13 +143,13 @@ impl XmlExtension {
         let result: zed::Result<String> = (|| {
             let (download_url, executable_path) = if let Some(url) = override_url {
                 // The extension host does not create parent directories for downloads.
-                (url, executable.to_owned())
+                (url, executable.clone())
             } else {
                 (
                     format!(
                         "https://github.com/{RELEASE_REPOSITORY}/releases/download/v{EXPECTED_LSP_VERSION}/{asset_name}"
                     ),
-                    executable.to_owned(),
+                    executable.clone(),
                 )
             };
 
@@ -151,10 +170,8 @@ impl XmlExtension {
             if !matches!(os, zed::Os::Windows) {
                 zed::make_file_executable(&executable_path)?;
             }
-            if !Self::installed_version_matches(&executable_path) {
-                return Err(format!(
-                    "Downloaded xml-lsp does not report the expected version {EXPECTED_LSP_VERSION}"
-                ));
+            if let Err(error) = Self::check_installed_version(&executable_path) {
+                return Err(format!("Downloaded xml-lsp {error}"));
             }
             Ok(executable_path)
         })();
@@ -236,7 +253,11 @@ mod tests {
     fn maps_windows_x86_64_asset_and_executable_names() {
         assert_eq!(
             XmlExtension::release_asset(zed::Os::Windows, zed::Architecture::X8664),
-            Ok(("xml-lsp-x86_64-pc-windows-msvc.exe", "xml-lsp.exe"))
+            Ok("xml-lsp-x86_64-pc-windows-msvc.exe")
+        );
+        assert_eq!(
+            XmlExtension::executable_name(zed::Os::Windows),
+            format!("xml-lsp-{EXPECTED_LSP_VERSION}.exe")
         );
     }
 
@@ -244,7 +265,11 @@ mod tests {
     fn maps_linux_x86_64_asset_and_executable_names() {
         assert_eq!(
             XmlExtension::release_asset(zed::Os::Linux, zed::Architecture::X8664),
-            Ok(("xml-lsp-x86_64-unknown-linux-gnu", "xml-lsp"))
+            Ok("xml-lsp-x86_64-unknown-linux-gnu")
+        );
+        assert_eq!(
+            XmlExtension::executable_name(zed::Os::Linux),
+            format!("xml-lsp-{EXPECTED_LSP_VERSION}")
         );
     }
 
@@ -252,7 +277,11 @@ mod tests {
     fn maps_macos_arm64_asset_and_executable_names() {
         assert_eq!(
             XmlExtension::release_asset(zed::Os::Mac, zed::Architecture::Aarch64),
-            Ok(("xml-lsp-aarch64-apple-darwin", "xml-lsp"))
+            Ok("xml-lsp-aarch64-apple-darwin")
+        );
+        assert_eq!(
+            XmlExtension::executable_name(zed::Os::Mac),
+            format!("xml-lsp-{EXPECTED_LSP_VERSION}")
         );
     }
 
