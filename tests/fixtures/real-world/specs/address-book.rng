@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- RELAX NG schema in the XML syntax (ISO/IEC 19757-2, modelled on the
+     address book of the RELAX NG tutorial): named patterns, choices,
+     interleave and XML Schema datatypes. -->
+<grammar xmlns="http://relaxng.org/ns/structure/1.0" datatypeLibrary="http://www.w3.org/2001/XMLSchema-datatypes">
+  <start>
+    <element name="addressBook">
+      <zeroOrMore>
+        <ref name="card"/>
+      </zeroOrMore>
+    </element>
+  </start>
+  <define name="card">
+    <element name="card">
+      <interleave>
+        <choice>
+          <element name="name">
+            <text/>
+          </element>
+          <group>
+            <element name="givenName">
+              <text/>
+            </element>
+            <element name="familyName">
+              <text/>
+            </element>
+          </group>
+        </choice>
+        <element name="email">
+          <data type="string">
+            <param name="pattern">[^@]+@[^@]+</param>
+          </data>
+        </element>
+        <optional>
+          <attribute name="born">
+            <data type="date"/>
+          </attribute>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+</grammar>

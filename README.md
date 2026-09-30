@@ -1,6 +1,6 @@
 # XML for Zed
 
-XML language support for Zed, including XML, XSD, XSLT, SVG, WSDL, plist, XJB, Android XML and DTD files, powered by a native Rust language server (`xml-lsp`) with XSD, DTD and XML catalog support.
+XML language support for Zed, including XML, XSD, XSLT, SVG, WSDL, RELAX NG, XHTML, XAML, plist, storyboards, XLIFF, KML, GPX, Android XML, .NET and WiX project files and DTD files (see [File types](#file-types)), powered by a native Rust language server (`xml-lsp`) with XSD, DTD and XML catalog support.
 
 ## Installation
 
@@ -9,6 +9,7 @@ Install the extension from Zed's extensions page (`zed: extensions`), or from a 
 ## Features
 
 - Tree-sitter syntax highlighting, indentation and outline support.
+- Around fifty XML file types recognized by their suffix (XAML, `.resx`, storyboards, XLIFF, KML, GPX, RELAX NG, WiX, `.pom`, …; see [File types](#file-types)), all served by `xml-lsp` (diagnostics, completion, formatting, and workspace symbols and `workspace/didChangeWatchedFiles` for the files on disk).
 - Matching start/end tag pairs and delimiters (`<`/`>`, `<?`/`?>`, quotes) for bracket highlighting and jumping.
 - Text objects for elements (function/class) and comments, e.g. for Vim mode.
 - Embedded CSS in `<style>` and JavaScript in `<script>` (SVG, XHTML, CDATA sections included).
@@ -63,6 +64,32 @@ Every release asset `xml-lsp-<target>[.exe]` is published with a `xml-lsp-<targe
 Set `XML_LSP_DOWNLOAD_URL` to use a custom download URL; the checksum is then read from `<URL>.sha256`, or from `XML_LSP_DOWNLOAD_SHA256` (the expected hexadecimal SHA-256) when set. The cache and release download are independent of the directory containing the XML file.
 
 The server never downloads schemas, DTDs or entities: remote locations must be mapped to local files through [XML catalogs](docs/configuration.md#xml-catalogs). Full XSD conformance is still a work in progress.
+
+## File types
+
+The `XML` language (and so `xml-lsp`) is used for files with these suffixes, and for files without a known suffix whose first line starts with `<` and contains `xml` (such as `<?xml version="1.0"?>`):
+
+| Family | Suffixes |
+|--------|----------|
+| XML, schemas, transformations | `xml`, `xsd`, `xsl`, `xslt`, `rng` (RELAX NG, XML syntax), `wsdl`, `xjb` |
+| Web, documents, feeds | `svg`, `xhtml`, `xht`, `rss`, `atom`, `opml`, `opf` (EPUB package), `dita`, `ditamap`, `xul` |
+| Apple | `plist`, `entitlements`, `storyboard`, `xib`, `xcscheme`, `xcworkspacedata`, `tmTheme`, `tmLanguage` |
+| .NET, MSBuild, WiX | `xaml`, `axaml`, `fsproj`, `vbproj`, `vcxproj`, `vcxproj.filters`, `csproj.user`, `nuspec`, `resx`, `pubxml`, `wxs`, `wxi`, `wxl` |
+| Java, Android | `pom`, `fxml`, `iml`, `tld`, `axml` (and `pom.xml`, `AndroidManifest.xml`, … through `xml`) |
+| Localization | `xlf`, `xliff`, `tmx` |
+| Geography, graphs, music, processes | `kml`, `gpx`, `graphml`, `musicxml`, `bpmn` |
+
+`.dtd` and `.ent` files use the `DTD` language.
+
+Some XML suffixes are deliberately left out because another extension of the Zed registry claims them, and Zed picks one of the two languages arbitrarily when two extensions claim the same suffix: `csproj`, `proj`, `props`, `targets` and `slnx` (the C# extension, whose MSBuild language servers expect its own language names), `html`/`htm` (HTML) and `urdf` (URDF). Generic suffixes that are not always XML (`config`, `rdf`, `ts`, `ui`, `mod`) are left out too. To open such files as XML anyway, map them with Zed's `file_types` setting; the server serves every document Zed sends it:
+
+```json
+{
+  "file_types": {
+    "XML": ["csproj", "props", "targets", "config", "rdf"]
+  }
+}
+```
 
 ## Editor settings
 

@@ -597,7 +597,7 @@ impl XmlLanguageServer {
                 params: json!({"registrations": [{
                     "id": "xml-lsp/watched-files",
                     "method": DID_CHANGE_WATCHED_FILES_METHOD,
-                    "registerOptions": {"watchers": [{"globPattern": symbols::WATCHED_FILES_GLOB}]},
+                    "registerOptions": {"watchers": [{"globPattern": symbols::watched_files_glob()}]},
                 }]}),
             }
             .into(),
@@ -3189,6 +3189,109 @@ mod tests {
         assert_eq!(request(7, "shutdown", json!(null)), Value::Null);
         notify(EXIT_METHOD, json!(null));
         server_thread.join().expect("server thread should stop");
+    }
+
+    #[test]
+    fn serves_the_file_types_of_the_xml_language() {
+        let directory =
+            std::env::temp_dir().join(format!("xml-lsp-file-types {}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        for (path, content) in [
+            (
+                "ui/MainWindow.xaml",
+                "<Window xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml/presentation\">\n  <Button id=\"saveButton\"/>\n</Window>",
+            ),
+            (
+                "res/Strings.resx",
+                "<root>\n  <data name=\"saveLabel\"><value>Save</value></data>\n</root>",
+            ),
+            (
+                "vc/App.vcxproj.filters",
+                "<Project>\n  <Filter id=\"saveFilter\"/>\n</Project>",
+            ),
+            // Claimed by the C# extension, not by the XML language.
+            (
+                "App.csproj",
+                "<Project>\n  <PropertyGroup id=\"saveIgnored\"/>\n</Project>",
+            ),
+        ] {
+            let path = directory.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).expect("directory should be created");
+            std::fs::write(path, content).expect("file should be written");
+        }
+
+        let (server, connection) = Connection::memory();
+        let server_thread = thread::spawn(|| run(server).expect("server loop should succeed"));
+        let client = TestClient {
+            connection,
+            diagnostics: Default::default(),
+        };
+        client.request(
+            1,
+            INITIALIZE_METHOD,
+            json!({
+                "rootUri": path_to_uri(&directory),
+                "capabilities": {
+                    "workspace": {"didChangeWatchedFiles": {"dynamicRegistration": true}},
+                },
+            }),
+        );
+        client.notify("initialized", json!({}));
+        let registration = expect_server_request(&client, REGISTER_CAPABILITY_METHOD);
+        let glob =
+            registration["registrations"][0]["registerOptions"]["watchers"][0]["globPattern"]
+                .as_str()
+                .expect("a watched files glob")
+                .to_owned();
+        assert_eq!(glob, symbols::watched_files_glob());
+        assert!(settings::glob_match(&glob, "ui/MainWindow.xaml"), "{glob}");
+        assert!(!settings::glob_match(&glob, "App.csproj"), "{glob}");
+
+        let mut names = client
+            .request(2, WORKSPACE_SYMBOL_METHOD, json!({"query": "save"}))
+            .as_array()
+            .expect("symbols should be an array")
+            .iter()
+            .map(|symbol| symbol["name"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(names, ["saveButton", "saveFilter", "saveLabel"]);
+
+        // Open documents of the new types get the usual diagnostics, whatever
+        // language identifier the client sends.
+        let storyboard = path_to_uri(&directory.join("Main.storyboard"));
+        let gpx = path_to_uri(&directory.join("track.gpx"));
+        client.notify(
+            DID_OPEN_METHOD,
+            json!({"textDocument": {"uri": storyboard, "languageId": "xml", "version": 1,
+                "text": "<document>\r\n  <scenes>\r\n</document>"}}),
+        );
+        client.notify(
+            DID_OPEN_METHOD,
+            json!({"textDocument": {"uri": gpx, "languageId": "XML", "version": 1,
+                "text": "<gpx version=\"1.1\" creator=\"t\"><trk><name>\u{e9}t\u{e9}</name></trk></gpx>"}}),
+        );
+        let published = client.take_diagnostics(3);
+        assert_eq!(published.len(), 2, "{published:?}");
+        assert_eq!(published[0]["uri"], storyboard);
+        assert!(
+            codes(&published[0])
+                .iter()
+                .any(|code| code.starts_with("xml-")),
+            "{published:?}"
+        );
+        assert_eq!(published[1]["uri"], gpx);
+        assert!(
+            !codes(&published[1])
+                .iter()
+                .any(|code| code.starts_with("xml-")),
+            "{published:?}"
+        );
+
+        assert_eq!(client.request(4, "shutdown", json!(null)), Value::Null);
+        client.notify(EXIT_METHOD, json!(null));
+        server_thread.join().expect("server thread should stop");
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]

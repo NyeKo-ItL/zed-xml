@@ -1,0 +1,18 @@
+<!-- WiX Toolset v4 installer source (https://wixtoolset.org/docs/schema/wxs/):
+     package, a preprocessor variable, a directory tree and a feature. -->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <?define Version = "1.2.0" ?>
+  <Package Name="Orders" Manufacturer="zed-xml fixtures" Version="$(var.Version)" UpgradeCode="6F1C2A64-3D7E-4C8B-9E2A-6A1B7C3D9E10">
+    <MajorUpgrade DowngradeErrorMessage="A newer version is already installed."/>
+    <StandardDirectory Id="ProgramFiles6432Folder">
+      <Directory Id="INSTALLFOLDER" Name="Orders">
+        <Component Id="MainExecutable">
+          <File Source="Orders.exe" KeyPath="yes"/>
+        </Component>
+      </Directory>
+    </StandardDirectory>
+    <Feature Id="Main" Title="Orders">
+      <ComponentRef Id="MainExecutable"/>
+    </Feature>
+  </Package>
+</Wix>
