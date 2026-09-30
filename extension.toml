@@ -1,7 +1,7 @@
 id = "xml"
 name = "XML"
 description = "XML language support with syntax highlighting, schema-aware diagnostics, formatting, completion, and navigation via the native Rust LSP."
-version = "0.11.0"
+version = "0.12.0"
 schema_version = 1
 authors = ["NyeKo-ItL"]
 repository = "https://github.com/NyeKo-ItL/zed-xml"
@@ -22,10 +22,10 @@ languages = ["XML", "DTD"]
 
 [[capabilities]]
 kind = "process:exec"
-command = "xml-lsp-0.11.0.exe"
+command = "xml-lsp-0.12.0.exe"
 args = ["--version"]
 
 [[capabilities]]
 kind = "process:exec"
-command = "xml-lsp-0.11.0"
+command = "xml-lsp-0.12.0"
 args = ["--version"]
