@@ -294,7 +294,8 @@ pub struct XsdTypeDef {
     pub content: Option<XsdParticle>,
     pub attributes: Vec<XsdAttributeDecl>,
     pub attribute_group_refs: Vec<XsdQName>,
-    pub any_attribute: bool,
+    /// `xs:anyAttribute` (its `minOccurs`/`maxOccurs` are 0 and 1).
+    pub any_attribute: Option<XsdWildcard>,
     pub facets: XsdFacets,
     pub documentation: Option<String>,
 }
@@ -315,7 +316,7 @@ pub struct XsdAttributeGroupDef {
     pub namespace: Option<String>,
     pub attributes: Vec<XsdAttributeDecl>,
     pub attribute_group_refs: Vec<XsdQName>,
-    pub any_attribute: bool,
+    pub any_attribute: Option<XsdWildcard>,
     pub documentation: Option<String>,
 }
 
@@ -676,7 +677,7 @@ impl Context<'_> {
                             namespace: self.target_namespace.clone(),
                             attributes: Vec::new(),
                             attribute_group_refs: Vec::new(),
-                            any_attribute: false,
+                            any_attribute: None,
                             documentation: documentation(child),
                         };
                         for item in child.elements() {
@@ -685,7 +686,9 @@ impl Context<'_> {
                                 "attributeGroup" => group
                                     .attribute_group_refs
                                     .extend(self.qname_attribute(item, "ref")),
-                                "anyAttribute" => group.any_attribute = true,
+                                "anyAttribute" => {
+                                    group.any_attribute = Some(self.attribute_wildcard(item))
+                                }
                                 _ => {}
                             }
                         }
@@ -969,7 +972,7 @@ impl Context<'_> {
                 "attributeGroup" => definition
                     .attribute_group_refs
                     .extend(self.qname_attribute(child, "ref")),
-                "anyAttribute" => definition.any_attribute = true,
+                "anyAttribute" => definition.any_attribute = Some(self.attribute_wildcard(child)),
                 _ => {}
             }
         }
@@ -1041,6 +1044,21 @@ impl Context<'_> {
                 "whiteSpace" => facets.white_space = Some(value),
                 _ => {}
             }
+        }
+    }
+
+    fn attribute_wildcard(&self, node: &Node) -> XsdWildcard {
+        XsdWildcard {
+            has_exclusions: node.attribute("notNamespace").is_some()
+                || node.attribute("notQName").is_some(),
+            process_contents: match node.attribute("processContents").as_deref().map(str::trim) {
+                Some("skip") => XsdProcessContents::Skip,
+                Some("lax") => XsdProcessContents::Lax,
+                _ => XsdProcessContents::Strict,
+            },
+            namespaces: self.wildcard_namespaces(node),
+            min_occurs: 0,
+            max_occurs: Some(1),
         }
     }
 
@@ -2036,6 +2054,54 @@ impl XsdModelSet {
             });
             uses.extend(inherited);
         }
+    }
+
+    /// Effective declaration of an attribute use: the global declaration for
+    /// a `ref`.
+    pub(crate) fn attribute_declaration<'a>(
+        &'a self,
+        usage: Located<'a, XsdAttributeDecl>,
+    ) -> Located<'a, XsdAttributeDecl> {
+        usage
+            .item
+            .reference
+            .as_ref()
+            .and_then(|reference| {
+                self.global_attribute(reference.namespace.as_deref(), &reference.local)
+            })
+            .unwrap_or(usage)
+    }
+
+    /// The attribute wildcards of a type: its own, those of its attribute
+    /// groups and, for an extension, those of its base type.
+    pub fn attribute_wildcards<'a>(&'a self, reference: XsdTypeRef<'a>) -> Vec<&'a XsdWildcard> {
+        let mut found = Vec::new();
+        let mut current = Some(reference);
+        for _ in 0..MAX_DEPTH {
+            let Some(reference) = current else { break };
+            let Some(definition) = reference.definition else {
+                break;
+            };
+            found.extend(definition.any_attribute.iter());
+            let mut groups: Vec<&XsdQName> = definition.attribute_group_refs.iter().collect();
+            let mut visited = 0;
+            while let Some(name) = groups.pop() {
+                visited += 1;
+                if visited > 256 {
+                    break;
+                }
+                if let Some(group) = self.attribute_group(name.namespace.as_deref(), &name.local) {
+                    found.extend(group.item.any_attribute.iter());
+                    groups.extend(group.item.attribute_group_refs.iter());
+                }
+            }
+            current = if definition.derivation == Some(XsdDerivation::Extension) {
+                self.base_type(reference)
+            } else {
+                None
+            };
+        }
+        found
     }
 
     fn collect_group_attributes<'a>(

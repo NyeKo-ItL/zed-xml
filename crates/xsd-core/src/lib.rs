@@ -4,6 +4,7 @@ mod component_check;
 pub(crate) mod content;
 pub mod datatypes;
 pub mod identity;
+mod instance_check;
 pub mod model;
 pub mod pattern;
 mod reference_check;
@@ -1820,9 +1821,28 @@ fn validate(
                     value_type.values_equal(value, fixed, Some(&lookup))
                 })
         };
-        let mut element_diagnostics =
-            validate_attributes(schema, &name, &element, &same_value, &lookup);
-        element_diagnostics.extend(validate_nil(schema, &name, &element));
+        let mut element_diagnostics = if models.models().is_empty() {
+            let mut diagnostics =
+                validate_attributes(schema, &name, &element, &same_value, &lookup);
+            diagnostics.extend(validate_nil(schema, &name, &element));
+            diagnostics
+        } else {
+            let mut diagnostics = instance_check::validate_attributes(
+                &models,
+                resolved.as_ref(),
+                &name,
+                &element,
+                &same_value,
+                &lookup,
+            );
+            diagnostics.extend(instance_check::validate_nil(
+                resolved.as_ref(),
+                &name,
+                &element,
+                &lookup,
+            ));
+            diagnostics
+        };
         let value = match &resolved {
             Some(resolved) => ValueCheck::Model {
                 value_type: builtin_xsi_type(&step).or_else(|| {
@@ -2295,7 +2315,7 @@ fn validate_attribute_values<'s>(
                     let wildcard = resolved
                         .element_type
                         .and_then(|reference| reference.definition)
-                        .is_some_and(|definition| definition.any_attribute);
+                        .is_some_and(|definition| definition.any_attribute.is_some());
                     (wildcard && namespace.is_none())
                         .then(|| models.global_attribute(None, local))
                         .flatten()
@@ -3034,7 +3054,7 @@ mod tests {
             r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
                 <xs:element name="root"><xs:complexType><xs:sequence>
                     <xs:any minOccurs="0" maxOccurs="2"/>
-                </xs:sequence><xs:anyAttribute/></xs:complexType></xs:element>
+                </xs:sequence><xs:anyAttribute processContents="lax"/></xs:complexType></xs:element>
             </xs:schema>"#,
         )
         .unwrap();

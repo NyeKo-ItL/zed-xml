@@ -1,7 +1,6 @@
 # Known failures of the `libxml2-schemas` suite, one case per line.
 # Regenerate with `BLESS=1 cargo test -p xml-conformance`.
+derivation-ok-extension_0_0
 idc-keyref-err1_1_0
-ns0_0_3
-ns0_0_4
-ns0_1_0
-ns0_1_1
+include1_0_0
+include2_0_0
