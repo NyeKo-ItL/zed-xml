@@ -358,7 +358,7 @@ fn check_namespaces(
     problems: &mut Vec<XmlProblem>,
 ) {
     // `prefix -> stack of namespaces` ("" is the default namespace).
-    let mut bindings: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut bindings: HashMap<&str, Vec<String>> = HashMap::new();
     let mut open: Vec<Vec<&str>> = Vec::new();
 
     for tag in tags {
@@ -381,8 +381,17 @@ fn check_namespaces(
             } else {
                 continue;
             };
-            let value = attribute.value.clone().map_or("", |range| &source[range]);
-            if let Some(message) = declaration_problem(prefix, value) {
+            let raw_value = attribute.value.clone().map_or("", |range| &source[range]);
+            // Character and predefined entity references are resolved before
+            // namespaces are compared.
+            let value = decode_references(raw_value);
+            if !prefix.is_empty() && !is_ncname(prefix) && is_name(name) {
+                problems.push(XmlProblem {
+                    kind: XmlProblemKind::InvalidQualifiedName,
+                    range: attribute.name.clone(),
+                    message: format!("{name} is not a valid namespace declaration (xmlns:NCName)"),
+                });
+            } else if let Some(message) = declaration_problem(prefix, &value) {
                 problems.push(XmlProblem {
                     kind: XmlProblemKind::InvalidNamespaceDeclaration,
                     range: attribute.name.clone(),
@@ -416,7 +425,9 @@ fn check_namespaces(
             let namespace = if prefix == "xml" {
                 Some(XML_NAMESPACE)
             } else {
-                bindings.get(prefix).and_then(|stack| stack.last().copied())
+                bindings
+                    .get(prefix)
+                    .and_then(|stack| stack.last().map(String::as_str))
             };
             let Some(namespace) = namespace else {
                 continue;
@@ -447,6 +458,49 @@ fn check_namespaces(
             }
         }
     }
+}
+
+/// The text with its character references and the five predefined entity
+/// references replaced by the characters they stand for; other references
+/// are kept.
+fn decode_references(text: &str) -> String {
+    if !text.contains('&') {
+        return text.to_owned();
+    }
+    let mut decoded = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('&') {
+        decoded.push_str(&rest[..start]);
+        rest = &rest[start..];
+        let replacement = rest.find(';').and_then(|end| {
+            let body = &rest[1..end];
+            let character = match body {
+                "lt" => Some('<'),
+                "gt" => Some('>'),
+                "amp" => Some('&'),
+                "quot" => Some('"'),
+                "apos" => Some('\''),
+                _ => body
+                    .strip_prefix("#x")
+                    .and_then(|hex| u32::from_str_radix(hex, 16).ok())
+                    .or_else(|| body.strip_prefix('#').and_then(|dec| dec.parse().ok()))
+                    .and_then(char::from_u32),
+            };
+            character.map(|character| (character, end + 1))
+        });
+        match replacement {
+            Some((character, length)) => {
+                decoded.push(character);
+                rest = &rest[length..];
+            }
+            None => {
+                decoded.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    decoded.push_str(rest);
+    decoded
 }
 
 /// Constraint broken by the declaration of `prefix` (`""` for the default

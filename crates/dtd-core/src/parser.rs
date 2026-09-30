@@ -25,6 +25,7 @@ use crate::{
     SourceKind,
     content::ParticleKind,
     names::{is_name, scan_name_chars},
+    syntax,
 };
 
 /// Maximum depth of nested groups in a content model.
@@ -996,6 +997,7 @@ impl<'l> DtdBuilder<'l> {
                         index..declaration_end,
                         keyword_end..body_end,
                         documentation.take(),
+                        closed.then_some(source == 0 && !external),
                     ),
                     _ => self.problem(
                         DtdProblemKind::Syntax,
@@ -1271,16 +1273,48 @@ impl<'l> DtdBuilder<'l> {
         whole: Range<usize>,
         body: Range<usize>,
         documentation: Option<String>,
+        strict: Option<bool>,
     ) {
+        // Strict grammar of the raw declaration (`strict`: the declaration
+        // is closed; its value tells whether it is in the internal subset).
+        let strict_error = strict.and_then(|internal| {
+            let text = self.dtd.sources[source].text.clone();
+            syntax::check_declaration(&text[whole.clone()], internal)
+                .err()
+                .map(|error| {
+                    (
+                        whole.start + error.range.start..whole.start + error.range.end,
+                        error.message,
+                    )
+                })
+        });
         let expanded = self.expand(source, body.clone());
         let declaration = Self::at(source, whole.clone());
+        let before = self.dtd.problems.len();
         let result = match keyword {
             "ELEMENT" => self.element_declaration(&expanded, &declaration, documentation),
             "ATTLIST" => self.attlist_declaration(&expanded, &declaration, documentation),
             "ENTITY" => self.entity_declaration(&expanded, &declaration, documentation),
             _ => self.notation_declaration(&expanded, &declaration, documentation),
         };
-        if let Err(error) = result {
+        if let Some((range, message)) = strict_error {
+            // The strict error replaces the syntax errors the tolerant
+            // parser found in the same declaration.
+            let mut index = before;
+            while index < self.dtd.problems.len() {
+                if self.dtd.problems[index].kind == DtdProblemKind::Syntax {
+                    self.dtd.problems.remove(index);
+                } else {
+                    index += 1;
+                }
+            }
+            let problem = DtdProblem {
+                kind: DtdProblemKind::Syntax,
+                location: Self::at(source, range),
+                message,
+            };
+            self.dtd.problems.insert(before, problem);
+        } else if let Err(error) = result {
             let mut range = expanded.locate(&error.range);
             if range.is_empty() {
                 // Error at the end of the declaration: the keyword is reported.
