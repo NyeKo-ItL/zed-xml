@@ -337,7 +337,12 @@ fn check_lengths<'a>(
             .and_then(|value| value.trim().parse::<u64>().ok())
     };
     let base_length = base(&|facets| facets.length.as_ref());
-    let base_minimum = base(&|facets| facets.min_length.as_ref());
+    // The built-in list types have at least one item.
+    let builtin_list = matches!(simple.variety, Variety::List(_))
+        && ["NMTOKENS", "IDREFS", "ENTITIES"]
+            .iter()
+            .any(|name| simple.name.ends_with(name));
+    let base_minimum = base(&|facets| facets.min_length.as_ref()).or(builtin_list.then_some(1));
     let base_maximum = base(&|facets| facets.max_length.as_ref());
     if let Some((facet, value)) = length {
         if base_length.is_some_and(|base| base != value) {
@@ -544,9 +549,15 @@ fn check_bounds<'a>(
             .find_map(|facets| select(facets))
             .and_then(|value| bound(simple, value))
     };
-    let base_max_inclusive = base_bound(&|facets| facets.max_inclusive.as_ref());
+    let implicit = match &simple.variety {
+        Variety::Atomic(builtin) => builtin.implicit_bounds(),
+        _ => (None, None),
+    };
+    let base_max_inclusive = base_bound(&|facets| facets.max_inclusive.as_ref())
+        .or_else(|| implicit.1.and_then(|value| bound(simple, value)));
     let base_max_exclusive = base_bound(&|facets| facets.max_exclusive.as_ref());
-    let base_min_inclusive = base_bound(&|facets| facets.min_inclusive.as_ref());
+    let base_min_inclusive = base_bound(&|facets| facets.min_inclusive.as_ref())
+        .or_else(|| implicit.0.and_then(|value| bound(simple, value)));
     let base_min_exclusive = base_bound(&|facets| facets.min_exclusive.as_ref());
     let within = |value: &Value, limit: &Option<Value>, allowed: &[Ordering]| {
         limit.as_ref().is_none_or(|limit| {
@@ -580,7 +591,8 @@ fn check_bounds<'a>(
                     value,
                     &base_max_exclusive,
                     &[Ordering::Less, Ordering::Equal],
-                ),
+                ) && within(value, &base_min_inclusive, &[Ordering::Greater])
+                    && within(value, &base_min_exclusive, &[Ordering::Greater]),
                 "maxExclusive",
             ),
             "minInclusive" => (
