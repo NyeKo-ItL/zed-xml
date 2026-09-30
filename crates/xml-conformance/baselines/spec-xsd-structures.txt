@@ -1,8 +1,2 @@
 # Known failures of the `spec-xsd-structures` suite, one case per line.
 # Regenerate with `BLESS=1 cargo test -p xml-conformance`.
-xsd1 §3.3 abstract element used directly
-xsd1 §3.3 element ref with minOccurs 0
-xsd1 §3.4 empty content
-xsd1 §3.4 extension appends to the base sequence
-xsd1 §3.8 choice picks one
-xsd1 §3.8 nested sequence in choice

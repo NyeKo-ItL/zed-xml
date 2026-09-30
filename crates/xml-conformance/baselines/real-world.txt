@@ -1,4 +1,3 @@
 # Known failures of the `real-world` suite, one case per line.
 # Regenerate with `BLESS=1 cargo test -p xml-conformance`.
 maven/maven-4.0.0.xsd
-specs/purchase-order.xml [valid against specs/purchase-order.xsd]
