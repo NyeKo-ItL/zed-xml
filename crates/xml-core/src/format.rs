@@ -602,7 +602,10 @@ impl<'a> Formatter<'a> {
                 }
                 Event::Text(text) => {
                     let raw = String::from_utf8_lossy(text.as_ref()).into_owned();
-                    if raw.trim().is_empty() {
+                    // Whitespace between the children of an element that has
+                    // text (mixed content) is content: it is kept as written.
+                    let significant = self.pending_start.is_none() && self.has_text();
+                    if raw.trim().is_empty() && !significant {
                         let blank_lines = raw.matches('\n').count().saturating_sub(1);
                         self.blank_lines = blank_lines.min(self.options.preserved_newlines);
                         continue;
@@ -1116,6 +1119,20 @@ mod tests {
         assert_eq!(
             format_range_of("<root><a>&</a></root>", "<a>", &FormatOptions::default()),
             None
+        );
+    }
+
+    #[test]
+    fn keeps_the_whitespace_between_inline_elements_of_mixed_content() {
+        let source = "<p>for example <code>jar</code> <code>war</code>\n  <code>ear</code>.</p>\n";
+        assert_eq!(
+            format_xml_with(source, &FormatOptions::default()).unwrap(),
+            source
+        );
+        let nested = "<root>\n  <p>a <b>x</b> <i>y</i> b</p>\n</root>\n";
+        assert_eq!(
+            format_xml_with(nested, &FormatOptions::default()).unwrap(),
+            nested
         );
     }
 
