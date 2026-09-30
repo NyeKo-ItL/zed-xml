@@ -1,0 +1,15 @@
+# Known failures of the `spec-namespaces` suite, one case per line.
+# Regenerate with `BLESS=1 cargo test -p xml-conformance`.
+ns §3 NSC empty prefixed namespace name
+ns §3 NSC other prefix bound to the xml namespace
+ns §3 NSC other prefix bound to the xmlns namespace
+ns §3 NSC reserved prefix xml bound elsewhere
+ns §3 NSC reserved prefix xmlns declared
+ns §3 [4] prefix starting with a digit
+ns §3 [7] name ending with a colon
+ns §3 [7] name with two colons
+ns §3 prefix out of scope
+ns §5 undeclared attribute prefix
+ns §5 undeclared element prefix
+ns §5 xmlns used as an element prefix
+ns §6.3 duplicate expanded attribute names

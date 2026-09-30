@@ -1,0 +1,26 @@
+<?xml version='1.0'?>
+<!-- A complete XMPP client stream (RFC 6120 section 4 and RFC 6121): the
+     stream root, stream features, and message, presence and IQ stanzas in
+     different namespaces. A closed stream is a well-formed document. -->
+<stream:stream from='juliet@im.example.com' to='im.example.com' version='1.0' xml:lang='en'
+    xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams'>
+  <stream:features>
+    <bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'/>
+  </stream:features>
+  <iq id='yhc13a95' type='set'>
+    <bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'>
+      <resource>balcony</resource>
+    </bind>
+  </iq>
+  <presence>
+    <show>away</show>
+    <status>In the garden</status>
+  </presence>
+  <message from='juliet@im.example.com/balcony' id='ktx72v49' to='romeo@example.net' type='chat' xml:lang='en'>
+    <body>Art thou not Romeo, and a Montague?</body>
+    <thread>e0ffe42b28561960c6b12b944a092794b9683a38</thread>
+  </message>
+  <iq id='rr82a1z7' type='get'>
+    <query xmlns='jabber:iq:roster'/>
+  </iq>
+</stream:stream>

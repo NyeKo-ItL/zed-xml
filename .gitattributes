@@ -1,0 +1,2 @@
+# Fixtures are byte-exact test inputs (CRLF, lone CR, UTF-16): never convert them.
+tests/fixtures/** -text

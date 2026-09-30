@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- JUnit XML test report (Ant/Surefire format) with a failure, an error, a
+     skipped test and CDATA-wrapped system output. -->
+<testsuites name="xml-lsp" tests="4" failures="1" errors="1" skipped="1" time="0.412">
+  <testsuite name="formatting" tests="4" failures="1" errors="1" skipped="1" time="0.412" timestamp="2026-09-29T21:00:00">
+    <properties>
+      <property name="os" value="linux"/>
+    </properties>
+    <testcase classname="formatting" name="keeps_cdata" time="0.010"/>
+    <testcase classname="formatting" name="splits_attributes" time="0.120">
+      <failure message="assertion failed: left == right" type="AssertionError"><![CDATA[left: "<a b=\"1\"/>"
+right: "<a\n  b=\"1\"/>"]]></failure>
+    </testcase>
+    <testcase classname="formatting" name="huge_document" time="0.280">
+      <error message="timeout" type="Timeout"/>
+    </testcase>
+    <testcase classname="formatting" name="utf16" time="0.000">
+      <skipped message="not supported yet"/>
+    </testcase>
+    <system-out><![CDATA[running 4 tests
+test result: FAILED. 1 passed; 1 failed; 1 ignored]]></system-out>
+  </testsuite>
+</testsuites>

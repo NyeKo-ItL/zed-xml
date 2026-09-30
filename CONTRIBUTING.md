@@ -12,6 +12,9 @@ Thanks for helping improve XML support in Zed. This guide covers the development
 | `crates/xsd-core` | XSD parsing, schema resolution, component model, validation and completion. |
 | `crates/dtd-core` | DTD parsing, entity expansion limits, content-model automata and validation. |
 | `crates/xml-lsp` | The native language server binary (`xml-lsp`). |
+| `crates/xml-conformance` | Test-only crate: specification cases, real-world documents, parser corpora and the W3C/libxml2 conformance suites, with baselines of known failures. |
+| `tests/fixtures` | Shared test inputs: small hand-written cases, `real-world/` documents and `corpus/` files (sources and licences in `SOURCES.md`). |
+| `scripts/fetch-test-suites.sh` | Downloads the pinned external conformance suites into `target/test-suites`. |
 | `docs/` | Detailed user documentation (settings reference). |
 | `.github/workflows/ci.yml` | Pull request checks and the release pipeline. |
 
@@ -62,7 +65,7 @@ Keep `XML_LSP_PATH` set when opening XML files outside this repository, otherwis
 
 ## Checks
 
-Run these before pushing; CI runs the first two on every pull request and fails if generated files are tracked:
+Run these before pushing; CI runs the first two on every pull request (plus the conformance suites below) and fails if generated files are tracked:
 
 ```sh
 cargo fmt --all -- --check
@@ -78,6 +81,17 @@ cargo test -p xml-core
 cargo test -p xml-lsp -- rename      # tests whose name contains "rename"
 cargo test -p zed-xml                # the extension's unit tests (host target)
 ```
+
+The external conformance suites (W3C XML, W3C XSD, libxml2 schemas) are skipped until fetched; the `Conformance suites` CI job always runs them:
+
+```sh
+scripts/fetch-test-suites.sh
+cargo test --release -p xml-conformance
+cargo test --release -p xml-lsp fixture_smoke   # also covers fixtures over 64 KB
+BLESS=1 cargo test --release -p xml-conformance # after a fix, rewrite the baselines and review the diff
+```
+
+A change that makes more cases pass must delete their lines from `crates/xml-conformance/baselines/`; a new failure fails the build. See [tests/README.md](tests/README.md) for what each suite checks and how to add fixtures.
 
 Tests live next to the code (`#[cfg(test)] mod tests`). Language-server features get unit tests in their module plus an LSP round-trip test in `crates/xml-lsp/src/main.rs`; see [AGENTS.md](AGENTS.md#testing) for the patterns.
 

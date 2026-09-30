@@ -1,0 +1,91 @@
+# Expected verdict of each roxmltree test file: wf (well-formed) or not-wf.
+# Derived from the upstream .yaml results (an "error:" result means not-wf).
+attrs_001.xml          wf      # simple attribute
+attrs_002.xml          wf      # attribute value with new lines
+attrs_003.xml          wf      # attribute value with escaped text
+attrs_004.xml          wf      # attribute value with escaped text
+attrs_005.xml          wf      # attribute value with \r\n
+attrs_006.xml          wf      # escaped `<`
+attrs_err_001.xml      not-wf  # duplicated attributes
+attrs_err_002.xml      not-wf  # duplicated attributes via namespaces
+cdata_001.xml          wf      # simple case
+cdata_002.xml          wf      # simple case
+cdata_003.xml          wf      # empty
+cdata_004.xml          wf      # simple case
+cdata_005.xml          wf      # mixed text and cdata
+cdata_006.xml          wf      # simple case
+cdata_007.xml          wf      # with \r
+comments_001.xml       wf      # comment before and after the root element
+elems_err_001.xml      not-wf  # invalid tree structure
+elems_err_002.xml      not-wf  # invalid tree structure with namespace
+entity_001.xml         wf      # entity reference to an element
+entity_002.xml         wf      # entity reference to an attribute value
+entity_003.xml         wf      # many entity references to an attribute value
+entity_004.xml         wf      # entity reference to a text
+entity_005.xml         wf      # unused entity reference
+entity_006.xml         wf      # entity reference to an escaped text
+entity_007.xml         wf      # indirect entity reference to an attribute value
+entity_008.xml         wf      # entity reference to an element
+entity_009.xml         wf      # entity reference to a mixed content
+entity_010.xml         wf      # entity reference to an element with an entity reference
+entity_011.xml         wf      # character and entity references in attributes
+entity_012.xml         wf      # mixed entity references in text
+entity_013.xml         wf      # many entity references in text
+entity_014.xml         wf      # many entity references in attribute
+entity_err_001.xml     not-wf  # unknown entity reference
+entity_err_002.xml     not-wf  # recursive entity references
+entity_err_003.xml     not-wf  # reference to a close tag
+entity_err_004.xml     not-wf  # reference to a close tag
+entity_err_005.xml     wf      # billion laughs (well-formed per XML 1.0; roxmltree rejects it by policy)
+entity_err_006.xml     wf      # billion laughs (well-formed per XML 1.0; roxmltree rejects it by policy)
+entity_err_007.xml     not-wf  # malformed entity inside an attribute
+entity_err_008.xml     not-wf  # malformed entity inside a character data/text
+entity_err_009.xml     not-wf  # escaped `<` inside an attribute inside an entity is an error
+ns_001.xml             wf      # attributes with different namespaces
+ns_002.xml             wf      # attribute is not affected by the default namespace
+ns_003.xml             wf      # attributes with different namespaces
+ns_004.xml             wf      # `href` with a custom prefix
+ns_005.xml             wf      # `xml` namespace resolving
+ns_006.xml             wf      # `xml` namespace overriding
+ns_007.xml             wf      # many namespaces
+ns_008.xml             wf      # namespace propagation
+ns_009.xml             wf      # namespace overwriting
+ns_010.xml             wf      # indirect namespace propagation
+ns_011.xml             wf      # empty URI
+ns_012.xml             wf      # namespace propagation
+ns_013.xml             wf      # namespace from entity
+ns_014.xml             wf      # no namespaces
+ns_015.xml             wf      # duplicated namespaces with different prefixes and a child element without prefix
+ns_016.xml             wf      # an empty element with namespace on parent
+ns_017.xml             wf      # duplicated namespaces with different prefixes and a child element with prefix
+ns_err_001.xml         not-wf  # invalid `xml` URI
+ns_err_002.xml         not-wf  # reserved URI
+ns_err_003.xml         not-wf  # reserved URI
+ns_err_004.xml         not-wf  # duplicated namespaces
+ns_err_005.xml         not-wf  # escaped namespace
+ns_err_006.xml         not-wf  # escaped namespace
+ns_err_007.xml         not-wf  # reserved URI
+ns_err_008.xml         not-wf  # reserved URI
+ns_err_009.xml         not-wf  # `xmlns` cannot be used as an element prefix
+ns_err_010.xml         not-wf  # an element with an unknown namespace
+ns_err_011.xml         not-wf  # an attribute with an unknown namespace
+ns_err_012.xml         not-wf  # closing tag with missing namespace prefix
+ns_err_013.xml         not-wf  # closing tag with missing namespace prefix and default namespace
+text_001.xml           wf      # single space text
+text_002.xml           wf      # single escaped space text
+text_003.xml           wf      # escaped text
+text_004.xml           wf      # '>' text
+text_005.xml           wf      # '\n\r\r\n' text
+text_006.xml           wf      # '\r\r\r' text
+text_007.xml           wf      # '\r\n\r\n' text
+text_008.xml           wf      # only whitespaces
+text_009.xml           wf      # escaped text
+text_010.xml           wf      # text around elements
+text_011.xml           wf      # mixed character references in text
+text_012.xml           wf      # non-ASCII text
+tree_001.xml           wf      # all node types
+tree_002.xml           wf      # BOM
+tree_003.xml           wf      # Windows-1251 encoding
+tree_err_001.xml       not-wf  # no elements
+tree_err_002.xml       not-wf  # root element not closed
+tree_err_003.xml       not-wf  # child element not closed

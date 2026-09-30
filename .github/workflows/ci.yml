@@ -24,6 +24,23 @@ jobs:
         run: |
           test -z "$(git ls-files -- 'grammars/**' '*.wasm' 'target/**')"
 
+  conformance:
+    name: Conformance suites
+    if: github.event_name == 'pull_request' && github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    env:
+      XML_TEST_SUITES_REQUIRED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: target/test-suites
+          key: test-suites-${{ hashFiles('scripts/fetch-test-suites.sh') }}
+      - run: scripts/fetch-test-suites.sh
+      - run: cargo test --release -p xml-conformance
+      - run: cargo test --release -p xml-lsp fixture_smoke
+
   prepare_release_pr:
     name: Prepare release version PR
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
@@ -65,6 +82,7 @@ jobs:
               pathlib.Path("crates/xsd-core/Cargo.toml"),
               pathlib.Path("crates/dtd-core/Cargo.toml"),
               pathlib.Path("crates/xml-lsp/Cargo.toml"),
+              pathlib.Path("crates/xml-conformance/Cargo.toml"),
               pathlib.Path("extension.toml"),
           ]:
               content = path.read_text(encoding="utf-8")

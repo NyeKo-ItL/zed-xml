@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Polyglot XHTML5 document embedding MathML 3 and SVG 1.1 in their own
+     default namespaces, with xlink and a script whose content is CDATA. -->
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+  <head>
+    <meta charset="UTF-8"/>
+    <title>Quadratic formula</title>
+    <script type="text/javascript">//<![CDATA[
+      if (1 < 2 && 3 > 2) { console.log("<ok>"); }
+    //]]></script>
+  </head>
+  <body>
+    <p>The roots of <var>a</var>x² + bx + c are:</p>
+    <math xmlns="http://www.w3.org/1998/Math/MathML" display="block">
+      <mi>x</mi><mo>=</mo>
+      <mfrac>
+        <mrow><mo>−</mo><mi>b</mi><mo>±</mo><msqrt><msup><mi>b</mi><mn>2</mn></msup><mo>−</mo><mn>4</mn><mi>a</mi><mi>c</mi></msqrt></mrow>
+        <mrow><mn>2</mn><mi>a</mi></mrow>
+      </mfrac>
+    </math>
+    <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="120" height="60" viewBox="0 0 120 60">
+      <defs><linearGradient id="g"><stop offset="0" stop-color="#4f46e5"/><stop offset="1" stop-color="rgb(14, 165, 233)"/></linearGradient></defs>
+      <path d="M0,60 Q60,-40 120,60" fill="none" stroke="url(#g)" stroke-width="3"/>
+      <use xlink:href="#g"/>
+    </svg>
+  </body>
+</html>

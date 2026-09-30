@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!-- Internal DTD subset (XML 1.0 section 2.8): element, attribute-list,
+     general and parameter entity declarations, a notation, and references to
+     declared entities in content and attribute values. -->
+<!DOCTYPE memo [
+  <!ENTITY % yesno "(yes|no)">
+  <!ELEMENT memo (to+, from, subject?, body)>
+  <!ELEMENT to (#PCDATA)>
+  <!ELEMENT from (#PCDATA)>
+  <!ELEMENT subject (#PCDATA)>
+  <!ELEMENT body (#PCDATA | em)*>
+  <!ELEMENT em (#PCDATA)>
+  <!ATTLIST memo
+    id ID #REQUIRED
+    urgent %yesno; "no"
+    lang NMTOKEN #IMPLIED>
+  <!NOTATION png SYSTEM "image/png">
+  <!ENTITY company "Example &amp; Sons">
+  <!ENTITY signature "<em>The Management</em>">
+]>
+<memo id="m1" urgent="yes">
+  <to>All staff</to>
+  <from>&company;</from>
+  <subject>Office move &#8211; phase&#x20;2</subject>
+  <body>Please pack your desks by Friday. &signature;</body>
+</memo>

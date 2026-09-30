@@ -1,0 +1,15 @@
+[package]
+name = "xml-conformance"
+version = "0.9.0"
+edition = "2024"
+publish = false
+description = "Conformance, corpus and real-world fixture tests for xml-core and xsd-core."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+encoding_rs = "0.8"
+roxmltree = "0.20"
+xml-core = { path = "../xml-core" }
+xsd-core = { path = "../xsd-core" }
