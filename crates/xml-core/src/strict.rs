@@ -28,6 +28,17 @@ pub struct StrictProblem {
     pub message: String,
 }
 
+/// Whether the XML declaration announces XML 1.1, whose character set also
+/// allows the control characters (`#x1`-`#x1F`, `#x7F`-`#x9F`).
+fn is_xml_1_1(source: &str) -> bool {
+    let source = source.strip_prefix('\u{FEFF}').unwrap_or(source);
+    source.starts_with("<?xml")
+        && source.find("?>").is_some_and(|end| {
+            let declaration = &source[..end];
+            declaration.contains("\"1.1\"") || declaration.contains("'1.1'")
+        })
+}
+
 /// Whether `character` is a legal XML character ([2]).
 pub fn is_xml_char(character: char) -> bool {
     matches!(character,
@@ -91,6 +102,8 @@ struct Parser<'a> {
     problems: Vec<StrictProblem>,
     /// A problem made the rest of the document meaningless.
     fatal: bool,
+    /// XML 1.1 document: control characters are legal (as references).
+    xml_1_1: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -102,7 +115,13 @@ impl<'a> Parser<'a> {
             position,
             problems: Vec::new(),
             fatal: false,
+            xml_1_1: is_xml_1_1(source),
         }
+    }
+
+    fn is_char(&self, character: char) -> bool {
+        is_xml_char(character)
+            || (self.xml_1_1 && !matches!(character, '\0' | '\u{FFFE}' | '\u{FFFF}'))
     }
 
     fn report(&mut self, rule: &'static str, range: Range<usize>, message: impl Into<String>) {
@@ -175,7 +194,7 @@ impl<'a> Parser<'a> {
 
     fn characters(&mut self) {
         for (offset, character) in self.source.char_indices() {
-            if !is_xml_char(character) {
+            if !self.is_char(character) {
                 self.report(
                     "invalidCharacter",
                     offset..offset + character.len_utf8(),
@@ -781,7 +800,10 @@ impl<'a> Parser<'a> {
             }
             self.position += 1;
             let value = u32::from_str_radix(digits, if hexadecimal { 16 } else { 10 }).ok();
-            if !value.and_then(char::from_u32).is_some_and(is_xml_char) {
+            if !value
+                .and_then(char::from_u32)
+                .is_some_and(|character| self.is_char(character))
+            {
                 self.report(
                     "invalidReference",
                     start..self.position,

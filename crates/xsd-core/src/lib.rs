@@ -397,7 +397,7 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                     schema.element_form_default = attribute(&element, "elementFormDefault");
                     schema.attribute_form_default = attribute(&element, "attributeFormDefault");
                 }
-                if current_name == "include"
+                if matches!(current_name, "include" | "redefine" | "override")
                     && let Some(location) = attribute(&element, "schemaLocation")
                 {
                     schema.includes.push(location);
@@ -577,7 +577,7 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                         schema.simple_extensions.insert(element_name.clone(), base);
                     }
                 }
-                if current_name == "include"
+                if matches!(current_name, "include" | "redefine" | "override")
                     && let Some(location) = attribute(&element, "schemaLocation")
                 {
                     schema.includes.push(location);
@@ -800,14 +800,15 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
     apply_attribute_group_references(source, &mut schema)?;
     apply_model_group_references(source, &mut schema)?;
     apply_content_extensions(&mut schema);
-    if schema.elements.is_empty() {
-        return Err("the XSD schema contains no xs:element".to_owned());
+    let model = model::parse_xsd_model(source);
+    // A schema of types, groups or attributes only (included by others) has
+    // no element; a document that is not an `xs:schema` is no schema.
+    if schema.elements.is_empty()
+        && let Err(error) = &model
+    {
+        return Err(format!("the XSD schema contains no xs:element ({error})"));
     }
-    schema.models = model::parse_xsd_model(source)
-        .ok()
-        .map(Arc::new)
-        .into_iter()
-        .collect();
+    schema.models = model.ok().map(Arc::new).into_iter().collect();
     schema.problems = schema
         .models
         .iter()
@@ -1058,7 +1059,7 @@ pub fn resolve_schema_dependencies_with(
             Ok(Event::Start(element)) | Ok(Event::Empty(element)) => {
                 let element_name = element.name();
                 let kind = match local_name(element_name.as_ref()) {
-                    "include" => SchemaLocationKind::Include,
+                    "include" | "redefine" | "override" => SchemaLocationKind::Include,
                     "import" => SchemaLocationKind::Import,
                     _ => continue,
                 };
@@ -2353,6 +2354,7 @@ fn unexpected_child(error: &content::ContentError, child: &str, parent: &str) ->
         expected,
         known,
         repeated,
+        wrong_namespace,
     } = error
     else {
         unreachable!("only unexpected children are reported per child");
@@ -2369,7 +2371,14 @@ fn unexpected_child(error: &content::ContentError, child: &str, parent: &str) ->
                 .join(", ")
         )
     };
-    if !known {
+    if let Some(name) = wrong_namespace {
+        XsdDiagnostic {
+            kind: XsdDiagnosticKind::UnexpectedElement,
+            message: format!(
+                "element <{child}> not allowed in <{parent}>: it is in the wrong namespace ({name} expected)"
+            ),
+        }
+    } else if !known {
         XsdDiagnostic {
             kind: XsdDiagnosticKind::UnexpectedElement,
             message: format!("element <{child}> not allowed in <{parent}>"),
@@ -3948,8 +3957,15 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_schema_without_elements() {
-        assert!(parse_xsd("<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\"/>").is_err());
+    fn rejects_a_document_that_is_not_a_schema_but_accepts_one_without_elements() {
+        assert!(parse_xsd("<html/>").is_err());
+        // Types only, as included by other schemas.
+        let types = parse_xsd(
+            "<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\"><xs:simpleType name=\"t\"><xs:restriction base=\"xs:string\"/></xs:simpleType></xs:schema>",
+        )
+        .unwrap();
+        assert!(types.elements.is_empty());
+        assert_eq!(types.models.len(), 1);
     }
 
     #[test]
@@ -4135,5 +4151,45 @@ mod tests {
             ["element <a> required in <root>"]
         );
         assert!(validate_document("<root><a/></root>", &schema).is_empty());
+    }
+
+    #[test]
+    fn matches_children_by_expanded_name() {
+        // Qualified local elements: an unqualified child is a different name.
+        let schema = parse_xsd(
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:t" elementFormDefault="qualified">
+  <xs:element name="root"><xs:complexType><xs:sequence><xs:element name="a"/></xs:sequence></xs:complexType></xs:element>
+</xs:schema>"#,
+        )
+        .unwrap();
+        assert!(validate_document(r#"<root xmlns="urn:t"><a/></root>"#, &schema).is_empty());
+        let unqualified = messages(r#"<t:root xmlns:t="urn:t"><a/></t:root>"#, &schema);
+        assert_eq!(
+            unqualified[0],
+            "element <a> not allowed in <t:root>: it is in the wrong namespace ({urn:t}a expected)"
+        );
+    }
+
+    #[test]
+    fn a_redefined_type_extends_the_definition_it_replaces() {
+        let directory = std::env::temp_dir().join(format!("xsd-redefine {}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("base.xsd"),
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"><xs:complexType name="t"><xs:sequence><xs:element name="r"/></xs:sequence></xs:complexType></xs:schema>"#,
+        )
+        .unwrap();
+        let main = r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <xs:redefine schemaLocation="base.xsd"><xs:complexType name="t"><xs:complexContent><xs:extension base="t"><xs:sequence><xs:element name="c"/></xs:sequence></xs:extension></xs:complexContent></xs:complexType></xs:redefine>
+  <xs:element name="root" type="t"/>
+</xs:schema>"#;
+        std::fs::write(directory.join("main.xsd"), main).unwrap();
+        let references = resolve_schema_dependencies(main, directory.join("main.xsd")).unwrap();
+        assert_eq!(references.len(), 1);
+        let base = std::fs::read_to_string(directory.join("base.xsd")).unwrap();
+        let schema = merge_schemas([parse_xsd(main).unwrap(), parse_xsd(&base).unwrap()]);
+        assert!(validate_document("<root><r/><c/></root>", &schema).is_empty());
+        assert!(!validate_document("<root><c/></root>", &schema).is_empty());
+        std::fs::remove_dir_all(directory).ok();
     }
 }

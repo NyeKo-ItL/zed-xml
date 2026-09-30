@@ -30,8 +30,11 @@ const MAX_EXPECTED: usize = 8;
 
 type Namespace = Option<String>;
 
-/// Names an element symbol accepts: `local name -> namespaces`.
-type Names = HashMap<String, Vec<Namespace>>;
+/// Names an element symbol accepts: `local name -> (namespace, chameleon)`.
+/// `chameleon`: declared without namespace by a schema without target
+/// namespace next to namespaced ones, so possibly adopting the namespace of
+/// the schema including it.
+type Names = HashMap<String, Vec<(Namespace, bool)>>;
 
 enum Matcher {
     Names(Names),
@@ -48,10 +51,9 @@ impl Symbol {
     fn matches(&self, namespace: Option<&str>, local: &str, strict: bool) -> bool {
         match &self.matcher {
             Matcher::Names(names) => names.get(local).is_some_and(|namespaces| {
-                !strict
-                    || namespaces
-                        .iter()
-                        .any(|candidate| candidate.as_deref() == namespace)
+                namespaces.iter().any(|(candidate, chameleon)| {
+                    candidate.as_deref() == namespace || (!strict && *chameleon)
+                })
             }),
             Matcher::Wildcard(allowed) => allowed.allows(namespace),
         }
@@ -153,11 +155,22 @@ pub(crate) struct ContentModel {
 
 impl ContentModel {
     fn is_known(&self, namespace: Option<&str>, local: &str) -> bool {
-        self.known.contains_key(local)
-            || self
-                .wildcards
+        self.known.get(local).is_some_and(|entries| {
+            entries
                 .iter()
-                .any(|allowed| allowed.allows(namespace))
+                .any(|(candidate, _)| candidate.as_deref() == namespace)
+        }) || self
+            .wildcards
+            .iter()
+            .any(|allowed| allowed.allows(namespace))
+    }
+
+    /// The expanded name (`{namespace}local`) the model expects for a child
+    /// named `local` that is in another namespace.
+    fn other_namespace(&self, local: &str) -> Option<String> {
+        self.known.get(local)?.first().map(|(namespace, _)| {
+            format!("{{{}}}{local}", namespace.as_deref().unwrap_or_default())
+        })
     }
 }
 
@@ -171,6 +184,8 @@ pub(crate) enum ContentError {
         expected: Vec<String>,
         known: bool,
         repeated: bool,
+        /// The model expects an element of that expanded name instead.
+        wrong_namespace: Option<String>,
     },
     /// The element ends before its content is complete.
     Incomplete { expected: Vec<String> },
@@ -226,9 +241,9 @@ impl ContentRun {
             (Kind::Nfa(nfa), State::Nfa(states)) => {
                 let mut next = nfa.step(states, namespace, local, true);
                 if next.is_empty() {
-                    // Namespaces are compared strictly first, then on the
-                    // local name alone ("chameleon" includes, unqualified
-                    // local elements).
+                    // Namespaces are compared strictly first, then names
+                    // that may have adopted the namespace of the schema
+                    // including their own ("chameleon" includes).
                     next = nfa.step(states, namespace, local, false);
                 }
                 if !next.is_empty() {
@@ -239,18 +254,16 @@ impl ContentRun {
                 nfa.expected(states)
             }
             (Kind::All { members, .. }, State::All(counts)) => {
-                let position = members.iter().position(|member| {
-                    member.names.get(local).is_some_and(|namespaces| {
-                        namespaces
-                            .iter()
-                            .any(|candidate| candidate.as_deref() == namespace)
+                let matching = |strict: bool| {
+                    members.iter().position(|member| {
+                        member.names.get(local).is_some_and(|namespaces| {
+                            namespaces.iter().any(|(candidate, chameleon)| {
+                                candidate.as_deref() == namespace || (!strict && *chameleon)
+                            })
+                        })
                     })
-                });
-                let position = position.or_else(|| {
-                    members
-                        .iter()
-                        .position(|member| member.names.contains_key(local))
-                });
+                };
+                let position = matching(true).or_else(|| matching(false));
                 match position {
                     Some(index) if members[index].max.is_none_or(|max| counts[index] < max) => {
                         counts[index] += 1;
@@ -276,6 +289,11 @@ impl ContentRun {
             expected,
             known,
             repeated: known && repeated,
+            wrong_namespace: if known {
+                None
+            } else {
+                self.model.other_namespace(local)
+            },
         })
     }
 
@@ -321,6 +339,9 @@ struct Builder<'a> {
     wildcards: Vec<XsdWildcardNamespaces>,
     /// The model cannot be built reliably (unresolved group, too large).
     failed: bool,
+    /// Named groups being expanded: a group reference to one of them is a
+    /// redefinition referring to the group it replaces.
+    expanding: Vec<*const crate::model::XsdGroupDef>,
 }
 
 impl<'a> Builder<'a> {
@@ -411,24 +432,35 @@ impl<'a> Builder<'a> {
             schema,
             item: declaration,
         });
+        let namespaced_schemas = self
+            .models
+            .models()
+            .iter()
+            .any(|model| model.target_namespace.is_some());
         let mut names = Names::new();
-        let mut add = |namespace: &Namespace, local: &str| {
-            let namespaces = names.entry(local.to_owned()).or_default();
-            if !namespaces.contains(namespace) {
-                namespaces.push(namespace.clone());
+        let mut add = |declaration: Located<'_, XsdElementDecl>| {
+            let chameleon = namespaced_schemas
+                && declaration.item.namespace.is_none()
+                && self.models.models()[declaration.schema]
+                    .target_namespace
+                    .is_none();
+            let namespaces = names.entry(declaration.item.name.clone()).or_default();
+            let entry = (declaration.item.namespace.clone(), chameleon);
+            if !namespaces.contains(&entry) {
+                namespaces.push(entry);
             }
         };
         if !target.item.is_abstract {
-            add(&target.item.namespace, &target.item.name);
+            add(target);
         }
         for member in self.models.substitution_members(target) {
-            add(&member.item.namespace, &member.item.name);
+            add(member);
         }
         for (local, namespaces) in &names {
             let known = self.known.entry(local.clone()).or_default();
-            for namespace in namespaces {
-                if !known.contains(namespace) {
-                    known.push(namespace.clone());
+            for entry in namespaces {
+                if !known.contains(entry) {
+                    known.push(entry.clone());
                 }
             }
         }
@@ -481,7 +513,17 @@ impl<'a> Builder<'a> {
                 })
             }
             XsdParticle::GroupRef { name, .. } => {
-                let Some(group) = self.models.group(name.namespace.as_deref(), &name.local) else {
+                let mut found = self.models.group(name.namespace.as_deref(), &name.local);
+                if let Some(current) = found
+                    && self.expanding.contains(&std::ptr::from_ref(current.item))
+                {
+                    found = self.models.group_other_than(
+                        name.namespace.as_deref(),
+                        &name.local,
+                        current.item,
+                    );
+                }
+                let Some(group) = found else {
                     self.failed = true;
                     return self.empty_fragment();
                 };
@@ -489,8 +531,12 @@ impl<'a> Builder<'a> {
                     return self.empty_fragment();
                 };
                 let group_schema = group.schema;
+                let pointer = std::ptr::from_ref(group.item);
                 self.repeat(min, max, |builder| {
-                    builder.particle(group_schema, content, depth + 1)
+                    builder.expanding.push(pointer);
+                    let fragment = builder.particle(group_schema, content, depth + 1);
+                    builder.expanding.pop();
+                    fragment
                 })
             }
         }
@@ -588,6 +634,7 @@ impl XsdModelSet {
             known: Names::new(),
             wildcards: Vec::new(),
             failed: false,
+            expanding: Vec::new(),
         };
         let kind = if particles.is_empty() {
             Kind::Empty
