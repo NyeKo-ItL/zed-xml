@@ -86,6 +86,145 @@ fn every_request_handles_every_fixture() {
     );
 }
 
+/// Mutated variants of each fixture per run (more in release builds);
+/// `XML_LSP_MUTATIONS` raises it for a longer local fuzzing session, and
+/// `XML_LSP_MUTATION_SEED` changes the sequence.
+fn mutations() -> usize {
+    std::env::var("XML_LSP_MUTATIONS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(if cfg!(debug_assertions) { 2 } else { 12 })
+}
+/// Fixtures above this size are not mutated (keeps the test fast).
+const MUTATED_DOCUMENT: usize = 8 * 1024;
+
+/// Deterministic xorshift generator: failures are reproducible.
+struct Random(u64);
+
+impl Random {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+
+    fn below(&mut self, bound: usize) -> usize {
+        (self.next() % bound.max(1) as u64) as usize
+    }
+}
+
+/// Fragments that usually break tolerant parsers when inserted anywhere.
+const FRAGMENTS: &[&str] = &[
+    "<",
+    ">",
+    "&",
+    "\"",
+    "'",
+    "<!--",
+    "-->",
+    "<![CDATA[",
+    "]]>",
+    "<?",
+    "?>",
+    "<!DOCTYPE x [",
+    "]>",
+    "&#x",
+    "&#0;",
+    "xmlns:",
+    "xsi:type=\"",
+    "\u{1D11E}",
+    "\r\n",
+    "</",
+    "/>",
+];
+
+/// One random mutation of `source`, always on character boundaries.
+fn mutate(source: &str, random: &mut Random) -> String {
+    let boundaries = source
+        .char_indices()
+        .map(|(offset, _)| offset)
+        .chain([source.len()])
+        .collect::<Vec<_>>();
+    let at = |random: &mut Random| boundaries[random.below(boundaries.len())];
+    let (mut start, mut end) = (at(random), at(random));
+    if start > end {
+        std::mem::swap(&mut start, &mut end);
+    }
+    // Keep spans short so the mutation stays local.
+    let end = boundaries
+        .iter()
+        .copied()
+        .find(|offset| *offset >= start + 40)
+        .map_or(end, |limit| end.min(limit));
+    let mut result = String::with_capacity(source.len() + 32);
+    match random.below(5) {
+        0 => result.push_str(&source[..start]),
+        1 => {
+            result.push_str(&source[..start]);
+            result.push_str(&source[end..]);
+        }
+        2 => {
+            result.push_str(&source[..end]);
+            result.push_str(&source[start..end]);
+            result.push_str(&source[end..]);
+        }
+        3 => {
+            result.push_str(&source[..start]);
+            result.push_str(FRAGMENTS[random.below(FRAGMENTS.len())]);
+            result.push_str(&source[start..]);
+        }
+        _ => {
+            result.push_str(&source[..start]);
+            result.push_str(&source[end..]);
+            result.push_str(&source[start..end]);
+        }
+    }
+    result
+}
+
+/// Mutated fixtures (truncated, cut, duplicated, with stray markup): no
+/// request may panic and every range must stay inside the document.
+#[test]
+fn every_request_handles_mutated_fixtures() {
+    let mut files = Vec::new();
+    collect(&fixtures_dir(), &mut files);
+    files.sort();
+    let seed = std::env::var("XML_LSP_MUTATION_SEED")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0x9E37_79B9_7F4A_7C15);
+    let mut random = Random(seed | 1);
+    let mut failures = Vec::new();
+    for path in &files {
+        let Some(source) = fs::read(path).ok().and_then(|bytes| decode(&bytes)) else {
+            continue;
+        };
+        if source.len() > MUTATED_DOCUMENT {
+            continue;
+        }
+        for _ in 0..mutations() {
+            let mutated = mutate(&source, &mut random);
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                let offsets = sample_offsets(&mutated)
+                    .into_iter()
+                    .step_by(6)
+                    .collect::<Vec<_>>();
+                exercise_offsets(path, &mutated, offsets)
+            }));
+            match result {
+                Ok(problems) => failures.extend(
+                    problems
+                        .into_iter()
+                        .map(|problem| format!("{}: {problem}\n{mutated:?}", path.display())),
+                ),
+                Err(_) => failures.push(format!("{}: panic on {mutated:?}", path.display())),
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// Extensions of real-world fixtures that the extension's `XML` language
 /// deliberately does not claim (another Zed extension does, or the suffix is
 /// too generic): see "File types" in README.md.
@@ -123,7 +262,7 @@ fn exercise_offsets(path: &Path, source: &str, offsets: Vec<usize>) -> Vec<Strin
     let lengths = line_lengths(source);
     let mut check = |request: &str, response: Option<Value>| {
         if let Some(response) = response {
-            check_ranges(&lengths, request, &response, &mut problems);
+            check_ranges(&uri, &lengths, request, &response, &mut problems);
         }
     };
 
@@ -361,9 +500,27 @@ fn sample_offsets(source: &str) -> Vec<usize> {
 }
 
 /// Checks every `{"start": position, "end": position}` object in `response`.
-fn check_ranges(lengths: &[u64], request: &str, response: &Value, problems: &mut Vec<String>) {
+fn check_ranges(
+    uri: &str,
+    lengths: &[u64],
+    request: &str,
+    response: &Value,
+    problems: &mut Vec<String>,
+) {
     match response {
         Value::Object(object) => {
+            // A location in another file (definition, references) holds
+            // ranges of that file: only the origin of a link is ours.
+            let target = object
+                .get("uri")
+                .or_else(|| object.get("targetUri"))
+                .and_then(Value::as_str);
+            if target.is_some_and(|target| target != uri) {
+                if let Some(origin) = object.get("originSelectionRange") {
+                    check_ranges(uri, lengths, request, origin, problems);
+                }
+                return;
+            }
             if let (Some(start), Some(end)) = (object.get("start"), object.get("end"))
                 && let (Some(start), Some(end)) = (position(start), position(end))
             {
@@ -376,12 +533,12 @@ fn check_ranges(lengths: &[u64], request: &str, response: &Value, problems: &mut
                 }
             }
             for value in object.values() {
-                check_ranges(lengths, request, value, problems);
+                check_ranges(uri, lengths, request, value, problems);
             }
         }
         Value::Array(values) => {
             for value in values {
-                check_ranges(lengths, request, value, problems);
+                check_ranges(uri, lengths, request, value, problems);
             }
         }
         _ => {}
@@ -398,10 +555,19 @@ fn position(value: &Value) -> Option<(u64, u64)> {
 /// Length in UTF-16 code units of each line of `source` (without its line
 /// break), so that checking a range is constant time.
 fn line_lengths(source: &str) -> Vec<u64> {
-    source
-        .split('\n')
-        .map(|text| {
-            let text = text.strip_suffix('\r').unwrap_or(text);
+    // A `\r` ends a line only as part of `\r\n`; at the very end of the
+    // document it is an ordinary character.
+    let segments = source.split('\n').collect::<Vec<_>>();
+    let last = segments.len() - 1;
+    segments
+        .into_iter()
+        .enumerate()
+        .map(|(index, text)| {
+            let text = if index < last {
+                text.strip_suffix('\r').unwrap_or(text)
+            } else {
+                text
+            };
             text.encode_utf16().count() as u64
         })
         .collect()

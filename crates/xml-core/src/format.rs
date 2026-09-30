@@ -25,12 +25,32 @@ pub enum LineEnding {
 }
 
 impl LineEnding {
-    /// Line ending of the first line of `source` (`\n` by default).
+    /// Line ending of the first line of `source` (`\n` by default). Leading
+    /// whitespace is ignored, and so are the line breaks inside comments,
+    /// CDATA sections, processing instructions and the DOCTYPE: the
+    /// formatter removes the former and keeps the latter as written, so
+    /// none of them may decide the line ending of the result.
     pub fn detect(source: &str) -> Self {
-        match source.find('\n') {
-            Some(index) if source[..index].ends_with('\r') => Self::CrLf,
-            _ => Self::Lf,
+        let source = source.trim_start();
+        let markup = crate::tags::scan_markup(source);
+        let mut next_markup = 0;
+        for (index, _) in source.match_indices('\n') {
+            while next_markup < markup.len() && markup[next_markup].range.end <= index {
+                next_markup += 1;
+            }
+            if markup
+                .get(next_markup)
+                .is_some_and(|span| span.range.start <= index)
+            {
+                continue;
+            }
+            return if source[..index].ends_with('\r') {
+                Self::CrLf
+            } else {
+                Self::Lf
+            };
         }
+        Self::Lf
     }
 
     /// Textual representation.
@@ -502,6 +522,9 @@ struct Formatter<'a> {
     pending_start: Option<(BytesStart<'static>, usize)>,
     blank_lines: usize,
     has_root: bool,
+    /// Whitespace-only text dropped right before the current event: it is
+    /// character data after all when a CDATA section or a reference follows.
+    skipped_text: Option<String>,
     /// Maximum size of the output (see [`max_formatted_size`]).
     max_output: usize,
 }
@@ -537,20 +560,52 @@ impl<'a> Formatter<'a> {
             pending_start: None,
             blank_lines: 0,
             has_root: false,
+            skipped_text: None,
         }
     }
 
     fn run(&mut self, source: &str) -> Result<(), String> {
+        // `quick-xml` cannot lex the quoted literals and comments of a DTD
+        // (`<!ENTITY e '<a/>'>`): the declaration is emitted as one piece
+        // and the markup around it is read normally.
+        match crate::strict::doctype_range(source) {
+            Some(range) => {
+                self.run_part(&source[..range.start])?;
+                let declaration = &source[range.clone()];
+                let content = declaration
+                    .strip_prefix("<!DOCTYPE")
+                    .and_then(|rest| rest.strip_suffix('>'))
+                    .map(str::trim_start)
+                    .unwrap_or_default();
+                self.flush_pending_start()?;
+                self.write_indent()?;
+                self.emit(Event::DocType(BytesText::from_escaped(content)))?;
+                self.run_part(&source[range.end..])?;
+            }
+            None => self.run_part(source)?,
+        }
+        if self.depth > 0 || self.pending_start.is_some() {
+            return Err("unclosed element".to_owned());
+        }
+        Ok(())
+    }
+
+    fn run_part(&mut self, source: &str) -> Result<(), String> {
         let mut reader = Reader::from_str(source);
         loop {
             let event = reader
                 .read_event()
                 .map_err(|error| format!("XML error: {error}"))?;
+            let skipped = self.skipped_text.take();
             match event {
                 Event::Eof => break,
                 Event::Decl(_) | Event::DocType(_) | Event::PI(_) => {
                     self.flush_pending_start()?;
-                    self.write_indent()?;
+                    // In mixed content a processing instruction is inline
+                    // (like a comment): adding a line break would add text.
+                    if !(matches!(event, Event::PI(_)) && self.has_text()) {
+                        self.write_indent()?;
+                    }
                     self.emit(event.into_owned())?;
                 }
                 Event::Start(element) => {
@@ -612,6 +667,7 @@ impl<'a> Formatter<'a> {
                     if raw.trim().is_empty() && !significant {
                         let blank_lines = raw.matches('\n').count().saturating_sub(1);
                         self.blank_lines = blank_lines.min(self.options.preserved_newlines);
+                        self.skipped_text = Some(raw);
                         continue;
                     }
                     self.flush_pending_start()?;
@@ -626,6 +682,7 @@ impl<'a> Formatter<'a> {
                 Event::CData(data) => {
                     self.flush_pending_start()?;
                     self.mark_text();
+                    self.emit_skipped(skipped)?;
                     self.emit(Event::CData(data.into_owned()))?;
                 }
                 Event::Comment(comment) => {
@@ -643,12 +700,11 @@ impl<'a> Formatter<'a> {
                 }
                 Event::GeneralRef(reference) => {
                     self.flush_pending_start()?;
+                    self.mark_text();
+                    self.emit_skipped(skipped)?;
                     self.emit(Event::GeneralRef(reference.into_owned()))?;
                 }
             }
-        }
-        if self.depth > 0 || self.pending_start.is_some() {
-            return Err("unclosed element".to_owned());
         }
         Ok(())
     }
@@ -682,6 +738,13 @@ impl<'a> Formatter<'a> {
         self.output_started = true;
         self.blank_lines = 0;
         Ok(())
+    }
+
+    fn emit_skipped(&mut self, skipped: Option<String>) -> Result<(), String> {
+        match skipped {
+            Some(text) => self.emit(Event::Text(BytesText::from_escaped(text))),
+            None => Ok(()),
+        }
     }
 
     fn flush_pending_start(&mut self) -> Result<(), String> {
@@ -964,6 +1027,38 @@ mod tests {
     }
 
     #[test]
+    fn keeps_mixed_content_stable_and_idempotent() {
+        let format = |source: &str| {
+            let options = FormatOptions {
+                line_ending: LineEnding::detect(source),
+                ..FormatOptions::default()
+            };
+            format_xml_with(source, &options).unwrap()
+        };
+        for source in [
+            // A processing instruction after text is inline.
+            "<root>\n  x  <?t v?>\n  <item/>\n</root>\n",
+            // A reference is text.
+            "<p>&b;</p>\n",
+            // Whitespace before CDATA is character data.
+            "<p>\n\n    <![CDATA[x]]>\n</p>\n",
+            // Quoted literals of the DOCTYPE may contain markup.
+            "<!DOCTYPE t [\n    <!ENTITY b 'a/>'>\n]>\n<p>&b;</p>\n",
+            // Line breaks of the DOCTYPE or of CDATA do not decide the line ending.
+            "<!DOCTYPE\r\n t [\n<!ENTITY b 'x'>\n]>\n<p/>\n",
+            "<doc>\n<![CDATA[a\r\nb]]>\n</doc>\n",
+        ] {
+            let once = format(source);
+            assert_eq!(format(&once), once, "{source:?}");
+        }
+        assert_eq!(format("<p>&b;</p>\n"), "<p>&b;</p>\n");
+        assert_eq!(
+            format("<p>\n  <![CDATA[x]]></p>\n"),
+            "<p>\n  <![CDATA[x]]></p>\n"
+        );
+    }
+
+    #[test]
     fn uses_crlf_line_endings() {
         let source = "<root>\r\n<a>x</a>\r\n<b/>\r\n</root>\r\n";
         let options = FormatOptions {
@@ -975,6 +1070,15 @@ mod tests {
         assert_eq!(formatted, "<root>\r\n  <a>x</a>\r\n  <b/>\r\n</root>\r\n");
         assert_eq!(format_xml_with(&formatted, &options).unwrap(), formatted);
         assert_eq!(LineEnding::detect("<a/>\n"), LineEnding::Lf);
+        assert_eq!(LineEnding::detect("\r\n<a>\n</a>\r\n"), LineEnding::Lf);
+        assert_eq!(
+            LineEnding::detect("<!DOCTYPE a [\n<!ENTITY e 'x'>\n]>\r\n<a/>"),
+            LineEnding::CrLf
+        );
+        assert_eq!(
+            LineEnding::detect("<a><![CDATA[\r\n]]>\n<!--\r\n--></a>"),
+            LineEnding::Lf
+        );
         assert_eq!(LineEnding::detect("<a/>"), LineEnding::Lf);
     }
 
