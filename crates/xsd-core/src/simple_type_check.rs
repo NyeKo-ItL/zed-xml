@@ -250,14 +250,15 @@ fn check_restriction(
                     );
                 }
             }
-            "fractionDigits" if matches!(&simple.variety, Variety::Atomic(builtin) if *builtin != BuiltinType::Decimal) => {
-                if number(facet).is_some_and(|digits| digits > 0) {
-                    report(
-                        facet,
-                        "fractionDigits of an integer type must be 0".to_owned(),
-                        problems,
-                    );
-                }
+            "fractionDigits"
+                if matches!(&simple.variety, Variety::Atomic(builtin) if *builtin != BuiltinType::Decimal)
+                    && number(facet).is_some_and(|digits| digits > 0) =>
+            {
+                report(
+                    facet,
+                    "fractionDigits of an integer type must be 0".to_owned(),
+                    problems,
+                );
             }
             _ => {}
         }

@@ -122,16 +122,15 @@ impl XsdModelSet {
                             ));
                         }
                     }
-                    XsdDerivation::Extension => {
+                    XsdDerivation::Extension
                         if definition.mixed != base_definition.mixed
                             && base_definition.content.is_some()
-                            && definition.content.is_some()
-                        {
-                            problems.push(format!(
-                                "{label}: an extension must be mixed if and only if its base type '{}' is",
-                                base_definition.name.as_deref().unwrap_or("its base type")
-                            ));
-                        }
+                            && definition.content.is_some() =>
+                    {
+                        problems.push(format!(
+                            "{label}: an extension must be mixed if and only if its base type '{}' is",
+                            base_definition.name.as_deref().unwrap_or("its base type")
+                        ));
                     }
                     _ => {}
                 }
