@@ -304,12 +304,11 @@ pub(crate) fn diagnostics(
     if let Some(dtd) = dtd {
         grammar_diagnostics(dtd, source, &lines, &mut diagnostics);
     }
-    // Declaration possibly in a DTD that was not loaded, or only a validity
-    // error because of the external subset: warning.
-    let lenient = dtd.is_some_and(|dtd| dtd.incomplete || dtd.optional_declarations);
+    let incomplete = dtd.is_some_and(|dtd| dtd.incomplete);
     for problem in check_entity_references(source, dtd) {
+        // Declaration possibly in a DTD that was not loaded: warning.
         let severity =
-            if lenient && matches!(problem.kind, InstanceProblemKind::UndefinedEntity { .. }) {
+            if incomplete && matches!(problem.kind, InstanceProblemKind::UndefinedEntity { .. }) {
                 2
             } else {
                 1

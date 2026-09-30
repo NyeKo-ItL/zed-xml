@@ -50,7 +50,6 @@ All notable changes to this project are documented in this file. The format is b
 ### Fixed
 
 - A DOCTYPE whose literals or comments contain `<` or `>` (`<!ENTITY e "<foo/&#62;">`) no longer breaks the XML reader: the declaration is masked before reading, and checked by the strict check and the DTD parser.
-- An undeclared entity reference is a warning, not an error, when the document has an external subset or a parameter entity reference in its internal subset (a validity error only, XML 1.0 "Entity Declared").
 - Formatting no longer drops the whitespace between inline elements of mixed content (`<code>jar</code> <code>war</code>` lost its space, changing the text).
 - XSD content models are now checked with an automaton built from the component model (sequences, choices, `xs:all`, group references, wildcards with their namespace constraint, occurrence ranges on groups, extension, substitution groups) instead of name-keyed lists: valid documents are no longer rejected when several elements share a name (`<xs:element ref="comment" minOccurs="0"/>`), a `choice` accepts exactly one alternative, nested groups and extensions are honoured, abstract elements are refused, and empty elements (`<a/>`) are checked for missing children. Misplaced and surplus children are reported on the child (`unexpectedOrder`, `tooManyElements`, with the expected names), missing ones on the parent (`missingElement`).
 - Prefixed or default-namespace root elements (`<t:root xmlns:t="urn:x">`) are matched by expanded name instead of being reported as undeclared.

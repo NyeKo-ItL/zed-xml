@@ -31,14 +31,7 @@ const HUGE_DOCUMENT: usize = 64 * 1024;
 
 /// Problems known today, as `(fixture path suffix, problem)`. The test fails
 /// when one of them no longer occurs, so fixes are recorded here.
-const KNOWN_PROBLEMS: &[(&str, &str)] = &[
-    // `<!DOCTYPE doc>[]>` is not well-formed but raises no diagnostic, and
-    // formatting it twice gives two different results.
-    (
-        "corpus/libxml2-errors/doctype1.xml",
-        "formatting through the LSP is not idempotent",
-    ),
-];
+const KNOWN_PROBLEMS: &[(&str, &str)] = &[];
 
 #[test]
 fn every_request_handles_every_fixture() {
