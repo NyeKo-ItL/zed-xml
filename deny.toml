@@ -1,0 +1,48 @@
+# cargo-deny configuration (https://embarkstudios.github.io/cargo-deny/).
+# Run locally with `cargo deny check`; CI runs it on every pull request.
+
+[graph]
+all-features = true
+
+[advisories]
+# RustSec advisories: vulnerabilities, unmaintained and unsound crates and
+# yanked versions fail the check. Add an `ignore` entry (with the advisory
+# id and a reason) only when no fixed version exists.
+version = 2
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+# Licences compatible with distributing the project under the MIT licence.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.9
+# The list covers the whole dependency graph over time: do not warn about
+# licences no current dependency uses.
+unused-allowed-license = "allow"
+
+[bans]
+# Duplicate versions come from transitive dependencies of the extension API
+# and of the test-only crates: report them without failing.
+multiple-versions = "warn"
+wildcards = "deny"
+# Path dependencies between workspace crates carry no version.
+allow-wildcard-paths = true
+highlight = "all"
+
+[sources]
+# Only crates.io: no other registry and no repository dependencies.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

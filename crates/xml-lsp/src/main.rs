@@ -1166,14 +1166,11 @@ fn schema_resolution_source(source: &str) -> &str {
     source.strip_suffix('<').unwrap_or(source)
 }
 
+/// Local path of a `file:` URI. On Windows the leading `/` is removed only
+/// before a drive letter (`file:///C:/a` -> `C:/a`): `file:///opt/a` stays
+/// the rooted path `/opt/a`, never the relative `opt/a`.
 fn uri_to_path(uri: &str) -> PathBuf {
-    let raw = uri.strip_prefix("file://").unwrap_or(uri);
-    let raw = if cfg!(windows) && raw.starts_with('/') {
-        raw.strip_prefix('/').unwrap_or(raw)
-    } else {
-        raw
-    };
-    PathBuf::from(percent_decode(raw))
+    xsd_core::file_uri_to_path(uri)
 }
 
 fn path_to_uri(path: &std::path::Path) -> String {
@@ -2660,7 +2657,7 @@ mod tests {
         let registration = expect_server_request(&client, REGISTER_CAPABILITY_METHOD);
         assert_eq!(
             registration["registrations"][0]["registerOptions"]["watchers"],
-            json!([{"globPattern": catalog_path.to_string_lossy()}])
+            json!([{"globPattern": catalog_path.to_string_lossy().replace('\\', "/")}])
         );
 
         for (uri, text) in [

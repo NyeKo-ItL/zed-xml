@@ -7,9 +7,22 @@ on:
     tags:
       - "v*"
 
+concurrency:
+  # A new push to a pull request cancels its previous checks; the release
+  # events (tag push, merged version-sync pull request) get their own group.
+  group: ci-${{ github.event.pull_request.number || github.ref }}-${{ github.event.action || github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+  # Toolchain of the Clippy job (see CONTRIBUTING.md, "Continuous integration").
+  CLIPPY_TOOLCHAIN: "1.98"
+
 jobs:
-  checks:
-    name: Format and tests
+  fmt:
+    name: Format
     if: github.event_name == 'pull_request' && github.event.action != 'closed'
     runs-on: ubuntu-latest
     steps:
@@ -18,11 +31,133 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
-      - run: cargo test --workspace
       - name: Verify generated files are not tracked
         shell: bash
         run: |
           test -z "$(git ls-files -- 'grammars/**' '*.wasm' 'target/**')"
+
+  clippy:
+    name: Clippy
+    if: github.event_name == 'pull_request' && github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned so that lints added by a new stable release do not break
+      # unrelated pull requests; bump it deliberately (see CONTRIBUTING.md).
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.CLIPPY_TOOLCHAIN }}
+          components: clippy
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Clippy on the extension for its real target
+        run: cargo clippy -p zed-xml --target wasm32-wasip2 -- -D warnings
+
+  test:
+    name: Tests (${{ matrix.os }})
+    if: github.event_name == 'pull_request' && github.event.action != 'closed'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+
+  msrv:
+    name: Minimum supported Rust version
+    if: github.event_name == 'pull_request' && github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read rust-version from the manifests
+        id: msrv
+        shell: bash
+        run: |
+          MSRV=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
+          test -n "$MSRV"
+          for manifest in crates/*/Cargo.toml; do
+            if ! grep -qx "rust-version = \"$MSRV\"" "$manifest"; then
+              echo "::error file=$manifest::rust-version must be $MSRV, as in Cargo.toml"
+              exit 1
+            fi
+          done
+          echo "version=$MSRV" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace --all-targets --locked
+      - run: cargo build -p zed-xml --target wasm32-wasip2 --locked
+
+  wasm:
+    name: Extension (wasm32-wasip2)
+    if: github.event_name == 'pull_request' && github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p zed-xml --target wasm32-wasip2 --release --locked
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zed-xml-extension-wasm
+          path: target/wasm32-wasip2/release/zed_xml.wasm
+          if-no-files-found: error
+          retention-days: 7
+
+  deny:
+    name: Dependencies (cargo-deny)
+    if: github.event_name == 'pull_request' && github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories bans licenses sources
+
+  coverage:
+    name: Coverage
+    if: github.event_name == 'pull_request' && github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - uses: Swatinem/rust-cache@v2
+      - name: Run the tests with instrumentation
+        run: cargo llvm-cov --workspace --no-report
+      - name: Write the reports
+        shell: bash
+        run: |
+          mkdir -p coverage
+          cargo llvm-cov report --lcov --output-path coverage/lcov.info
+          cargo llvm-cov report --html --output-dir coverage
+          cargo llvm-cov report --summary-only > coverage/summary.txt
+          {
+            echo "## Coverage"
+            echo
+            echo '```'
+            cat coverage/summary.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage
+          if-no-files-found: error
+          retention-days: 14
 
   conformance:
     name: Conformance suites
@@ -33,6 +168,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - uses: actions/cache@v4
         with:
           path: target/test-suites

@@ -286,11 +286,13 @@ impl<'a> Document<'a> {
                 let tokens = value.split_whitespace().collect::<Vec<_>>();
                 let requests = match &self.source[local] {
                     "schemaLocation" => tokens
-                        .chunks_exact(2)
-                        .map(|pair| SchemaLocation {
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|[namespace, location]| SchemaLocation {
                             kind: SchemaLocationKind::SchemaLocation,
-                            namespace: Some(pair[0]),
-                            location: Some(pair[1]),
+                            namespace: Some(*namespace),
+                            location: Some(*location),
                             base_directory: base,
                         })
                         .collect::<Vec<_>>(),

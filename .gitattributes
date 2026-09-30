@@ -1,2 +1,4 @@
+# Checkouts keep LF line endings on every platform (Windows CI included).
+* text=auto eol=lf
 # Fixtures are byte-exact test inputs (CRLF, lone CR, UTF-16): never convert them.
 tests/fixtures/** -text

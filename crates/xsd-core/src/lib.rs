@@ -890,16 +890,16 @@ pub fn resolve_schema_locations_with(
                             "xsi:schemaLocation must contain namespace/path pairs".to_owned()
                         );
                     }
-                    for pair in values.chunks_exact(2) {
+                    for [namespace, location] in values.as_chunks::<2>().0 {
                         let request = SchemaLocation {
                             kind: SchemaLocationKind::SchemaLocation,
-                            namespace: Some(pair[0]),
-                            location: Some(pair[1]),
+                            namespace: Some(*namespace),
+                            location: Some(*location),
                             base_directory,
                         };
                         if let Some(path) = resolve_schema_location(&request, resolver) {
                             references.push(SchemaReference {
-                                namespace: Some(pair[0].to_owned()),
+                                namespace: Some((*namespace).to_owned()),
                                 path,
                             });
                         }

@@ -70,17 +70,19 @@ Keep the dependency direction: core crates never depend on `xml-lsp` or on LSP J
 ```sh
 cargo fmt --all -- --check              # formatting (CI)
 cargo test --workspace                  # all tests (CI)
-cargo clippy --workspace --all-targets  # no new warnings
+cargo clippy --workspace --all-targets -- -D warnings  # no warnings (CI)
+cargo deny check                        # licences, advisories, bans, sources (CI)
 cargo build --target wasm32-wasip2      # when src/lib.rs, Cargo.toml or extension.toml changed
 cargo build -p xml-lsp                  # server binary for XML_LSP_PATH
 cargo test -p xml-lsp -- <name filter>  # focused tests
 ```
 
-One pre-existing clippy warning (`Iterator::last` on a `DoubleEndedIterator` in `crates/xml-core/src/lib.rs`) is known; do not add others.
+CI denies every clippy warning (with the toolchain pinned by `CLIPPY_TOOLCHAIN` in `ci.yml`), runs the tests on Linux, Windows and macOS, and builds with the minimum supported Rust version (`rust-version` in every `Cargo.toml`, currently 1.88): do not use newer standard library APIs or language features without raising it everywhere.
 
 ## Coding conventions
 
-- Rust edition 2024, `cargo fmt` default style. Keep dependencies minimal (the server only uses `lsp-server`, `serde_json`, `quick-xml`, `regex`).
+- Rust edition 2024, `cargo fmt` default style. Keep dependencies minimal (the server only uses `lsp-server`, `serde_json`, `quick-xml`, `regex`); a new dependency must pass `cargo deny check` (`deny.toml`: MIT-compatible licences, crates.io only).
+- Portability: tests run on Windows and macOS too. Build paths with `Path::join`, `file://` URIs from real paths (never by concatenating `/tmp/...`), and do not assume LF line endings in files read from disk.
 - Write comments, doc comments, diagnostic messages, hover text, code action titles and every other user-facing string in English.
 - **New LSP feature = new module** `crates/xml-lsp/src/<feature>.rs` (or in a core crate when it is not LSP-specific), declared in `main.rs`, with its capability added to `server_capabilities()` and its request dispatched in `run()`. Do not grow `main.rs` with feature logic.
 - **Offsets**: everything internal is a UTF-8 byte offset/range into the document `&str`; convert to LSP positions (line + UTF-16 code units) only at the LSP boundary (`position_at`, `offset_at`, `selection::LineIndex`). Test with non-ASCII text and CRLF line endings.

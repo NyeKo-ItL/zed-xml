@@ -13,6 +13,8 @@ resolver = "2"
 name = "zed-xml"
 version = "0.12.0"
 edition = "2024"
+rust-version = "1.88"
+license = "MIT"
 
 [lib]
 crate-type = ["cdylib"]

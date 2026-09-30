@@ -28,6 +28,7 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Changed
 
+- CI quality gates: `cargo clippy -D warnings`, `cargo-deny` (licences, advisories, bans, sources), a minimum supported Rust version (1.88, checked in CI), tests on Linux, Windows and macOS, a `wasm32-wasip2` build of the extension, and coverage reports (`cargo llvm-cov`).
 - Comments, documentation and every user-facing message (diagnostics, hover, code action titles, errors) are now in English (#36).
 - Well-formedness diagnostics report every problem with a precise range and a stable `data.kind`; XSD diagnostics carry `data.rule` and point at the offending element (#30).
 
