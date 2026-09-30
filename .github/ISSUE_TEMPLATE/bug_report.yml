@@ -1,0 +1,49 @@
+name: Bug report
+description: Wrong diagnostic, crash, hang, bad formatting, a document the server mishandles
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please do not report security problems here: see [SECURITY.md](../blob/main/SECURITY.md).
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `xml-lsp --version`, or the extension version shown in Zed.
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform and Zed version
+      placeholder: "macOS 15 arm64, Zed 0.2xx"
+    validations:
+      required: true
+  - type: textarea
+    id: document
+    attributes:
+      label: Minimal document (and schema, DTD or catalog)
+      description: The smallest input that shows the problem. Paste it as text, not a screenshot.
+      render: xml
+    validations:
+      required: true
+  - type: textarea
+    id: settings
+    attributes:
+      label: Relevant settings
+      description: Your `lsp.xml-lsp` section of `settings.json`, and `languages.XML` if you changed it.
+      render: json
+  - type: textarea
+    id: expected
+    attributes:
+      label: What happens, and what you expected
+      description: The diagnostic message / `data.kind` if any. Compare with VS Code (Red Hat XML) or IntelliJ when you can.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: "`zed: open log` and `dev: open language server logs`, for `xml-lsp`."
+      render: text

@@ -177,7 +177,7 @@ The server reads LemMinX-style settings from an `xml` section. In Zed, put them 
 - `xml.fileAssociations`: bind files matching a glob (`*`, `?`, `**`, `{a,b}`; relative to the workspace folder, or the file name when the pattern has no `/`) to an XSD (`systemId`: path relative to the workspace folder, absolute path or `file://` URI) for validation, completion, hover and code actions, when the file declares no schema itself.
 - `xml.catalogs`: OASIS XML catalog files (absolute path, `file://` URI, `~/…` or path relative to the workspace folder) used to resolve schemas and DTDs; `xml.autoDetectCatalogs` (off by default) also uses a `catalog.xml` at the root of each workspace folder.
 
-See [docs/configuration.md](docs/configuration.md) for the full reference.
+See [docs/configuration.md](docs/configuration.md) for the full reference and [docs/diagnostics.md](docs/diagnostics.md) for every diagnostic code (a stable API).
 
 ## Troubleshooting
 

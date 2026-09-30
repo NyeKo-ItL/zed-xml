@@ -1,0 +1,24 @@
+name: Feature request
+description: A missing LSP feature, file type, setting or schema language
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you want to do
+      description: The XML task you cannot do today, with an example document.
+    validations:
+      required: true
+  - type: textarea
+    id: reference
+    attributes:
+      label: How other tools do it
+      description: VS Code (Red Hat XML / LemMinX), IntelliJ, Notepad++ XML Tools... what they offer and what you would keep.
+  - type: dropdown
+    id: zed
+    attributes:
+      label: Does it need something Zed does not offer yet?
+      options:
+        - No, the LSP protocol covers it
+        - Yes (a Zed extension API, an editor setting, a UI)
+        - I do not know
