@@ -14,13 +14,26 @@
 //! - duplicate attribute ([`XmlProblemKind::DuplicateAttribute`]) or
 //!   unquoted value ([`XmlProblemKind::UnquotedAttributeValue`]);
 //! - unescaped `&` or `<` in text or an attribute value
-//!   ([`XmlProblemKind::UnescapedCharacter`]).
+//!   ([`XmlProblemKind::UnescapedCharacter`]);
+//! - Namespaces in XML 1.0 constraints: undeclared prefixes
+//!   ([`XmlProblemKind::UndeclaredPrefix`]), names that are not qualified
+//!   names ([`XmlProblemKind::InvalidQualifiedName`]), invalid `xmlns`
+//!   declarations and reserved prefixes
+//!   ([`XmlProblemKind::InvalidNamespaceDeclaration`]) and attributes with
+//!   the same expanded name (reported as
+//!   [`XmlProblemKind::DuplicateAttribute`]).
 //!
 //! Offsets are UTF-8 byte offsets into the source.
 
+use std::collections::HashMap;
 use std::ops::Range;
 
-use crate::tags::{XmlTag, XmlTagKind, scan_attributes, scan_markup, scan_tags};
+use crate::{
+    names::{is_name, is_ncname, is_qname},
+    tags::{
+        XML_NAMESPACE, XmlAttribute, XmlTag, XmlTagKind, scan_attributes, scan_markup, scan_tags,
+    },
+};
 
 /// Kind of a well-formedness problem and the data needed to fix it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +63,16 @@ pub enum XmlProblemKind {
     /// `&` or `<` character (reported range) to replace with `&amp;` or
     /// `&lt;`.
     UnescapedCharacter { character: char },
+    /// Namespace prefix (reported range: the prefix) of an element or
+    /// attribute name that no `xmlns:prefix` declaration in scope binds.
+    UndeclaredPrefix { prefix: String },
+    /// Name (reported range) that is a well-formed name but not a
+    /// qualified name (`a:b:c`, `a:`, `:a`).
+    InvalidQualifiedName,
+    /// `xmlns` attribute (reported range: its name) breaking a constraint
+    /// of Namespaces in XML: reserved prefix or namespace, empty namespace
+    /// bound to a prefix.
+    InvalidNamespaceDeclaration,
 }
 
 impl XmlProblemKind {
@@ -64,6 +87,9 @@ impl XmlProblemKind {
             Self::DuplicateAttribute { .. } => "duplicateAttribute",
             Self::UnquotedAttributeValue => "unquotedAttributeValue",
             Self::UnescapedCharacter { .. } => "unescapedCharacter",
+            Self::UndeclaredPrefix { .. } => "undeclaredPrefix",
+            Self::InvalidQualifiedName => "invalidQualifiedName",
+            Self::InvalidNamespaceDeclaration => "invalidNamespaceDeclaration",
         }
     }
 
@@ -98,6 +124,7 @@ pub fn check_well_formedness(source: &str) -> Vec<XmlProblem> {
         check_attributes(source, tag, &mut problems);
     }
     check_text(source, &tags, &mut problems);
+    check_namespaces(source, &tags, &mut problems);
     problems.sort_by_key(|problem| (problem.range.start, problem.range.end));
     problems
 }
@@ -201,19 +228,11 @@ fn check_attributes(source: &str, tag: &XmlTag, problems: &mut Vec<XmlProblem>) 
             .iter()
             .any(|previous| previous.name(source) == name)
         {
-            let start = source[..attribute.name.start].trim_end().len();
-            let end = match &attribute.value {
-                Some(value) if is_quote(bytes.get(value.end)) => value.end + 1,
-                Some(value) => value.end,
-                None => attribute.name.end,
-            };
-            problems.push(XmlProblem {
-                kind: XmlProblemKind::DuplicateAttribute {
-                    removal: start..end,
-                },
-                range: attribute.name.clone(),
-                message: format!("duplicate attribute {name} on <{}>", tag.name(source)),
-            });
+            problems.push(duplicate_attribute(
+                source,
+                attribute,
+                format!("duplicate attribute {name} on <{}>", tag.name(source)),
+            ));
         }
         let Some(value) = &attribute.value else {
             continue;
@@ -227,6 +246,23 @@ fn check_attributes(source: &str, tag: &XmlTag, problems: &mut Vec<XmlProblem>) 
             continue;
         }
         check_characters(source, value.clone(), problems);
+    }
+}
+
+fn duplicate_attribute(source: &str, attribute: &XmlAttribute, message: String) -> XmlProblem {
+    let bytes = source.as_bytes();
+    let start = source[..attribute.name.start].trim_end().len();
+    let end = match &attribute.value {
+        Some(value) if is_quote(bytes.get(value.end)) => value.end + 1,
+        Some(value) => value.end,
+        None => attribute.name.end,
+    };
+    XmlProblem {
+        kind: XmlProblemKind::DuplicateAttribute {
+            removal: start..end,
+        },
+        range: attribute.name.clone(),
+        message,
     }
 }
 
@@ -293,6 +329,183 @@ fn starts_with_reference(text: &str) -> bool {
             || matches!(character, '_' | ':' | '.' | '-')
             || !character.is_ascii()
     })
+}
+
+/// Namespace of the `xmlns` prefix, which cannot be bound or declared.
+const XMLNS_NAMESPACE: &str = "http://www.w3.org/2000/xmlns/";
+
+/// Checks the constraints of Namespaces in XML 1.0 on element and attribute
+/// names and on `xmlns` declarations, walking the tags once with a stack of
+/// the bindings in scope.
+fn check_namespaces(source: &str, tags: &[XmlTag], problems: &mut Vec<XmlProblem>) {
+    // A DTD can declare default `xmlns:*` attributes that the document does
+    // not show: prefixes are then not checked.
+    let dtd_may_declare_prefixes = source
+        .find("<!DOCTYPE")
+        .map(|start| {
+            let doctype = &source[start..];
+            &doctype[..doctype.find("]>").unwrap_or(doctype.len())]
+        })
+        .is_some_and(|doctype| doctype.contains("xmlns:"));
+    // `prefix -> stack of namespaces` ("" is the default namespace).
+    let mut bindings: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut open: Vec<Vec<&str>> = Vec::new();
+
+    for tag in tags {
+        if tag.kind == XmlTagKind::End {
+            for prefix in open.pop().unwrap_or_default() {
+                if let Some(stack) = bindings.get_mut(prefix) {
+                    stack.pop();
+                }
+            }
+            continue;
+        }
+        let attributes = scan_attributes(source, tag);
+        let mut declared = Vec::new();
+        for attribute in &attributes {
+            let name = attribute.name(source);
+            let prefix = if name == "xmlns" {
+                ""
+            } else if let Some(prefix) = name.strip_prefix("xmlns:") {
+                prefix
+            } else {
+                continue;
+            };
+            let value = attribute.value.clone().map_or("", |range| &source[range]);
+            if let Some(message) = declaration_problem(prefix, value) {
+                problems.push(XmlProblem {
+                    kind: XmlProblemKind::InvalidNamespaceDeclaration,
+                    range: attribute.name.clone(),
+                    message,
+                });
+            }
+            bindings.entry(prefix).or_default().push(value);
+            declared.push(prefix);
+        }
+
+        let in_scope = |prefix: &str| {
+            prefix == "xml"
+                || dtd_may_declare_prefixes
+                || bindings
+                    .get(prefix)
+                    .is_some_and(|stack| stack.last().is_some_and(|value| !value.is_empty()))
+        };
+        check_name(source, tag.name.clone(), false, &in_scope, problems);
+        // `(namespace, local name, name as written)` of the prefixed
+        // attributes seen so far.
+        let mut expanded: Vec<(&str, &str, &str)> = Vec::new();
+        for attribute in &attributes {
+            let name = attribute.name(source);
+            if name == "xmlns" || name.starts_with("xmlns:") {
+                continue;
+            }
+            check_name(source, attribute.name.clone(), true, &in_scope, problems);
+            let Some((prefix, local)) = name.split_once(':') else {
+                continue;
+            };
+            let namespace = if prefix == "xml" {
+                Some(XML_NAMESPACE)
+            } else {
+                bindings.get(prefix).and_then(|stack| stack.last().copied())
+            };
+            let Some(namespace) = namespace else {
+                continue;
+            };
+            match expanded
+                .iter()
+                .find(|(other, other_local, _)| *other == namespace && *other_local == local)
+            {
+                Some((_, _, first)) => problems.push(duplicate_attribute(
+                    source,
+                    attribute,
+                    format!(
+                        "duplicate attribute {name} on <{}> (same expanded name as {first})",
+                        tag.name(source)
+                    ),
+                )),
+                None => expanded.push((namespace, local, name)),
+            }
+        }
+
+        if tag.kind == XmlTagKind::Start {
+            open.push(declared);
+        } else {
+            for prefix in declared {
+                if let Some(stack) = bindings.get_mut(prefix) {
+                    stack.pop();
+                }
+            }
+        }
+    }
+}
+
+/// Constraint broken by the declaration of `prefix` (`""` for the default
+/// namespace) as `value`, if any (Namespaces in XML 1.0 §3, §6.2).
+fn declaration_problem(prefix: &str, value: &str) -> Option<String> {
+    if prefix == "xmlns" {
+        return Some("the prefix xmlns is reserved and cannot be declared".to_owned());
+    }
+    if value == XMLNS_NAMESPACE {
+        return Some(format!(
+            "the namespace {XMLNS_NAMESPACE} is reserved and cannot be declared"
+        ));
+    }
+    if prefix == "xml" {
+        return (value != XML_NAMESPACE)
+            .then(|| format!("the prefix xml can only be bound to {XML_NAMESPACE}"));
+    }
+    if value == XML_NAMESPACE {
+        return Some(format!(
+            "the namespace {XML_NAMESPACE} can only be bound to the prefix xml"
+        ));
+    }
+    (!prefix.is_empty() && value.is_empty())
+        .then(|| format!("the prefix {prefix} cannot be bound to an empty namespace"))
+}
+
+/// Checks a tag or attribute name: qualified name syntax, reserved and
+/// undeclared prefixes.
+fn check_name(
+    source: &str,
+    name: Range<usize>,
+    attribute: bool,
+    in_scope: &dyn Fn(&str) -> bool,
+    problems: &mut Vec<XmlProblem>,
+) {
+    let text = &source[name.clone()];
+    if !is_name(text) {
+        return;
+    }
+    if !is_qname(text) {
+        problems.push(XmlProblem {
+            kind: XmlProblemKind::InvalidQualifiedName,
+            range: name,
+            message: format!("{text} is not a valid qualified name (NCName:NCName)"),
+        });
+        return;
+    }
+    let Some((prefix, _)) = text.split_once(':') else {
+        return;
+    };
+    if !is_ncname(prefix) {
+        return;
+    }
+    let range = name.start..name.start + prefix.len();
+    if prefix == "xmlns" && !attribute {
+        problems.push(XmlProblem {
+            kind: XmlProblemKind::InvalidNamespaceDeclaration,
+            range,
+            message: "the prefix xmlns is reserved and cannot be used on an element".to_owned(),
+        });
+    } else if !in_scope(prefix) {
+        problems.push(XmlProblem {
+            kind: XmlProblemKind::UndeclaredPrefix {
+                prefix: prefix.to_owned(),
+            },
+            range,
+            message: format!("namespace prefix {prefix} is not declared"),
+        });
+    }
 }
 
 #[cfg(test)]
@@ -420,6 +633,72 @@ mod tests {
         assert_eq!(
             kinds("<p:a xmlns:p=\"urn:p\"><p:b></p:c></p:a>"),
             vec![("mismatchedEndTag", "p:c")]
+        );
+    }
+
+    #[test]
+    fn reports_undeclared_prefixes_in_scope_order() {
+        assert_eq!(kinds("<p:a/>"), vec![("undeclaredPrefix", "p")]);
+        assert_eq!(kinds("<a q:x=\"1\"/>"), vec![("undeclaredPrefix", "q")]);
+        assert!(kinds("<p:a xmlns:p=\"urn:p\" p:x=\"1\"><p:b/></p:a>").is_empty());
+        assert!(kinds("<a xml:lang=\"en\" xmlns:p=\"urn:p\"/>").is_empty());
+        // The declaration goes out of scope with its element.
+        assert_eq!(
+            kinds("<a><b xmlns:p=\"urn:p\"/><p:c/></a>"),
+            vec![("undeclaredPrefix", "p")]
+        );
+        // Prefixes a DTD may declare by default attributes are not checked.
+        assert!(
+            kinds("<!DOCTYPE a [<!ATTLIST a xmlns:p CDATA #FIXED \"urn:p\">]><a><p:b/></a>")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn reports_reserved_prefixes_and_namespaces() {
+        for source in [
+            "<a xmlns:xmlns=\"urn:x\"/>",
+            "<a xmlns:xml=\"urn:other\"/>",
+            "<a xmlns:p=\"http://www.w3.org/XML/1998/namespace\"/>",
+            "<a xmlns:p=\"http://www.w3.org/2000/xmlns/\"/>",
+            "<a xmlns:p=\"\"/>",
+        ] {
+            assert_eq!(
+                kinds(source).iter().map(|kind| kind.0).collect::<Vec<_>>(),
+                vec!["invalidNamespaceDeclaration"],
+                "{source}"
+            );
+        }
+        assert!(kinds("<a xmlns=\"urn:a\"><b xmlns=\"\"/></a>").is_empty());
+        assert!(kinds("<a xmlns:xml=\"http://www.w3.org/XML/1998/namespace\"/>").is_empty());
+        assert_eq!(kinds("<xmlns:a/>")[0].0, "invalidNamespaceDeclaration");
+    }
+
+    #[test]
+    fn reports_names_that_are_not_qualified_names() {
+        assert_eq!(
+            kinds("<a:b:c xmlns:a=\"urn:a\"/>")[0].0,
+            "invalidQualifiedName"
+        );
+        assert_eq!(
+            kinds("<a: xmlns:a=\"urn:a\"/>")[0].0,
+            "invalidQualifiedName"
+        );
+    }
+
+    #[test]
+    fn reports_attributes_with_the_same_expanded_name() {
+        let source = "<a xmlns:p=\"urn:u\" xmlns:q=\"urn:u\" p:x=\"1\" q:x=\"2\"/>";
+        let problems = check_well_formedness(source);
+        assert_eq!(problems.len(), 1);
+        assert!(matches!(
+            problems[0].kind,
+            XmlProblemKind::DuplicateAttribute { .. }
+        ));
+        assert!(problems[0].message.contains("same expanded name as p:x"));
+        assert!(
+            kinds("<a xmlns:p=\"urn:p\" xmlns:q=\"urn:q\" p:x=\"1\" q:x=\"2\" x=\"3\"/>")
+                .is_empty()
         );
     }
 }

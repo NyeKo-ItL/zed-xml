@@ -35,7 +35,7 @@ use std::{fs, ops::Range, path::Path};
 
 use serde_json::{Map, Value, json};
 use xml_core::{
-    tags::{XmlTag, XmlTagKind, qualified_name_parts},
+    tags::{XmlTag, XmlTagKind, qualified_name_parts, scan_tags},
     wellformed::{XmlProblemKind, check_well_formedness},
 };
 use xsd_core::model::{XsdModelSet, XsdTypeRef, XsdUse};
@@ -423,8 +423,54 @@ fn well_formedness_fixes(actions: &mut Actions<'_>) {
                     true,
                 );
             }
+            XmlProblemKind::UndeclaredPrefix { prefix } => {
+                let Some(namespace) = well_known_namespace(prefix) else {
+                    continue;
+                };
+                let Some(root) = scan_tags(source)
+                    .into_iter()
+                    .find(|tag| tag.kind != XmlTagKind::End)
+                else {
+                    continue;
+                };
+                actions.push(
+                    format!("Declare the prefix {prefix} on the root element"),
+                    QUICK_FIX,
+                    vec![(
+                        root.name.end..root.name.end,
+                        format!(" xmlns:{prefix}=\"{namespace}\""),
+                    )],
+                    diagnostics,
+                    true,
+                );
+            }
+            XmlProblemKind::InvalidQualifiedName | XmlProblemKind::InvalidNamespaceDeclaration => {}
         }
     }
+}
+
+/// Namespace conventionally bound to `prefix`.
+fn well_known_namespace(prefix: &str) -> Option<&'static str> {
+    Some(match prefix {
+        "xsi" => "http://www.w3.org/2001/XMLSchema-instance",
+        "xs" | "xsd" => "http://www.w3.org/2001/XMLSchema",
+        "xsl" => "http://www.w3.org/1999/XSL/Transform",
+        "xlink" => "http://www.w3.org/1999/xlink",
+        "xi" => "http://www.w3.org/2001/XInclude",
+        "xhtml" => "http://www.w3.org/1999/xhtml",
+        "svg" => "http://www.w3.org/2000/svg",
+        "rdf" => "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
+        "rdfs" => "http://www.w3.org/2000/01/rdf-schema#",
+        "dc" => "http://purl.org/dc/elements/1.1/",
+        "dcterms" => "http://purl.org/dc/terms/",
+        "soap" | "soapenv" => "http://schemas.xmlsoap.org/soap/envelope/",
+        "wsdl" => "http://schemas.xmlsoap.org/wsdl/",
+        "android" => "http://schemas.android.com/apk/res/android",
+        "tools" => "http://schemas.android.com/tools",
+        "app" => "http://schemas.android.com/apk/res-auto",
+        "mc" => "http://schemas.openxmlformats.org/markup-compatibility/2006",
+        _ => return None,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1258,6 +1304,27 @@ mod tests {
         }
         assert_eq!(fixed, "<a x=\"1\" y=\"2\">1 &lt; 2 &amp; 3</a>");
         assert!(check_well_formedness(&fixed).is_empty());
+    }
+
+    #[test]
+    fn declares_a_well_known_undeclared_prefix() {
+        let mut fixture = Fixture::new("prefix", None);
+        let source = "<root>\n  <a xsi:nil=\"true\"/>\n</root>";
+        let actions = fixture.actions(source, 0..source.len(), quick_fixes());
+        assert_eq!(
+            fixture.apply(
+                source,
+                &actions,
+                "Declare the prefix xsi on the root element"
+            ),
+            "<root xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\n  <a xsi:nil=\"true\"/>\n</root>"
+        );
+        let unknown = "<root><a foo:x=\"1\"/></root>";
+        assert!(
+            fixture
+                .actions(unknown, 0..unknown.len(), quick_fixes())
+                .is_empty()
+        );
     }
 
     #[test]

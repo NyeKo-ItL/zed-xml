@@ -181,7 +181,11 @@ pub fn format_xml(source: &str) -> Result<String, String> {
 
 /// Formats a valid XML document according to `options`.
 pub fn format_xml_with(source: &str, options: &FormatOptions) -> Result<String, String> {
-    if !parse_xml(source).diagnostics.is_empty() {
+    if parse_xml(source)
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.blocks_formatting())
+    {
         return Err("the XML document is invalid".to_owned());
     }
 

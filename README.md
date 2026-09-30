@@ -16,6 +16,7 @@ Install the extension from Zed's extensions page (`zed: extensions`), or from a 
 - Comment and string scopes so auto-closing brackets and quotes stay out of comments and attribute values.
 - Automatic bracket and tag editing provided by Zed.
 - Native Rust LSP for XML diagnostics, formatting, completion, navigation and XSD validation.
+- Well-formedness and Namespaces in XML diagnostics: mismatched/unclosed tags, duplicate attributes (also by expanded name), undeclared or reserved prefixes and invalid `xmlns` declarations, with quick fixes.
 - Matching start/end tag name highlighting (`textDocument/documentHighlight`), including prefixed names and malformed documents.
 - Linked editing of start/end tag names (`textDocument/linkedEditingRange`, Zed `linked_edits` setting): renaming `<ns:item>` also renames `</ns:item>`, including `-`, `:` and `.` in names.
 - Rename symbol (`textDocument/prepareRename` + `textDocument/rename`): element names (start and end tags), namespace prefixes (the `xmlns:ns` declaration and every use in its scope, including `type="ns:T"` in XSD and `xsi:type`, honouring nested redeclarations), and global XSD components (`xs:element`, `xs:attribute`, `xs:complexType`, `xs:simpleType`, `xs:group`, `xs:attributeGroup`) with their `ref`/`type`/`base`/`itemType`/`memberTypes`/`substitutionGroup` references and matching elements in open XML documents bound to the schema. Invalid XML names are rejected.
