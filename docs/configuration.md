@@ -28,7 +28,7 @@ The `xml` key is optional: `"settings": { "format": { … } }` is equivalent.
 2. After initialization, when the client supports it, the server requests `workspace/configuration` (section `xml`); the answer is merged over the initialization options.
 3. `workspace/didChangeConfiguration` applies a pushed `xml` section, or asks for the configuration again when the notification carries none.
 
-When validation settings, file associations or catalogs change, the diagnostics of every open document are re-published (cleared when validation is disabled). Missing keys, unknown values and values of the wrong type keep their default. The defaults reproduce the server's behaviour before settings existed.
+When validation settings, file associations or catalogs change (including a catalog file modified on disk), the diagnostics of every open document are re-published (cleared when validation is disabled). Missing keys, unknown values and values of the wrong type keep their default. The defaults reproduce the server's behaviour before settings existed.
 
 ## Reference
 
@@ -55,11 +55,45 @@ When validation settings, file associations or catalogs change, the diagnostics 
 | `xml.symbols.enabled` | boolean | `true` | Serve document symbols (outline). |
 | `xml.symbols.maxItemsComputed` | number | unlimited | Maximum number of document symbols, counted in document order (children included). |
 | `xml.colors.enabled` | boolean | `true` | Serve document colors (SVG, CSS, Android). |
-| `xml.catalogs` | string[] | `[]` | XML catalog files used for schema resolution. |
+| `xml.catalogs` | string[] | `[]` | OASIS XML catalog files used to resolve schema locations, namespaces and DTD identifiers. See below. |
+| `xml.autoDetectCatalogs` | boolean | `false` | Extension to LemMinX: also use `catalog.xml` at the root of each workspace folder when it is an OASIS catalog. |
 | `xml.fileAssociations` | `{ "pattern": string, "systemId": string }[]` | `[]` | Validate files matching `pattern` with the XSD `systemId` when they declare no `xsi:schemaLocation`/`xsi:noNamespaceSchemaLocation`. See below. |
+
+### XML catalogs
+
+`xml.catalogs` lists OASIS XML Catalogs 1.1 files, like LemMinX. Each entry is an absolute path, a `file://` URI, `~/…` (home directory) or a path relative to the first workspace folder that contains it (the first folder otherwise). Catalogs are consulted in order.
+
+```json
+{ "lsp": { "xml-lsp": { "settings": { "xml": { "catalogs": ["catalog.xml", "~/xml/catalog.xml"] } } } } }
+```
+
+```xml
+<catalog xmlns="urn:oasis:names:tc:entity:xmlns:xml:catalog" prefer="public">
+  <!-- Namespace (xsi:schemaLocation pair, xs:import without schemaLocation). -->
+  <uri name="http://maven.apache.org/POM/4.0.0" uri="schemas/maven-4.0.0.xsd"/>
+  <!-- Exact location (xsi:noNamespaceSchemaLocation, xs:include, DOCTYPE SYSTEM). -->
+  <system systemId="http://example.com/schemas/project.xsd" uri="schemas/project.xsd"/>
+  <!-- Every location under a prefix; the longest matching prefix wins. -->
+  <rewriteSystem systemIdStartString="http://www.springframework.org/schema/" rewritePrefix="spring/"/>
+  <!-- DOCTYPE PUBLIC identifier. -->
+  <public publicId="-//OASIS//DTD DocBook XML V4.5//EN" uri="docbook/docbookx.dtd"/>
+  <group xml:base="vendor/">
+    <uriSuffix uriSuffix="/common.xsd" uri="common.xsd"/>
+  </group>
+  <nextCatalog catalog="more/catalog.xml"/>
+</catalog>
+```
+
+- Supported entries: `system`, `public`, `uri`, `rewriteSystem`, `rewriteURI`, `systemSuffix`, `uriSuffix`, `delegatePublic`, `delegateSystem`, `delegateURI` and `nextCatalog`, inside `catalog` and `group`. Relative targets are resolved against `xml:base` (allowed on any element), else against the catalog file. `prefer` (on `catalog`/`group`, `public` by default like Xerces) decides whether `public` entries apply when a system identifier is also given. Elements from other namespaces are ignored with their content.
+- Resolution follows the specification: in each catalog, an exact match, then the longest `rewrite*` prefix, then the longest `*Suffix`, then delegation (the matching `delegate*` catalogs, longest prefix first, replace the catalog list); otherwise the catalog's `nextCatalog` entries are consulted (depth first, each catalog at most once, so cycles are harmless), then the next catalog. `urn:publicid:` identifiers are unwrapped.
+- Schema locations: like Xerces/LemMinX, the namespace of an `xsi:schemaLocation` pair or of an `xs:import` is looked up first among `uri` entries, then the location among `system` entries, then among `uri` entries. `xs:include` locations, `xsi:noNamespaceSchemaLocation` and `xml.fileAssociations` system IDs use the location only. A `<!DOCTYPE>` uses its public and system identifiers (document links today, DTD validation later).
+- A remote location (`http(s)://…`) that no catalog maps to a local file is not downloaded: it is reported as a warning asking for a catalog entry.
+- Catalog files (and the catalogs they reach through `nextCatalog`/`delegate*`) are cached by modification time and size, re-read when they change on disk, and watched through `workspace/didChangeWatchedFiles` when the client supports dynamic registration; open documents are then revalidated. Unreadable or invalid catalogs are skipped (logged to the server's stderr).
+- An open catalog file gets `catalog-target-missing` warnings on `uri`/`catalog` values whose local file is missing (and `rewritePrefix` directories ending with `/`).
+- `xml.autoDetectCatalogs` is off by default so that a `catalog.xml` which happens to sit in a project does not silently change schema resolution.
 
 ### File associations
 
 - `pattern` is a glob: `*` and `?` match within a path segment, `**` matches any number of segments, `{a,b}` lists alternatives. A pattern without `/` matches the file name (`*.project`); otherwise it is matched against the path relative to the workspace folder (`config/**/*.xml`), then against the absolute path.
-- `systemId` is a path relative to the workspace folder (or to the document's directory outside a workspace), an absolute path or a `file://` URI. Remote URLs are ignored.
+- `systemId` is a path relative to the workspace folder (or to the document's directory outside a workspace), an absolute path or a `file://` URI. Remote URLs are used only when an XML catalog maps them to a local file.
 - The associated schema is used for diagnostics, completion, hover and code actions, and documents are revalidated when the open schema changes.

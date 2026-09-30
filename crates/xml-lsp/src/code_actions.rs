@@ -1074,6 +1074,7 @@ mod tests {
                 documents: &self.documents,
                 cache: &mut self.cache,
                 associated_schemas: Vec::new(),
+                catalogs: &crate::catalog::Catalogs::default(),
             };
             code_actions(&mut hover, &uri, source, range, &context)
         }
@@ -1084,6 +1085,7 @@ mod tests {
                 documents: &self.documents,
                 cache: &mut self.cache,
                 associated_schemas: Vec::new(),
+                catalogs: &crate::catalog::Catalogs::default(),
             };
             enumeration_diagnostics(&mut hover, &uri, source)
         }

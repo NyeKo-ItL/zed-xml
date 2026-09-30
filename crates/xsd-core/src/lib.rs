@@ -733,10 +733,145 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
     Ok(schema)
 }
 
+/// Nature d'un emplacement de schéma à résoudre.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchemaLocationKind {
+    /// Emplacement d'une paire de `xsi:schemaLocation`.
+    SchemaLocation,
+    /// `xsi:noNamespaceSchemaLocation`.
+    NoNamespaceSchemaLocation,
+    /// `xs:include/@schemaLocation`.
+    Include,
+    /// `xs:import` (avec ou sans `schemaLocation`).
+    Import,
+}
+
+/// Emplacement de schéma tel qu'écrit dans le document, avant résolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SchemaLocation<'a> {
+    pub kind: SchemaLocationKind,
+    /// Espace de noms associé (`xsi:schemaLocation`, `xs:import`).
+    pub namespace: Option<&'a str>,
+    /// Valeur de l'emplacement (`None` : `xs:import` sans `schemaLocation`).
+    pub location: Option<&'a str>,
+    /// Dossier du document qui porte la référence.
+    pub base_directory: &'a Path,
+}
+
+/// Résolveur d'emplacements (catalogue XML…) consulté avant la résolution
+/// par défaut ; `None` laisse la résolution par défaut s'appliquer.
+pub type LocationResolver<'r> = dyn Fn(&SchemaLocation<'_>) -> Option<PathBuf> + 'r;
+
+/// Résout `request` avec `resolver`, puis par défaut avec
+/// [`resolve_location`]. `None` pour un `xs:import` sans `schemaLocation`
+/// que le résolveur ne connaît pas.
+pub fn resolve_schema_location(
+    request: &SchemaLocation<'_>,
+    resolver: &LocationResolver<'_>,
+) -> Option<PathBuf> {
+    resolver(request).or_else(|| {
+        request
+            .location
+            .map(|location| resolve_location(request.base_directory, location))
+    })
+}
+
+/// Schéma d'URI de `value` (au moins deux caractères, pour ne pas confondre
+/// une lettre de lecteur Windows `C:` avec un schéma).
+fn uri_scheme(value: &str) -> Option<&str> {
+    let (scheme, _) = value.split_once(':')?;
+    let mut chars = scheme.chars();
+    (scheme.len() >= 2
+        && chars.next()?.is_ascii_alphabetic()
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')))
+    .then_some(scheme)
+}
+
+/// Résolution par défaut d'un emplacement de schéma : URI `file:`, chemin
+/// absolu ou relatif à `base_directory` (décodé en pourcentage si le chemin
+/// brut n'existe pas). Une URL distante est conservée telle quelle : elle ne
+/// désigne aucun fichier lisible (voir [`is_remote_location`]).
+pub fn resolve_location(base_directory: &Path, location: &str) -> PathBuf {
+    let location = location.trim();
+    if let Some(scheme) = uri_scheme(location) {
+        if scheme.eq_ignore_ascii_case("file") {
+            return file_uri_to_path(location);
+        }
+        return PathBuf::from(location);
+    }
+    let raw = resolve_path(base_directory, location);
+    if !location.contains('%') || raw.exists() {
+        return raw;
+    }
+    resolve_path(base_directory, &percent_decode(location))
+}
+
+/// Le chemin est en fait une URL non locale (`http:`, `https:`, `urn:`…)
+/// conservée par [`resolve_location`].
+pub fn is_remote_location(path: &Path) -> bool {
+    path.to_str()
+        .and_then(uri_scheme)
+        .is_some_and(|scheme| !scheme.eq_ignore_ascii_case("file"))
+}
+
+/// Chemin local d'une URI `file:` (`file:///a%20b.xsd` -> `/a b.xsd`) ;
+/// requête et fragment ignorés.
+pub fn file_uri_to_path(uri: &str) -> PathBuf {
+    let raw = uri.get(5..).filter(|_| {
+        uri.get(..5)
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("file:"))
+    });
+    let raw = raw.unwrap_or(uri);
+    let raw = raw.strip_prefix("//localhost/").map_or_else(
+        || raw.strip_prefix("//").unwrap_or(raw),
+        |rest| &raw[raw.len() - rest.len() - 1..],
+    );
+    let raw = raw.split(['?', '#']).next().unwrap_or(raw);
+    let raw = if cfg!(windows) && raw.starts_with('/') && raw.as_bytes().get(2) == Some(&b':') {
+        &raw[1..]
+    } else {
+        raw
+    };
+    PathBuf::from(percent_decode(raw))
+}
+
+/// Décode les séquences `%XX` (les séquences invalides sont conservées).
+pub fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let (Some(high), Some(low)) = (
+                (bytes[index + 1] as char).to_digit(16),
+                (bytes[index + 2] as char).to_digit(16),
+            )
+        {
+            decoded.push((high * 16 + low) as u8);
+            index += 3;
+            continue;
+        }
+        decoded.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
 /// Résout les références XSD d'un document XML par rapport à son chemin.
 pub fn resolve_schema_locations(
     source: &str,
     document_path: impl AsRef<Path>,
+) -> Result<Vec<SchemaReference>, String> {
+    resolve_schema_locations_with(source, document_path, &|_| None)
+}
+
+/// Comme [`resolve_schema_locations`], en consultant d'abord `resolver`
+/// (catalogue XML) pour chaque emplacement.
+pub fn resolve_schema_locations_with(
+    source: &str,
+    document_path: impl AsRef<Path>,
+    resolver: &LocationResolver<'_>,
 ) -> Result<Vec<SchemaReference>, String> {
     let mut reader = Reader::from_str(source);
     let mut references = Vec::new();
@@ -757,17 +892,33 @@ pub fn resolve_schema_locations(
                         );
                     }
                     for pair in values.chunks_exact(2) {
-                        references.push(SchemaReference {
-                            namespace: Some(pair[0].to_owned()),
-                            path: resolve_path(base_directory, pair[1]),
-                        });
+                        let request = SchemaLocation {
+                            kind: SchemaLocationKind::SchemaLocation,
+                            namespace: Some(pair[0]),
+                            location: Some(pair[1]),
+                            base_directory,
+                        };
+                        if let Some(path) = resolve_schema_location(&request, resolver) {
+                            references.push(SchemaReference {
+                                namespace: Some(pair[0].to_owned()),
+                                path,
+                            });
+                        }
                     }
                 }
                 if let Some(value) = attribute(&element, "noNamespaceSchemaLocation") {
-                    references.push(SchemaReference {
+                    let request = SchemaLocation {
+                        kind: SchemaLocationKind::NoNamespaceSchemaLocation,
                         namespace: None,
-                        path: resolve_path(base_directory, value.trim()),
-                    });
+                        location: Some(value.trim()),
+                        base_directory,
+                    };
+                    if let Some(path) = resolve_schema_location(&request, resolver) {
+                        references.push(SchemaReference {
+                            namespace: None,
+                            path,
+                        });
+                    }
                 }
             }
             Ok(Event::Eof) => break,
@@ -784,6 +935,17 @@ pub fn resolve_schema_dependencies(
     source: &str,
     schema_path: impl AsRef<Path>,
 ) -> Result<Vec<SchemaReference>, String> {
+    resolve_schema_dependencies_with(source, schema_path, &|_| None)
+}
+
+/// Comme [`resolve_schema_dependencies`], en consultant d'abord `resolver` ;
+/// un `xs:import` sans `schemaLocation` n'est retenu que si `resolver` le
+/// résout (catalogue XML par espace de noms).
+pub fn resolve_schema_dependencies_with(
+    source: &str,
+    schema_path: impl AsRef<Path>,
+    resolver: &LocationResolver<'_>,
+) -> Result<Vec<SchemaReference>, String> {
     let mut reader = Reader::from_str(source);
     let base_directory = schema_path
         .as_ref()
@@ -794,22 +956,27 @@ pub fn resolve_schema_dependencies(
         match reader.read_event() {
             Ok(Event::Start(element)) | Ok(Event::Empty(element)) => {
                 let element_name = element.name();
-                let name = local_name(element_name.as_ref());
-                if name == "include"
-                    && let Some(path) = attribute(&element, "schemaLocation")
-                {
-                    references.push(SchemaReference {
-                        namespace: None,
-                        path: resolve_path(base_directory, &path),
-                    });
+                let kind = match local_name(element_name.as_ref()) {
+                    "include" => SchemaLocationKind::Include,
+                    "import" => SchemaLocationKind::Import,
+                    _ => continue,
+                };
+                let location = attribute(&element, "schemaLocation");
+                let namespace = match kind {
+                    SchemaLocationKind::Import => attribute(&element, "namespace"),
+                    _ => None,
+                };
+                if kind == SchemaLocationKind::Include && location.is_none() {
+                    continue;
                 }
-                if name == "import"
-                    && let Some(path) = attribute(&element, "schemaLocation")
-                {
-                    references.push(SchemaReference {
-                        namespace: attribute(&element, "namespace"),
-                        path: resolve_path(base_directory, &path),
-                    });
+                let request = SchemaLocation {
+                    kind,
+                    namespace: namespace.as_deref(),
+                    location: location.as_deref().map(str::trim),
+                    base_directory,
+                };
+                if let Some(path) = resolve_schema_location(&request, resolver) {
+                    references.push(SchemaReference { namespace, path });
                 }
             }
             Ok(Event::Eof) => break,
@@ -2703,5 +2870,95 @@ mod tests {
     #[test]
     fn rejects_a_schema_without_elements() {
         assert!(parse_xsd("<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\"/>").is_err());
+    }
+
+    #[test]
+    fn decodes_percent_encoded_and_file_uri_schema_locations() {
+        let directory =
+            std::env::temp_dir().join(format!("xsd-core-locations {}", std::process::id()));
+        std::fs::create_dir_all(directory.join("my schemas")).unwrap();
+        std::fs::write(directory.join("my schemas/a b.xsd"), "<x/>").unwrap();
+        let document = directory.join("doc.xml");
+        let source = r#"<root xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+            xsi:noNamespaceSchemaLocation="my%20schemas/a%20b.xsd"/>"#;
+        let references = resolve_schema_locations(source, &document).unwrap();
+        assert_eq!(references[0].path, directory.join("my schemas/a b.xsd"));
+        let _ = std::fs::remove_dir_all(&directory);
+
+        assert_eq!(
+            resolve_location(Path::new("/base"), "file:///tmp/a%20b.xsd#frag"),
+            PathBuf::from("/tmp/a b.xsd")
+        );
+        assert_eq!(
+            resolve_location(Path::new("/base"), "file://localhost/tmp/c.xsd"),
+            PathBuf::from("/tmp/c.xsd")
+        );
+        assert_eq!(
+            resolve_location(Path::new("/base"), "./sub/../missing%zz.xsd"),
+            PathBuf::from("/base/missing%zz.xsd")
+        );
+        let remote = resolve_location(Path::new("/base"), "https://example.com/s.xsd");
+        assert_eq!(remote, PathBuf::from("https://example.com/s.xsd"));
+        assert!(is_remote_location(&remote));
+        assert!(is_remote_location(Path::new("urn:x:y")));
+        assert!(!is_remote_location(Path::new("/base/s.xsd")));
+        assert!(!is_remote_location(Path::new("C:/base/s.xsd")));
+    }
+
+    #[test]
+    fn consults_the_location_resolver_first() {
+        let resolver = |request: &SchemaLocation<'_>| -> Option<PathBuf> {
+            match (request.kind, request.namespace, request.location) {
+                (SchemaLocationKind::SchemaLocation, Some("urn:a"), _) => {
+                    Some(PathBuf::from("/catalog/a.xsd"))
+                }
+                (SchemaLocationKind::Import, Some("urn:b"), None) => {
+                    Some(PathBuf::from("/catalog/b.xsd"))
+                }
+                (SchemaLocationKind::Include, None, Some("http://x/inc.xsd")) => {
+                    Some(PathBuf::from("/catalog/inc.xsd"))
+                }
+                _ => None,
+            }
+        };
+        let references = resolve_schema_locations_with(
+            r#"<r xsi:schemaLocation="urn:a http://x/a.xsd urn:c c.xsd"/>"#,
+            "/docs/d.xml",
+            &resolver,
+        )
+        .unwrap();
+        assert_eq!(
+            references,
+            vec![
+                SchemaReference {
+                    namespace: Some("urn:a".to_owned()),
+                    path: PathBuf::from("/catalog/a.xsd"),
+                },
+                SchemaReference {
+                    namespace: Some("urn:c".to_owned()),
+                    path: PathBuf::from("/docs/c.xsd"),
+                },
+            ]
+        );
+        let dependencies = resolve_schema_dependencies_with(
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+                <xs:import namespace="urn:b"/>
+                <xs:import namespace="urn:unknown"/>
+                <xs:include schemaLocation="http://x/inc.xsd"/>
+            </xs:schema>"#,
+            "/schemas/s.xsd",
+            &resolver,
+        )
+        .unwrap();
+        assert_eq!(
+            dependencies
+                .iter()
+                .map(|reference| reference.path.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                PathBuf::from("/catalog/b.xsd"),
+                PathBuf::from("/catalog/inc.xsd")
+            ]
+        );
     }
 }

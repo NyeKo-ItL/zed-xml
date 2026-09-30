@@ -34,7 +34,12 @@ use xml_core::tags::{
 };
 use xsd_core::{model::XSD_NAMESPACE, resolve_path};
 
-use crate::{path_to_uri, percent_decode, selection::LineIndex, uri_to_path};
+use crate::{
+    catalog::{Catalogs, target_path},
+    path_to_uri, percent_decode,
+    selection::LineIndex,
+    uri_to_path,
+};
 
 /// Espace de noms `xsi`.
 pub const XSI_NAMESPACE: &str = "http://www.w3.org/2001/XMLSchema-instance";
@@ -101,6 +106,10 @@ pub struct LinkReference {
     pub range: Range<usize>,
     /// Valeur, entités XML résolues.
     pub value: String,
+    /// Identifiant associé, utilisé par les catalogues XML : espace de noms
+    /// (`xsi:schemaLocation`, `xs:import`) ou identifiant public
+    /// (`<!DOCTYPE … PUBLIC>`).
+    pub key: Option<String>,
 }
 
 /// Cible résolue d'une référence.
@@ -189,7 +198,16 @@ pub fn link_references(source: &str) -> Vec<LinkReference> {
             if let Some((kind, attribute_name)) = element_kind
                 && name == attribute_name
             {
-                push_value(source, &mut references, kind, value.clone());
+                let key = (kind == LinkKind::XsdImport)
+                    .then(|| {
+                        attributes[index]
+                            .iter()
+                            .find(|attribute| attribute.name(source) == "namespace")
+                            .and_then(|attribute| attribute.value(source))
+                            .map(|namespace| unescape(namespace.trim()))
+                    })
+                    .flatten();
+                push_value(source, &mut references, kind, value.clone(), key);
                 continue;
             }
             let Some((prefix, local)) = name.split_once(':') else {
@@ -200,8 +218,16 @@ pub fn link_references(source: &str) -> Vec<LinkReference> {
             }
             match local {
                 "schemaLocation" => {
-                    for token in tokens(source, value).skip(1).step_by(2) {
-                        push_value(source, &mut references, LinkKind::SchemaLocation, token);
+                    let mut tokens = tokens(source, value);
+                    while let (Some(namespace), Some(location)) = (tokens.next(), tokens.next()) {
+                        let namespace = unescape(&source[namespace]);
+                        push_value(
+                            source,
+                            &mut references,
+                            LinkKind::SchemaLocation,
+                            location,
+                            Some(namespace),
+                        );
                     }
                 }
                 "noNamespaceSchemaLocation" => push_value(
@@ -209,6 +235,7 @@ pub fn link_references(source: &str) -> Vec<LinkReference> {
                     &mut references,
                     LinkKind::NoNamespaceSchemaLocation,
                     value,
+                    None,
                 ),
                 _ => {}
             }
@@ -226,12 +253,14 @@ pub fn link_references(source: &str) -> Vec<LinkReference> {
                     _ => continue,
                 };
                 if let Some(value) = pseudo_attribute(source, target.end..content.end, "href") {
-                    push_value(source, &mut references, kind, value);
+                    push_value(source, &mut references, kind, value, None);
                 }
             }
             XmlMarkupKind::Declaration => {
-                if let Some(value) = doctype_system_literal(source, markup.content.clone()) {
-                    push_value(source, &mut references, LinkKind::Doctype, value);
+                if let Some((public, system)) = doctype_external_id(source, markup.content.clone())
+                {
+                    let public = public.map(|range| source[range].to_owned());
+                    push_value(source, &mut references, LinkKind::Doctype, system, public);
                 }
             }
             XmlMarkupKind::Comment | XmlMarkupKind::CData => {}
@@ -242,23 +271,24 @@ pub fn link_references(source: &str) -> Vec<LinkReference> {
     references
 }
 
-/// Résout les références du document `document_uri` ; ne garde que les
-/// fichiers locaux existants et les URL `http(s)`.
-pub fn document_links(document_uri: &str, source: &str) -> Vec<DocumentLink> {
+/// Résout les références du document `document_uri` (catalogues XML
+/// d'abord) ; ne garde que les fichiers locaux existants et les URL
+/// `http(s)`.
+pub fn document_links(document_uri: &str, source: &str, catalogs: &Catalogs) -> Vec<DocumentLink> {
     link_references(source)
         .into_iter()
         .filter_map(|reference| {
-            let target = resolve_target(document_uri, &reference.value)?;
+            let target = resolve_reference(document_uri, &reference, catalogs)?;
             Some(DocumentLink { reference, target })
         })
         .collect()
 }
 
 /// Réponse JSON de `textDocument/documentLink`.
-pub fn document_links_json(document_uri: &str, source: &str) -> Value {
+pub fn document_links_json(document_uri: &str, source: &str, catalogs: &Catalogs) -> Value {
     let lines = LineIndex::new(source);
     Value::Array(
-        document_links(document_uri, source)
+        document_links(document_uri, source, catalogs)
             .into_iter()
             .map(|link| {
                 json!({
@@ -281,11 +311,12 @@ pub fn definition(
     source: &str,
     offset: usize,
     link_support: bool,
+    catalogs: &Catalogs,
 ) -> Option<Value> {
     let reference = link_references(source)
         .into_iter()
         .find(|reference| reference.range.start <= offset && offset <= reference.range.end)?;
-    let Some(LinkTarget::File(path)) = resolve_target(document_uri, &reference.value) else {
+    let Some(LinkTarget::File(path)) = resolve_reference(document_uri, &reference, catalogs) else {
         return Some(json!([]));
     };
     let start = json!({"line": 0, "character": 0});
@@ -302,6 +333,42 @@ pub fn definition(
     } else {
         json!([{"uri": uri, "range": target_range}])
     })
+}
+
+/// Résout `reference` : d'abord par les catalogues XML (espace de noms de
+/// `xsi:schemaLocation`/`xs:import` via les entrées `uri`, identifiant
+/// public ou système du DOCTYPE, puis la valeur comme identifiant système ou
+/// URI) vers un fichier local existant, sinon comme [`resolve_target`].
+pub fn resolve_reference(
+    document_uri: &str,
+    reference: &LinkReference,
+    catalogs: &Catalogs,
+) -> Option<LinkTarget> {
+    if !catalogs.is_empty() {
+        let value = reference.value.trim();
+        let cataloged = match reference.kind {
+            LinkKind::SchemaLocation | LinkKind::XsdImport => reference
+                .key
+                .as_deref()
+                .and_then(|namespace| catalogs.resolve_uri(namespace))
+                .and_then(|target| target_path(&target))
+                .filter(|path| path.is_file()),
+            LinkKind::Doctype => catalogs
+                .resolve_external(reference.key.as_deref(), Some(value))
+                .and_then(|target| target_path(&target))
+                .filter(|path| path.is_file()),
+            _ => None,
+        }
+        .or_else(|| {
+            catalogs
+                .resolve_location(value)
+                .filter(|path| path.is_file())
+        });
+        if let Some(path) = cataloged {
+            return Some(LinkTarget::File(path));
+        }
+    }
+    resolve_target(document_uri, &reference.value)
 }
 
 /// Résout `value` par rapport au document `document_uri`. Retourne `None`
@@ -368,6 +435,7 @@ fn push_value(
     references: &mut Vec<LinkReference>,
     kind: LinkKind,
     range: Range<usize>,
+    key: Option<String>,
 ) {
     let raw = &source[range.clone()];
     let start = range.start + (raw.len() - raw.trim_start().len());
@@ -379,6 +447,7 @@ fn push_value(
         kind,
         range: start..end,
         value: unescape(&source[start..end]),
+        key,
     });
 }
 
@@ -455,9 +524,13 @@ fn pseudo_attribute(source: &str, range: Range<usize>, name: &str) -> Option<Ran
     None
 }
 
-/// Littéral système (guillemets exclus) d'une déclaration
-/// `DOCTYPE nom SYSTEM "..."` ou `DOCTYPE nom PUBLIC "..." "..."`.
-fn doctype_system_literal(source: &str, content: Range<usize>) -> Option<Range<usize>> {
+/// Littéraux public (éventuel) et système (guillemets exclus) d'une
+/// déclaration `DOCTYPE nom SYSTEM "..."` ou `DOCTYPE nom PUBLIC "..."
+/// "..."` ; `content` est le contenu de la déclaration (sans `<!` ni `>`).
+pub(crate) fn doctype_external_id(
+    source: &str,
+    content: Range<usize>,
+) -> Option<(Option<Range<usize>>, Range<usize>)> {
     let bytes = source.as_bytes();
     let keyword = scan_token(source, content.start, content.end);
     if &source[keyword.clone()] != "DOCTYPE" {
@@ -471,8 +544,10 @@ fn doctype_system_literal(source: &str, content: Range<usize>) -> Option<Range<u
         _ => return None,
     };
     let mut index = external.end;
+    let mut public = None;
     let mut literal = None;
     for _ in 0..literals {
+        public = literal.take();
         while index < content.end && bytes[index].is_ascii_whitespace() {
             index += 1;
         }
@@ -487,7 +562,7 @@ fn doctype_system_literal(source: &str, content: Range<usize>) -> Option<Range<u
         literal = Some(start..end);
         index = end + 1;
     }
-    literal
+    Some((public, literal?))
 }
 
 /// Schéma d'URI de `value` (au moins deux caractères, pour ne pas confondre
@@ -552,6 +627,8 @@ pub(crate) fn unescape(value: &str) -> String {
 mod tests {
     use super::*;
     use std::fs;
+
+    use crate::catalog::Catalogs;
 
     /// Répertoire temporaire propre au test, supprimé à la fin.
     struct TempDir(PathBuf);
@@ -785,7 +862,7 @@ mod tests {
         dir.file("a.xsd");
         let uri = dir.document_uri("doc.xml");
         let source = "<?xml-stylesheet href=\"missing.css\"?>\r\n<😀 xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"\r\n xsi:schemaLocation=\"urn:a a.xsd urn:b http://example.com/b.xsd\"/>";
-        let links = document_links_json(&uri, source);
+        let links = document_links_json(&uri, source, &Catalogs::default());
         let a_start = source.find(" a.xsd").unwrap() + 1 - source.rfind('\n').unwrap() - 1;
         assert_eq!(
             links,
@@ -811,7 +888,7 @@ mod tests {
         // UTF-16 : l'emoji compte pour deux unités.
         let emoji = "<a xmlns:xi=\"http://www.w3.org/2001/XInclude\"><xi:include href=\"😀/../a.xsd\"/></a>";
         let emoji_uri = dir.document_uri("emoji.xml");
-        let range = &document_links_json(&emoji_uri, emoji)[0]["range"];
+        let range = &document_links_json(&emoji_uri, emoji, &Catalogs::default())[0]["range"];
         let start = emoji.find("😀").unwrap();
         assert_eq!(range["start"]["character"], start);
         assert_eq!(range["end"]["character"], start + 2 + "/../a.xsd".len());
@@ -829,12 +906,12 @@ mod tests {
 
         for offset in [value, value + 2, value + 5] {
             assert_eq!(
-                definition(&uri, source, offset, false),
+                definition(&uri, source, offset, false, &Catalogs::default()),
                 Some(json!([{"uri": path_to_uri(&schema), "range": zero}]))
             );
         }
         assert_eq!(
-            definition(&uri, source, value, true),
+            definition(&uri, source, value, true, &Catalogs::default()),
             Some(json!([{
                 "originSelectionRange": {
                     "start": {"line": 0, "character": value},
@@ -846,13 +923,99 @@ mod tests {
             }]))
         );
         let url = source.find("http://example").unwrap();
-        assert_eq!(definition(&uri, source, url + 3, false), Some(json!([])));
+        assert_eq!(
+            definition(&uri, source, url + 3, false, &Catalogs::default()),
+            Some(json!([]))
+        );
         let missing = source.find("missing").unwrap();
-        assert_eq!(definition(&uri, source, missing, false), Some(json!([])));
+        assert_eq!(
+            definition(&uri, source, missing, false, &Catalogs::default()),
+            Some(json!([]))
+        );
         // Hors valeur : laissé à la définition d'élément.
-        assert_eq!(definition(&uri, source, 2, false), None);
-        assert_eq!(definition(&uri, source, value - 1, false), None);
+        assert_eq!(
+            definition(&uri, source, 2, false, &Catalogs::default()),
+            None
+        );
+        assert_eq!(
+            definition(&uri, source, value - 1, false, &Catalogs::default()),
+            None
+        );
         let namespace = source.find("urn:x").unwrap();
-        assert_eq!(definition(&uri, source, namespace + 1, false), None);
+        assert_eq!(
+            definition(&uri, source, namespace + 1, false, &Catalogs::default()),
+            None
+        );
+    }
+
+    #[test]
+    fn resolves_links_through_xml_catalogs() {
+        let dir = TempDir::new("catalog");
+        let by_namespace = dir.file("local/ns.xsd");
+        let by_system = dir.file("local/system.xsd");
+        let by_public = dir.file("local/public.dtd");
+        let imported = dir.file("local/imported.xsd");
+        let catalog = dir.0.join("catalog.xml");
+        fs::write(
+            &catalog,
+            r#"<catalog xmlns="urn:oasis:names:tc:entity:xmlns:xml:catalog">
+  <uri name="urn:ns" uri="local/ns.xsd"/>
+  <uri name="urn:imported" uri="local/imported.xsd"/>
+  <rewriteSystem systemIdStartString="http://example.com/" rewritePrefix="local/"/>
+  <public publicId="-//Example//DTD Doc//EN" uri="local/public.dtd"/>
+  <uri name="urn:missing" uri="local/missing.xsd"/>
+</catalog>"#,
+        )
+        .unwrap();
+        let catalogs = Catalogs::new(vec![catalog]);
+        let uri = dir.document_uri("doc.xml");
+        let source = r#"<!DOCTYPE doc PUBLIC "-//Example//DTD Doc//EN" "http://nowhere/doc.dtd">
+<doc xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xs="http://www.w3.org/2001/XMLSchema"
+  xsi:schemaLocation="urn:ns http://remote/ns.xsd urn:other http://example.com/system.xsd urn:missing http://remote/m.xsd">
+  <xs:import namespace="urn:imported" schemaLocation="http://remote/imported.xsd"/>
+</doc>"#;
+        let targets = document_links(&uri, source, &catalogs)
+            .into_iter()
+            .map(|link| (link.reference.kind, link.reference.key, link.target))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            targets,
+            vec![
+                (
+                    LinkKind::Doctype,
+                    Some("-//Example//DTD Doc//EN".to_owned()),
+                    LinkTarget::File(by_public)
+                ),
+                (
+                    LinkKind::SchemaLocation,
+                    Some("urn:ns".to_owned()),
+                    LinkTarget::File(by_namespace)
+                ),
+                (
+                    LinkKind::SchemaLocation,
+                    Some("urn:other".to_owned()),
+                    LinkTarget::File(by_system)
+                ),
+                // Cible de catalogue absente : l'URL d'origine est gardée.
+                (
+                    LinkKind::SchemaLocation,
+                    Some("urn:missing".to_owned()),
+                    LinkTarget::Url("http://remote/m.xsd".to_owned())
+                ),
+                (
+                    LinkKind::XsdImport,
+                    Some("urn:imported".to_owned()),
+                    LinkTarget::File(imported.clone())
+                ),
+            ]
+        );
+        let offset = source.find("http://remote/imported").unwrap();
+        assert_eq!(
+            definition(&uri, source, offset, false, &catalogs),
+            Some(json!([{
+                "uri": path_to_uri(&imported),
+                "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}},
+            }]))
+        );
     }
 }
