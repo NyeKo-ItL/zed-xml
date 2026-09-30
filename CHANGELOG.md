@@ -25,6 +25,7 @@ All notable changes to this project are documented in this file. The format is b
 - Completion templates for `<?xml ...?>`, `<?xml-model ...?>` and `<?xml-stylesheet ...?>` (#17).
 - Completion query characters (`<`, `/`, `>`, space, `=`, `"`, `?`) so Zed keeps completions open while typing XML (#19).
 - Conformance testing: about 200 specification cases (XML 1.0, Namespaces, RFC 7303, XSD 1.0), 73 real-world documents, the roxmltree and libxml2 corpora, the W3C XML and XSD conformance suites and the libxml2 schema tests (fetched by `scripts/fetch-test-suites.sh`), with baselines of known failures, a `Conformance suites` CI job, and an LSP smoke test over every fixture (new `xml-conformance` crate) (#38).
+- XSD datatype validation (`textDocument/publishDiagnostics`): the 44 XSD 1.0 built-in types with their derivation hierarchy and `whiteSpace` handling, list and union types, every constraining facet (enumerations and bounds compared in the value space, date/time partial order, durations), XSD regular expressions translated to the `regex` crate with a cache, element and attribute values resolved through local declarations, `xsi:type` and `QName` prefixes, `default`/`fixed` values, and precise messages on the value (`'2024-13-01' is not a valid xs:date: month must be 01-12`); new `data.rule` values `invalidEnumeration` and `invalidAttributeValue`.
 - `CONTRIBUTING.md`, `CHANGELOG.md` and `AGENTS.md`; the README now focuses on users (installation, configuration, troubleshooting).
 
 ### Changed
@@ -41,6 +42,7 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Fixed
 
+- Prefixed or default-namespace root elements (`<t:root xmlns:t="urn:x">`) are matched by expanded name instead of being reported as undeclared.
 - Declared the `xml-lsp --version` process capability for versioned downloaded binaries on Windows and Unix-like platforms; release synchronization updates the permission names with the version.
 - Downloaded `xml-lsp` binaries are cached under a versioned path, so an outdated or locked binary from a previous extension version cannot be reused.
 - The cached `xml-lsp` binary is reused when its version matches, instead of being downloaded again on every start (#16).

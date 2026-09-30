@@ -24,7 +24,7 @@ pub const XML_NAMESPACE: &str = "http://www.w3.org/XML/1998/namespace";
 
 /// Maximum depth followed through references (groups, derivations), to
 /// guard against cyclic schemas.
-const MAX_DEPTH: usize = 32;
+pub(crate) const MAX_DEPTH: usize = 32;
 
 /// Qualified name read from a schema attribute value (`type`, `ref`,
 /// `base`...), with its resolved namespace.
@@ -183,7 +183,17 @@ pub enum XsdParticle {
         particles: Vec<XsdParticle>,
     },
     GroupRef(XsdQName),
-    Any,
+    /// `xs:any` wildcard.
+    Any(XsdProcessContents),
+}
+
+/// `processContents` of a wildcard.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum XsdProcessContents {
+    #[default]
+    Strict,
+    Lax,
+    Skip,
 }
 
 /// Simple or complex type definition, named or anonymous.
@@ -337,10 +347,7 @@ fn build_tree(source: &str) -> Result<(Node, Vec<Scope>), String> {
                 let mut attributes = Vec::new();
                 for attribute in element.attributes().flatten() {
                     let key = String::from_utf8_lossy(attribute.key.as_ref()).into_owned();
-                    let value = attribute
-                        .unescape_value()
-                        .map(|value| value.into_owned())
-                        .unwrap_or_default();
+                    let value = normalized_attribute_value(&attribute).unwrap_or_default();
                     attributes.push((key, value));
                 }
                 let parent_scope = stack.last().map_or(0, |node| node.scope);
@@ -424,6 +431,24 @@ fn build_tree(source: &str) -> Result<(Node, Vec<Scope>), String> {
     }
     root.map(|root| (root, scopes))
         .ok_or_else(|| "document XSD vide".to_owned())
+}
+
+/// `xs:boolean` attribute of a schema component (`true` or `1`).
+fn is_true(value: Option<String>) -> bool {
+    matches!(value.as_deref().map(str::trim), Some("true" | "1"))
+}
+
+/// Value of an attribute after the attribute-value normalization of XML 1.0
+/// (§2.11, §3.3.3): line breaks (`\r\n` counting as one) and tabs written
+/// literally become spaces, character references are kept.
+pub(crate) fn normalized_attribute_value(
+    attribute: &quick_xml::events::attributes::Attribute<'_>,
+) -> Option<String> {
+    let raw = std::str::from_utf8(attribute.value.as_ref()).ok()?;
+    let normalized = raw.replace("\r\n", " ").replace(['\r', '\n', '\t'], " ");
+    quick_xml::escape::unescape(&normalized)
+        .ok()
+        .map(|value| value.into_owned())
 }
 
 fn close(stack: &mut Vec<Node>, root: &mut Option<Node>) {
@@ -574,8 +599,8 @@ impl Context<'_> {
             },
             default: node.attribute("default"),
             fixed: node.attribute("fixed"),
-            nillable: node.attribute("nillable").as_deref() == Some("true"),
-            is_abstract: node.attribute("abstract").as_deref() == Some("true"),
+            nillable: is_true(node.attribute("nillable")),
+            is_abstract: is_true(node.attribute("abstract")),
             substitution_groups: self.qname_list(node, "substitutionGroup"),
             global,
             documentation: documentation(node),
@@ -627,7 +652,7 @@ impl Context<'_> {
             name: node.attribute("name"),
             namespace: self.target_namespace.clone(),
             complex: true,
-            mixed: node.attribute("mixed").as_deref() == Some("true"),
+            mixed: is_true(node.attribute("mixed")),
             documentation: documentation(node),
             ..XsdTypeDef::default()
         };
@@ -635,7 +660,7 @@ impl Context<'_> {
             match child.local.as_str() {
                 "simpleContent" | "complexContent" => {
                     definition.simple_content = child.local == "simpleContent";
-                    if child.attribute("mixed").as_deref() == Some("true") {
+                    if is_true(child.attribute("mixed")) {
                         definition.mixed = true;
                     }
                     for derivation in child.elements() {
@@ -761,7 +786,15 @@ impl Context<'_> {
                     .map(|declaration| XsdParticle::Element(Box::new(declaration)));
             }
             "group" => return self.qname_attribute(node, "ref").map(XsdParticle::GroupRef),
-            "any" => return Some(XsdParticle::Any),
+            "any" => {
+                return Some(XsdParticle::Any(
+                    match node.attribute("processContents").as_deref().map(str::trim) {
+                        Some("skip") => XsdProcessContents::Skip,
+                        Some("lax") => XsdProcessContents::Lax,
+                        _ => XsdProcessContents::Strict,
+                    },
+                ));
+            }
             _ => return None,
         };
         Some(XsdParticle::Group {
@@ -904,6 +937,10 @@ pub struct ResolvedElement<'a> {
     pub element_type: Option<XsdTypeRef<'a>>,
     /// `xsi:type` applied to the instance.
     pub xsi_type: Option<&'a XsdTypeDef>,
+    /// The element, or one of its ancestors, is not declared by the content
+    /// model of its parent but matched by a `processContents="skip"`
+    /// wildcard: it must not be validated.
+    pub skipped: bool,
 }
 
 /// Resolved attribute declaration.
@@ -1162,11 +1199,14 @@ impl XsdModelSet {
         let particle = self.global_element(first.namespace.as_deref(), &first.local)?;
         let mut current = self.resolved(particle, first);
         for step in rest {
-            let particle = current
-                .element_type
-                .and_then(|parent| self.find_child(parent, step))
-                .or_else(|| self.global_element(step.namespace.as_deref(), &step.local))?;
+            let parent = current.element_type;
+            let child = parent.and_then(|parent| self.find_child(parent, step));
+            let skipped = current.skipped
+                || (child.is_none() && parent.is_some_and(|parent| self.has_skip_wildcard(parent)));
+            let particle =
+                child.or_else(|| self.global_element(step.namespace.as_deref(), &step.local))?;
             current = self.resolved(particle, step);
+            current.skipped = skipped;
         }
         Some(current)
     }
@@ -1194,6 +1234,34 @@ impl XsdModelSet {
             declaration,
             element_type,
             xsi_type: xsi_type.map(|found| found.item),
+            skipped: false,
+        }
+    }
+
+    /// Whether the content model of a type has a `processContents="skip"`
+    /// wildcard.
+    fn has_skip_wildcard(&self, reference: XsdTypeRef<'_>) -> bool {
+        let mut particles = Vec::new();
+        self.content_particles(reference, 0, &mut particles);
+        particles
+            .iter()
+            .any(|(_, particle)| self.particle_has_skip_wildcard(particle, 0))
+    }
+
+    fn particle_has_skip_wildcard(&self, particle: &XsdParticle, depth: usize) -> bool {
+        if depth > MAX_DEPTH {
+            return false;
+        }
+        match particle {
+            XsdParticle::Any(process_contents) => *process_contents == XsdProcessContents::Skip,
+            XsdParticle::Group { particles, .. } => particles
+                .iter()
+                .any(|particle| self.particle_has_skip_wildcard(particle, depth + 1)),
+            XsdParticle::GroupRef(name) => self
+                .group(name.namespace.as_deref(), &name.local)
+                .and_then(|group| group.item.content.as_ref())
+                .is_some_and(|content| self.particle_has_skip_wildcard(content, depth + 1)),
+            XsdParticle::Element(_) => false,
         }
     }
 
@@ -1225,11 +1293,15 @@ impl XsdModelSet {
     ) -> Option<Located<'a, XsdElementDecl>> {
         let mut particles = Vec::new();
         self.content_particles(parent, 0, &mut particles);
-        [true, false].into_iter().find_map(|strict| {
-            particles.iter().find_map(|&(schema, particle)| {
-                self.find_in_particle(schema, particle, step, strict, 0)
+        // Declarations by name first, substitution group members last (the
+        // member search scans every global declaration).
+        [(true, false), (false, false), (true, true), (false, true)]
+            .into_iter()
+            .find_map(|(strict, substitutions)| {
+                particles.iter().find_map(|&(schema, particle)| {
+                    self.find_in_particle(schema, particle, step, strict, substitutions, 0)
+                })
             })
-        })
     }
 
     fn find_in_particle<'a>(
@@ -1238,6 +1310,7 @@ impl XsdModelSet {
         particle: &'a XsdParticle,
         step: &XsdInstanceStep,
         strict: bool,
+        substitutions: bool,
         depth: usize,
     ) -> Option<Located<'a, XsdElementDecl>> {
         if depth > MAX_DEPTH {
@@ -1257,6 +1330,9 @@ impl XsdModelSet {
                         schema,
                         item: declaration,
                     });
+                }
+                if !substitutions {
+                    return None;
                 }
                 // Member of a substitution group whose head is the particle.
                 let head = self.element_target(Located {
@@ -1290,7 +1366,7 @@ impl XsdModelSet {
                     })
             }
             XsdParticle::Group { particles, .. } => particles.iter().find_map(|particle| {
-                self.find_in_particle(schema, particle, step, strict, depth + 1)
+                self.find_in_particle(schema, particle, step, strict, substitutions, depth + 1)
             }),
             XsdParticle::GroupRef(name) => {
                 let group = self.group(name.namespace.as_deref(), &name.local)?;
@@ -1299,10 +1375,11 @@ impl XsdModelSet {
                     group.item.content.as_ref()?,
                     step,
                     strict,
+                    substitutions,
                     depth + 1,
                 )
             }
-            XsdParticle::Any => None,
+            XsdParticle::Any(_) => None,
         }
     }
 
@@ -1375,7 +1452,7 @@ impl XsdModelSet {
                     self.collect_child_elements(group.schema, content, depth + 1, out);
                 }
             }
-            XsdParticle::Any => {}
+            XsdParticle::Any(_) => {}
         }
     }
 

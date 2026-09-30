@@ -3,11 +3,9 @@
 xsd1 §3.11 ID uniqueness
 xsd1 §3.11 IDREF to a missing ID
 xsd1 §3.11 key uniqueness
-xsd1 §3.14 anonymous simple type
 xsd1 §3.3 abstract element used directly
 xsd1 §3.3 element ref with minOccurs 0
 xsd1 §3.4 empty content
 xsd1 §3.4 extension appends to the base sequence
-xsd1 §3.4 text in element-only content
 xsd1 §3.8 choice picks one
 xsd1 §3.8 nested sequence in choice

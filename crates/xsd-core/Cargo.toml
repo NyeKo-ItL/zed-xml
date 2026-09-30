@@ -11,3 +11,4 @@ path = "src/lib.rs"
 [dependencies]
 quick-xml = "0.38"
 regex = "1"
+xml-core = { path = "../xml-core" }

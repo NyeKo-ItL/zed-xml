@@ -2,6 +2,7 @@
 
 pub mod diff;
 mod format;
+pub mod names;
 pub mod tags;
 pub mod wellformed;
 

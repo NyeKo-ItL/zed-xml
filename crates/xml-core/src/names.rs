@@ -1,7 +1,8 @@
-//! XML 1.0 (5th edition) names: `Name`, `Nmtoken`.
+//! XML 1.0 (5th edition) names: `Name`, `Nmtoken`, and the `NCName` and
+//! `QName` productions of Namespaces in XML 1.0.
 
 /// `NameStartChar` from XML 1.0 5th edition.
-pub(crate) fn is_name_start_char(character: char) -> bool {
+pub fn is_name_start_char(character: char) -> bool {
     matches!(character,
         ':' | 'A'..='Z' | '_' | 'a'..='z'
         | '\u{C0}'..='\u{D6}' | '\u{D8}'..='\u{F6}' | '\u{F8}'..='\u{2FF}'
@@ -28,8 +29,21 @@ pub fn is_nmtoken(value: &str) -> bool {
     !value.is_empty() && value.chars().all(is_name_char)
 }
 
+/// `NCName`: a `Name` without a colon.
+pub fn is_ncname(value: &str) -> bool {
+    !value.contains(':') && is_name(value)
+}
+
+/// `QName`: an `NCName`, optionally prefixed by an `NCName` and a colon.
+pub fn is_qname(value: &str) -> bool {
+    match value.split_once(':') {
+        Some((prefix, local)) => is_ncname(prefix) && is_ncname(local),
+        None => is_ncname(value),
+    }
+}
+
 /// End of the run of `NameChar`s starting at `start` in `text[..end]`.
-pub(crate) fn scan_name_chars(text: &str, start: usize, end: usize) -> usize {
+pub fn scan_name_chars(text: &str, start: usize, end: usize) -> usize {
     let end = end.min(text.len());
     if start >= end {
         return start;
@@ -56,6 +70,12 @@ mod tests {
         assert!(is_nmtoken("-."));
         assert!(!is_nmtoken(""));
         assert!(!is_nmtoken("a,b"));
+        assert!(is_ncname("a-b"));
+        assert!(!is_ncname("a:b"));
+        assert!(is_qname("a:b"));
+        assert!(!is_qname("a:b:c"));
+        assert!(!is_qname(":b"));
+        assert!(!is_qname("a:"));
         assert_eq!(scan_name_chars("ab;c", 0, 4), 2);
         assert_eq!(scan_name_chars("abc", 1, 3), 3);
         assert_eq!(scan_name_chars("abc", 3, 3), 3);

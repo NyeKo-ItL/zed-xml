@@ -1,16 +1,23 @@
 //! XSD model and parsing shared by the LSP server.
 
+pub mod datatypes;
 pub mod model;
+pub mod pattern;
 
 use std::{
     collections::HashMap,
     ops::Range,
     path::{Component, Path, PathBuf},
     str,
+    sync::Arc,
 };
 
 use quick_xml::{Reader, events::Event};
-use regex::Regex;
+
+use crate::{
+    datatypes::{BuiltinType, SimpleType},
+    model::{XsdInstanceStep, XsdModel, XsdModelSet},
+};
 
 const MAX_XSD_SOURCE_BYTES: usize = 16 * 1024 * 1024;
 
@@ -85,6 +92,9 @@ pub struct XsdSchema {
     pub simple_extensions: HashMap<String, String>,
     pub includes: Vec<String>,
     pub imports: Vec<(Option<String>, String)>,
+    /// Component models of the schema documents, used to check values
+    /// against their simple types.
+    pub models: Vec<Arc<XsdModel>>,
 }
 
 /// Merges several XSD schemas into a model usable by validation.
@@ -121,6 +131,7 @@ pub fn merge_schemas(schemas: impl IntoIterator<Item = XsdSchema>) -> XsdSchema 
         merged.simple_extensions.extend(schema.simple_extensions);
         merged.includes.extend(schema.includes);
         merged.imports.extend(schema.imports);
+        merged.models.extend(schema.models);
     }
     merged
 }
@@ -167,6 +178,10 @@ pub enum XsdDiagnosticKind {
     NotNillable,
     UnexpectedAttribute,
     MissingAttribute,
+    /// Value outside the `enumeration` of its type.
+    InvalidEnumeration,
+    /// Attribute value invalid for its simple type.
+    InvalidAttributeValue,
 }
 
 impl XsdDiagnosticKind {
@@ -184,6 +199,8 @@ impl XsdDiagnosticKind {
             Self::NotNillable => "notNillable",
             Self::UnexpectedAttribute => "unexpectedAttribute",
             Self::MissingAttribute => "missingAttribute",
+            Self::InvalidEnumeration => "invalidEnumeration",
+            Self::InvalidAttributeValue => "invalidAttributeValue",
         }
     }
 }
@@ -200,9 +217,11 @@ pub struct XsdDiagnostic {
 pub struct LocatedXsdDiagnostic {
     pub kind: XsdDiagnosticKind,
     pub message: String,
-    /// Start of the relevant start tag (`<`).
+    /// Start of the relevant start tag (`<`), or of the faulty attribute
+    /// value.
     pub offset: usize,
-    /// End of the name of that tag (`offset` if the element is unknown).
+    /// End of the name of that tag (`offset` if the element is unknown), or
+    /// of the attribute value.
     pub end: usize,
 }
 
@@ -729,6 +748,11 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
     if schema.elements.is_empty() {
         return Err("the XSD schema contains no xs:element".to_owned());
     }
+    schema.models = model::parse_xsd_model(source)
+        .ok()
+        .map(Arc::new)
+        .into_iter()
+        .collect();
 
     Ok(schema)
 }
@@ -1481,20 +1505,50 @@ pub fn root_element_name(source: &str) -> Option<String> {
     }
 }
 
-struct XmlFrame {
+/// Namespace of the `xsi:` attributes.
+const XSI_NAMESPACE: &str = "http://www.w3.org/2001/XMLSchema-instance";
+
+struct XmlFrame<'s> {
     name: String,
     children: Vec<String>,
     text: String,
+    /// The text contains an entity reference that cannot be resolved.
+    unresolved_text: bool,
     /// `<name` range of the start tag.
     location: Range<usize>,
+    /// Namespace declarations of the start tag (`""` for the default).
+    namespaces: Vec<(String, String)>,
+    step: XsdInstanceStep,
+    value: ValueCheck<'s>,
+}
+
+/// How the text content of an element is checked.
+enum ValueCheck<'s> {
+    /// Declaration resolved through the component model: value type (for
+    /// simple content), `default` and `fixed`, whether `xsi:nil` is set.
+    Model {
+        value_type: Option<SimpleType<'s>>,
+        /// Complex type with element-only (or empty) content: no text.
+        element_only: bool,
+        default: Option<&'s str>,
+        fixed: Option<&'s str>,
+        nil: bool,
+    },
+    /// Only the flat declaration is known: lexical `fixed` check.
+    Flat,
 }
 
 /// Checks the XML document and associates each diagnostic with the start tag
 /// of the relevant element (the faulty element, or the parent for content
-/// model rules).
+/// model rules) or with the faulty attribute value.
+///
+/// Text contents and attribute values are checked against their simple
+/// types ([`datatypes`]) when the component model resolves their
+/// declarations.
 pub fn validate_document_located(source: &str, schema: &XsdSchema) -> Vec<LocatedXsdDiagnostic> {
+    let models = XsdModelSet::new(schema.models.clone());
     let mut reader = Reader::from_str(source);
-    let mut stack: Vec<XmlFrame> = Vec::new();
+    let mut stack: Vec<XmlFrame<'_>> = Vec::new();
     let mut diagnostics = Vec::new();
     let mut root_checked = false;
     let located = |diagnostics: Vec<XsdDiagnostic>, location: &Range<usize>| {
@@ -1522,7 +1576,7 @@ pub fn validate_document_located(source: &str, schema: &XsdSchema) -> Vec<Locate
                         &frame.location,
                     ));
                     diagnostics.extend(located(
-                        validate_text_content(&frame, schema),
+                        validate_text_content(&frame, &stack, schema),
                         &frame.location,
                     ));
                 }
@@ -1531,6 +1585,21 @@ pub fn validate_document_located(source: &str, schema: &XsdSchema) -> Vec<Locate
             Ok(Event::Text(text)) => {
                 if let Some(frame) = stack.last_mut() {
                     frame.text.push_str(&String::from_utf8_lossy(text.as_ref()));
+                }
+                continue;
+            }
+            Ok(Event::CData(data)) => {
+                if let Some(frame) = stack.last_mut() {
+                    frame.text.push_str(&String::from_utf8_lossy(data.as_ref()));
+                }
+                continue;
+            }
+            Ok(Event::GeneralRef(reference)) => {
+                if let Some(frame) = stack.last_mut() {
+                    match resolve_reference(&reference) {
+                        Some(character) => frame.text.push(character),
+                        None => frame.unresolved_text = true,
+                    }
                 }
                 continue;
             }
@@ -1543,12 +1612,60 @@ pub fn validate_document_located(source: &str, schema: &XsdSchema) -> Vec<Locate
             .and_then(|rest| rest.find('<'))
             .map_or(event_start, |offset| event_start + offset);
         let location = start..(start + 1 + element.name().as_ref().len()).min(source.len());
+        let namespaces = namespace_declarations(&element);
         if !root_checked {
             root_checked = true;
-            diagnostics.extend(located(validate_root(&name, schema), &location));
+            diagnostics.extend(located(
+                validate_root_element(&name, &namespaces, &models, schema),
+                &location,
+            ));
         }
-        let mut element_diagnostics = validate_attributes(schema, &name, &element);
+        let lookup = |prefix: &str| lookup_prefix(&stack, &namespaces, prefix);
+        let step = instance_step(&name, &element, &lookup);
+        let mut path = stack
+            .iter()
+            .map(|frame| frame.step.clone())
+            .collect::<Vec<_>>();
+        path.push(step.clone());
+        let resolved = models
+            .resolve_element_path(&path)
+            .filter(|resolved| !resolved.skipped);
+        let (attribute_diagnostics, attribute_types) = validate_attribute_values(
+            source,
+            &location,
+            &models,
+            resolved.as_ref(),
+            &element,
+            &lookup,
+        );
+        diagnostics.extend(attribute_diagnostics);
+        let same_value = |attribute: &str, value: &str, fixed: &str| {
+            attribute_types
+                .iter()
+                .find(|(name, _)| name == attribute)
+                .map_or(value == fixed, |(_, value_type)| {
+                    value_type.values_equal(value, fixed, Some(&lookup))
+                })
+        };
+        let mut element_diagnostics =
+            validate_attributes(schema, &name, &element, &same_value, &lookup);
         element_diagnostics.extend(validate_nil(schema, &name, &element));
+        let value = match &resolved {
+            Some(resolved) => ValueCheck::Model {
+                value_type: builtin_xsi_type(&step).or_else(|| {
+                    resolved
+                        .element_type
+                        .and_then(|reference| models.simple_type(reference))
+                }),
+                element_only: resolved
+                    .element_type
+                    .is_some_and(|reference| is_element_only(&models, reference)),
+                default: resolved.declaration.item.default.as_deref(),
+                fixed: resolved.declaration.item.fixed.as_deref(),
+                nil: is_nil(&element),
+            },
+            None => ValueCheck::Flat,
+        };
         if let Some(parent) = stack.last_mut() {
             if !is_allowed_child(schema, &parent.name, &name) {
                 element_diagnostics.push(XsdDiagnostic {
@@ -1559,13 +1676,25 @@ pub fn validate_document_located(source: &str, schema: &XsdSchema) -> Vec<Locate
             parent.children.push(name.clone());
         }
         diagnostics.extend(located(element_diagnostics, &location));
-        if !empty {
-            stack.push(XmlFrame {
-                name,
-                children: Vec::new(),
-                text: String::new(),
-                location,
-            });
+        let frame = XmlFrame {
+            name,
+            children: Vec::new(),
+            text: String::new(),
+            unresolved_text: false,
+            location,
+            namespaces,
+            step,
+            value,
+        };
+        if empty {
+            // Content model rules are only checked on elements with an end
+            // tag; the (empty) value is checked here.
+            diagnostics.extend(located(
+                validate_text_content(&frame, &stack, schema),
+                &frame.location,
+            ));
+        } else {
+            stack.push(frame);
         }
     }
 
@@ -1591,7 +1720,235 @@ pub fn validate_document(source: &str, schema: &XsdSchema) -> Vec<XsdDiagnostic>
         .collect()
 }
 
-fn validate_sequence_frame(frame: &XmlFrame, schema: &XsdSchema) -> Vec<XsdDiagnostic> {
+/// Checks the root element: against the global declarations of the model
+/// (expanded names), or of the flat schema when no model is available.
+fn validate_root_element(
+    name: &str,
+    namespaces: &[(String, String)],
+    models: &XsdModelSet,
+    schema: &XsdSchema,
+) -> Vec<XsdDiagnostic> {
+    if models.models().is_empty() {
+        return validate_root(name, schema);
+    }
+    let (prefix, local) = name.split_once(':').unwrap_or(("", name));
+    let namespace = lookup_prefix(&[], namespaces, prefix);
+    if models.global_elements().any(|declaration| {
+        declaration.item.name == local && declaration.item.namespace == namespace
+    }) {
+        Vec::new()
+    } else {
+        vec![XsdDiagnostic {
+            kind: XsdDiagnosticKind::UnknownRoot,
+            message: format!("root element <{name}> not declared in the XSD schema"),
+        }]
+    }
+}
+
+/// Whitespace characters of XML.
+const XML_WHITESPACE: [char; 4] = [' ', '\t', '\n', '\r'];
+
+/// Whether a type is complex with element-only or empty content (neither
+/// simple content nor mixed, including along its derivation).
+fn is_element_only(models: &XsdModelSet, reference: model::XsdTypeRef<'_>) -> bool {
+    let mut current = Some(reference);
+    let mut first = true;
+    for _ in 0..model::MAX_DEPTH {
+        let Some(reference) = current else {
+            return true;
+        };
+        let Some(definition) = reference.definition else {
+            // Derived from `xs:anyType` without `mixed`: element-only.
+            // Other built-in or unresolved bases are not judged.
+            return !first
+                && reference
+                    .name
+                    .is_some_and(|name| name.is_builtin() && name.local == "anyType");
+        };
+        if !definition.complex || definition.simple_content || definition.mixed {
+            return false;
+        }
+        first = false;
+        current = models.base_type(reference);
+    }
+    false
+}
+
+/// Character of a predefined entity or character reference.
+fn resolve_reference(reference: &quick_xml::events::BytesRef<'_>) -> Option<char> {
+    if let Ok(Some(character)) = reference.resolve_char_ref() {
+        return Some(character);
+    }
+    match reference.as_ref() {
+        b"lt" => Some('<'),
+        b"gt" => Some('>'),
+        b"amp" => Some('&'),
+        b"apos" => Some('\''),
+        b"quot" => Some('"'),
+        _ => None,
+    }
+}
+
+/// `xmlns` and `xmlns:prefix` declarations of a start tag.
+fn namespace_declarations(element: &quick_xml::events::BytesStart<'_>) -> Vec<(String, String)> {
+    element
+        .attributes()
+        .flatten()
+        .filter_map(|attribute| {
+            let key = std::str::from_utf8(attribute.key.as_ref()).ok()?;
+            let prefix = if key == "xmlns" {
+                ""
+            } else {
+                key.strip_prefix("xmlns:")?
+            };
+            let value = attribute.unescape_value().ok()?.into_owned();
+            Some((prefix.to_owned(), value))
+        })
+        .collect()
+}
+
+/// Namespace bound to `prefix` (`""` for the default namespace) by the
+/// start tag being read (`own`) or its ancestors.
+fn lookup_prefix(stack: &[XmlFrame<'_>], own: &[(String, String)], prefix: &str) -> Option<String> {
+    if prefix == "xml" {
+        return Some(model::XML_NAMESPACE.to_owned());
+    }
+    own.iter()
+        .chain(stack.iter().rev().flat_map(|frame| frame.namespaces.iter()))
+        .find(|(declared, _)| declared == prefix)
+        .map(|(_, namespace)| namespace.clone())
+        .filter(|namespace| !namespace.is_empty())
+}
+
+/// Step of an instance element: expanded name and `xsi:type`.
+fn instance_step(
+    name: &str,
+    element: &quick_xml::events::BytesStart<'_>,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> XsdInstanceStep {
+    let (prefix, local) = name.split_once(':').unwrap_or(("", name));
+    let xsi_type = element
+        .attributes()
+        .flatten()
+        .find(|attribute| {
+            std::str::from_utf8(attribute.key.as_ref())
+                .ok()
+                .and_then(|key| key.split_once(':'))
+                .is_some_and(|(prefix, local)| {
+                    local == "type" && lookup(prefix).as_deref() == Some(XSI_NAMESPACE)
+                })
+        })
+        .and_then(|attribute| attribute.unescape_value().ok())
+        .map(|value| {
+            let value = value.trim();
+            let (prefix, local) = value.split_once(':').unwrap_or(("", value));
+            (lookup(prefix), local.to_owned())
+        });
+    XsdInstanceStep {
+        namespace: lookup(prefix),
+        local: local.to_owned(),
+        xsi_type,
+    }
+}
+
+/// `xsi:type` naming a built-in simple type (`xsi:type="xs:int"`).
+fn builtin_xsi_type<'s>(step: &XsdInstanceStep) -> Option<SimpleType<'s>> {
+    let (namespace, local) = step.xsi_type.as_ref()?;
+    (namespace.as_deref() == Some(model::XSD_NAMESPACE))
+        .then(|| BuiltinType::from_local_name(local))
+        .flatten()
+        .map(SimpleType::builtin)
+}
+
+fn is_nil(element: &quick_xml::events::BytesStart<'_>) -> bool {
+    element
+        .attributes()
+        .flatten()
+        .find(|attribute| local_name(attribute.key.as_ref()) == "nil")
+        .and_then(|attribute| attribute.unescape_value().ok())
+        .is_some_and(|value| matches!(value.trim(), "true" | "1"))
+}
+
+/// Checks the attribute values whose declarations the model resolves, and
+/// returns the simple types found (by local name) for the `fixed` checks.
+fn validate_attribute_values<'s>(
+    source: &str,
+    location: &Range<usize>,
+    models: &'s XsdModelSet,
+    resolved: Option<&model::ResolvedElement<'s>>,
+    element: &quick_xml::events::BytesStart<'_>,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> (Vec<LocatedXsdDiagnostic>, Vec<(String, SimpleType<'s>)>) {
+    let mut diagnostics = Vec::new();
+    let mut types = Vec::new();
+    let Some(resolved) = resolved else {
+        return (diagnostics, types);
+    };
+    let element_name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
+    for attribute in element.attributes().flatten() {
+        let Ok(key) = std::str::from_utf8(attribute.key.as_ref()) else {
+            continue;
+        };
+        if key == "xmlns" || key.starts_with("xmlns:") {
+            continue;
+        }
+        let (namespace, local) = match key.split_once(':') {
+            Some((prefix, local)) => (lookup(prefix), local),
+            None => (None, key),
+        };
+        if namespace.as_deref() == Some(XSI_NAMESPACE) {
+            continue;
+        }
+        let declaration = models
+            .resolve_attribute(Some(resolved), namespace.as_deref(), local)
+            .map(|found| found.declaration)
+            .or_else(|| {
+                // An unqualified attribute matched by `xs:anyAttribute` is
+                // validated against a global attribute without namespace.
+                let wildcard = resolved
+                    .element_type
+                    .and_then(|reference| reference.definition)
+                    .is_some_and(|definition| definition.any_attribute);
+                (wildcard && namespace.is_none())
+                    .then(|| models.global_attribute(None, local))
+                    .flatten()
+                    .filter(|found| found.item.namespace.is_none())
+            });
+        let Some(value_type) = declaration
+            .and_then(|declaration| models.attribute_type(declaration))
+            .and_then(|reference| models.simple_type(reference))
+        else {
+            continue;
+        };
+        if let Some(value) = model::normalized_attribute_value(&attribute)
+            && let Err(error) = value_type.validate(&value, Some(lookup))
+        {
+            let range = borrowed_range(source, attribute.value.as_ref())
+                .unwrap_or_else(|| location.clone());
+            diagnostics.push(LocatedXsdDiagnostic {
+                kind: if error.enumeration {
+                    XsdDiagnosticKind::InvalidEnumeration
+                } else {
+                    XsdDiagnosticKind::InvalidAttributeValue
+                },
+                message: format!("attribute @{key} of <{element_name}>: {}", error.message),
+                offset: range.start,
+                end: range.end,
+            });
+        }
+        types.push((local.to_owned(), value_type));
+    }
+    (diagnostics, types)
+}
+
+/// Range in `source` of a slice borrowed from it.
+fn borrowed_range(source: &str, slice: &[u8]) -> Option<Range<usize>> {
+    let base = source.as_ptr() as usize;
+    let start = (slice.as_ptr() as usize).checked_sub(base)?;
+    (start + slice.len() <= source.len()).then(|| start..start + slice.len())
+}
+
+fn validate_sequence_frame(frame: &XmlFrame<'_>, schema: &XsdSchema) -> Vec<XsdDiagnostic> {
     let Some(expected) = schema
         .children
         .get(&frame.name)
@@ -1648,187 +2005,96 @@ fn validate_sequence_frame(frame: &XmlFrame, schema: &XsdSchema) -> Vec<XsdDiagn
     diagnostics
 }
 
-fn validate_text_content(frame: &XmlFrame, schema: &XsdSchema) -> Vec<XsdDiagnostic> {
-    let Some(element) = schema
-        .elements
-        .iter()
-        .find(|element| element.name == frame.name)
-    else {
-        return Vec::new();
+/// Checks the text content of a closed element: value against its simple
+/// type, `fixed` value. `ancestors` are the frames still open (for the
+/// namespace prefixes of `QName` values).
+fn validate_text_content(
+    frame: &XmlFrame<'_>,
+    ancestors: &[XmlFrame<'_>],
+    schema: &XsdSchema,
+) -> Vec<XsdDiagnostic> {
+    let name = &frame.name;
+    let (value_type, default, fixed, nil) = match &frame.value {
+        ValueCheck::Model {
+            value_type,
+            element_only,
+            default,
+            fixed,
+            nil,
+        } => {
+            if *element_only && !frame.text.trim_matches(XML_WHITESPACE).is_empty() {
+                return vec![XsdDiagnostic {
+                    kind: XsdDiagnosticKind::InvalidContent,
+                    message: format!(
+                        "element <{name}> cannot contain text (its type has element-only content)"
+                    ),
+                }];
+            }
+            (value_type.as_ref(), *default, *fixed, *nil)
+        }
+        ValueCheck::Flat => {
+            let fixed = schema
+                .elements
+                .iter()
+                .find(|element| element.name == *name)
+                .and_then(|element| element.fixed.as_deref());
+            return match fixed {
+                Some(fixed) if frame.text.trim() != fixed => vec![XsdDiagnostic {
+                    kind: XsdDiagnosticKind::FixedValue,
+                    message: format!("content of <{name}> differs from the fixed value"),
+                }],
+                _ => Vec::new(),
+            };
+        }
     };
-    let type_name = element
-        .type_name
-        .as_deref()
-        .map(str::to_owned)
-        .unwrap_or_else(|| format!("__anonymous:{}", frame.name));
-    let value = frame.text.trim();
+    if nil || frame.unresolved_text {
+        return Vec::new();
+    }
+    let lookup = |prefix: &str| lookup_prefix(ancestors, &frame.namespaces, prefix);
+    let Some(value_type) = value_type else {
+        // Complex content: only the `fixed` value of a text-only element.
+        return match fixed {
+            Some(fixed)
+                if frame.children.is_empty() && !frame.text.is_empty() && frame.text != fixed =>
+            {
+                vec![XsdDiagnostic {
+                    kind: XsdDiagnosticKind::FixedValue,
+                    message: format!("content of <{name}> differs from the fixed value '{fixed}'"),
+                }]
+            }
+            _ => Vec::new(),
+        };
+    };
+    if !frame.children.is_empty() {
+        return vec![XsdDiagnostic {
+            kind: XsdDiagnosticKind::InvalidContent,
+            message: format!(
+                "element <{name}> has the simple type {} and cannot contain elements",
+                value_type.name
+            ),
+        }];
+    }
+    // An empty element takes its default or fixed value.
+    let text = match (frame.text.is_empty(), default.or(fixed)) {
+        (true, Some(value)) => value,
+        _ => frame.text.as_str(),
+    };
     let mut diagnostics = Vec::new();
-    if let Some(fixed) = &element.fixed
-        && value != fixed
+    if let Err(error) = value_type.validate(text, Some(&lookup)) {
+        diagnostics.push(XsdDiagnostic {
+            kind: if error.enumeration {
+                XsdDiagnosticKind::InvalidEnumeration
+            } else {
+                XsdDiagnosticKind::InvalidContent
+            },
+            message: format!("content of <{name}>: {}", error.message),
+        });
+    } else if let Some(fixed) = fixed
+        && !value_type.values_equal(text, fixed, Some(&lookup))
     {
         diagnostics.push(XsdDiagnostic {
             kind: XsdDiagnosticKind::FixedValue,
-            message: format!("content of <{}> differs from the fixed value", frame.name),
-        });
-    }
-    diagnostics.extend(validate_list_union(&frame.name, &type_name, value, schema));
-    diagnostics.extend(validate_builtin_type(&frame.name, &type_name, value));
-    let Some(restriction) = schema.restrictions.get(&type_name) else {
-        return diagnostics;
-    };
-    let normalized = normalize_whitespace(value, restriction.white_space.as_deref());
-    let value = normalized.as_str();
-    diagnostics.extend(validate_numeric_facets(
-        &frame.name,
-        &type_name,
-        value,
-        restriction,
-    ));
-    diagnostics.extend(validate_digit_facets(&frame.name, value, restriction));
-    let length = value.chars().count();
-    if let Some(expected) = restriction.length
-        && length != expected
-    {
-        diagnostics.push(XsdDiagnostic {
-            kind: XsdDiagnosticKind::InvalidContent,
-            message: format!(
-                "content of <{}> has an incorrect length (expected {expected} characters)",
-                frame.name
-            ),
-        });
-    }
-    if let Some(min) = restriction.min_length
-        && length < min
-    {
-        diagnostics.push(XsdDiagnostic {
-            kind: XsdDiagnosticKind::InvalidContent,
-            message: format!(
-                "content of <{}> is too short (minimum {min} characters)",
-                frame.name
-            ),
-        });
-    }
-    if let Some(max) = restriction.max_length
-        && length > max
-    {
-        diagnostics.push(XsdDiagnostic {
-            kind: XsdDiagnosticKind::InvalidContent,
-            message: format!(
-                "content of <{}> is too long (maximum {max} characters)",
-                frame.name
-            ),
-        });
-    }
-    if let Some(pattern) = &restriction.pattern
-        && Regex::new(pattern).is_ok_and(|regex| !regex.is_match(value))
-    {
-        diagnostics.push(XsdDiagnostic {
-            kind: XsdDiagnosticKind::InvalidContent,
-            message: format!("content of <{}> does not match the XSD pattern", frame.name),
-        });
-    }
-    diagnostics
-}
-
-fn normalize_whitespace(value: &str, mode: Option<&str>) -> String {
-    match mode {
-        Some("replace") => value
-            .chars()
-            .map(|character| match character {
-                '\t' | '\n' | '\r' => ' ',
-                character => character,
-            })
-            .collect(),
-        Some("collapse") => value.split_whitespace().collect::<Vec<_>>().join(" "),
-        _ => value.to_owned(),
-    }
-}
-
-fn validate_numeric_facets(
-    element_name: &str,
-    type_name: &str,
-    value: &str,
-    restriction: &XsdRestriction,
-) -> Vec<XsdDiagnostic> {
-    let Some(number) = value.parse::<f64>().ok() else {
-        return Vec::new();
-    };
-    let checks = [
-        (
-            restriction.min_inclusive.as_deref(),
-            0u8,
-            "minimum inclusive",
-        ),
-        (
-            restriction.max_inclusive.as_deref(),
-            1u8,
-            "maximum inclusive",
-        ),
-        (
-            restriction.min_exclusive.as_deref(),
-            2u8,
-            "minimum exclusive",
-        ),
-        (
-            restriction.max_exclusive.as_deref(),
-            3u8,
-            "maximum exclusive",
-        ),
-    ];
-    checks
-        .into_iter()
-        .find_map(|(limit, operation, label)| {
-            let limit = limit?.parse::<f64>().ok()?;
-            let valid = match operation {
-                0 => number >= limit,
-                1 => number <= limit,
-                2 => number > limit,
-                _ => number < limit,
-            };
-            (!valid).then(|| XsdDiagnostic {
-                kind: XsdDiagnosticKind::InvalidContent,
-                message: format!(
-                    "content of <{element_name}> outside the {label} of type {type_name}"
-                ),
-            })
-        })
-        .into_iter()
-        .collect()
-}
-
-fn validate_digit_facets(
-    element_name: &str,
-    value: &str,
-    restriction: &XsdRestriction,
-) -> Vec<XsdDiagnostic> {
-    let digits = value
-        .chars()
-        .filter(|character| character.is_ascii_digit())
-        .count();
-    let fraction = value
-        .split_once('.')
-        .map(|(_, fraction)| {
-            fraction
-                .chars()
-                .filter(|character| character.is_ascii_digit())
-                .count()
-        })
-        .unwrap_or(0);
-    let mut diagnostics = Vec::new();
-    if let Some(expected) = restriction.total_digits
-        && digits != expected
-    {
-        diagnostics.push(XsdDiagnostic {
-            kind: XsdDiagnosticKind::InvalidContent,
-            message: format!("content of <{element_name}> is invalid (totalDigits={expected})"),
-        });
-    }
-    if let Some(expected) = restriction.fraction_digits
-        && fraction > expected
-    {
-        diagnostics.push(XsdDiagnostic {
-            kind: XsdDiagnosticKind::InvalidContent,
-            message: format!("content of <{element_name}> is invalid (fractionDigits={expected})"),
+            message: format!("content of <{name}> differs from the fixed value '{fixed}'"),
         });
     }
     diagnostics
@@ -1868,48 +2134,6 @@ fn set_numeric_facet(restriction: &mut XsdRestriction, facet: &str, value: Strin
     }
 }
 
-fn validate_list_union(
-    element_name: &str,
-    type_name: &str,
-    value: &str,
-    schema: &XsdSchema,
-) -> Vec<XsdDiagnostic> {
-    if let Some(item_type) = schema.lists.get(type_name) {
-        return value
-            .split_whitespace()
-            .flat_map(|item| validate_builtin_type(element_name, item_type, item))
-            .collect();
-    }
-    if let Some(member_types) = schema.unions.get(type_name)
-        && !member_types
-            .iter()
-            .any(|member| validate_builtin_type(element_name, member, value).is_empty())
-    {
-        return vec![XsdDiagnostic {
-            kind: XsdDiagnosticKind::InvalidContent,
-            message: format!("content of <{element_name}> is invalid for the union {type_name}"),
-        }];
-    }
-    Vec::new()
-}
-
-fn validate_builtin_type(element_name: &str, type_name: &str, value: &str) -> Vec<XsdDiagnostic> {
-    let valid = match type_name.rsplit(':').next().unwrap_or(type_name) {
-        "boolean" => matches!(value, "true" | "false" | "0" | "1"),
-        "integer" => value.parse::<i128>().is_ok(),
-        "decimal" => Regex::new(r"^-?[0-9]+(\.[0-9]+)?$").is_ok_and(|regex| regex.is_match(value)),
-        _ => true,
-    };
-    if valid {
-        Vec::new()
-    } else {
-        vec![XsdDiagnostic {
-            kind: XsdDiagnosticKind::InvalidContent,
-            message: format!("content of <{element_name}> is invalid for the type {type_name}"),
-        }]
-    }
-}
-
 fn validate_nil(
     schema: &XsdSchema,
     element_name: &str,
@@ -1939,10 +2163,16 @@ fn validate_nil(
     }
 }
 
+/// Declared, required and `fixed` attributes of the flat model;
+/// `same_value(local name, value, fixed)` compares a value with its fixed
+/// value, `lookup` resolves prefixes (`xsi:` attributes are always
+/// allowed).
 fn validate_attributes(
     schema: &XsdSchema,
     element_name: &str,
     element: &quick_xml::events::BytesStart<'_>,
+    same_value: &dyn Fn(&str, &str, &str) -> bool,
+    lookup: &dyn Fn(&str) -> Option<String>,
 ) -> Vec<XsdDiagnostic> {
     if schema
         .any_attributes
@@ -1960,7 +2190,14 @@ fn validate_attributes(
     for attribute in element.attributes().flatten() {
         let raw_name = String::from_utf8_lossy(attribute.key.as_ref());
         let name = local_name(attribute.key.as_ref()).to_owned();
-        if raw_name == "xmlns" || raw_name.starts_with("xmlns:") {
+        if raw_name == "xmlns"
+            || raw_name.starts_with("xmlns:")
+            || raw_name
+                .split_once(':')
+                .and_then(|(prefix, _)| lookup(prefix))
+                .as_deref()
+                == Some(XSI_NAMESPACE)
+        {
             continue;
         }
         present.push(name.clone());
@@ -1975,7 +2212,7 @@ fn validate_attributes(
             .get(&format!("{element_name}:{name}"))
             && attribute
                 .unescape_value()
-                .is_ok_and(|value| value.as_ref() != fixed)
+                .is_ok_and(|value| !same_value(&name, value.as_ref(), fixed))
         {
             diagnostics.push(XsdDiagnostic {
                 kind: XsdDiagnosticKind::FixedValue,
@@ -2526,14 +2763,210 @@ mod tests {
         assert!(
             validate_document("<code>ok</code>", &schema)[0]
                 .message
-                .contains("too short")
+                .contains("requires at least 3 (minLength)")
         );
         assert!(
             validate_document("<code>abcdef</code>", &schema)[0]
                 .message
-                .contains("too long")
+                .contains("requires at most 5 (maxLength)")
         );
         assert!(validate_document("<code>valid</code>", &schema).is_empty());
+    }
+
+    fn messages(source: &str, schema: &XsdSchema) -> Vec<String> {
+        validate_document(source, schema)
+            .into_iter()
+            .map(|diagnostic| diagnostic.message)
+            .collect()
+    }
+
+    const TYPED: &str = r###"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+            xmlns:t="urn:typed" targetNamespace="urn:typed" elementFormDefault="qualified">
+        <xs:element name="root">
+            <xs:complexType>
+                <xs:sequence>
+                    <xs:element name="date" type="xs:date" minOccurs="0" maxOccurs="unbounded"/>
+                    <xs:element name="count" type="xs:unsignedByte" minOccurs="0" default="7"/>
+                    <xs:element name="ratio" type="xs:decimal" minOccurs="0" fixed="1.5"/>
+                    <xs:element name="name" type="xs:QName" minOccurs="0"/>
+                    <xs:element name="any" minOccurs="0"/>
+                    <xs:element name="box" type="t:Box" minOccurs="0"/>
+                    <xs:element name="skip" minOccurs="0">
+                        <xs:complexType><xs:sequence>
+                            <xs:any processContents="skip" namespace="##any"/>
+                        </xs:sequence></xs:complexType>
+                    </xs:element>
+                </xs:sequence>
+                <xs:attribute name="level" type="t:Level"/>
+                <xs:attribute name="stamp" type="xs:dateTime"/>
+            </xs:complexType>
+        </xs:element>
+        <xs:element name="date" type="xs:date"/>
+        <xs:complexType name="Box"><xs:sequence><xs:element name="date" type="xs:date"/></xs:sequence></xs:complexType>
+        <xs:simpleType name="Level">
+            <xs:restriction base="xs:int"><xs:minInclusive value="1"/><xs:maxInclusive value="5"/></xs:restriction>
+        </xs:simpleType>
+    </xs:schema>"###;
+
+    fn typed(body: &str) -> String {
+        format!(
+            "<t:root xmlns:t=\"urn:typed\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">{body}</t:root>"
+        )
+    }
+
+    #[test]
+    fn validates_text_contents_against_builtin_types() {
+        let schema = parse_xsd(TYPED).unwrap();
+        assert_eq!(
+            messages(&typed("<t:date>2026-09-30</t:date>"), &schema),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            messages(&typed("<t:date>2024-13-01</t:date>"), &schema),
+            vec!["content of <t:date>: '2024-13-01' is not a valid xs:date: month must be 01-12"]
+        );
+        assert_eq!(
+            messages(&typed("<t:count>256</t:count>"), &schema),
+            vec![
+                "content of <t:count>: '256' is not a valid xs:unsignedByte: the value must be at most 255"
+            ]
+        );
+        // Whitespace is collapsed, entity and character references and CDATA
+        // sections are part of the value.
+        assert!(messages(&typed("<t:count>\n 2&#53; </t:count>"), &schema).is_empty());
+        assert!(messages(&typed("<t:date><![CDATA[2026-09-30]]></t:date>"), &schema).is_empty());
+        assert!(!messages(&typed("<t:date>2026-09-30&amp;</t:date>"), &schema).is_empty());
+    }
+
+    #[test]
+    fn checks_empty_elements_defaults_and_fixed_values() {
+        let schema = parse_xsd(TYPED).unwrap();
+        assert_eq!(
+            messages(&typed("<t:date/>"), &schema),
+            vec![
+                "content of <t:date>: '' is not a valid xs:date: expected the format YYYY-MM-DD with an optional time zone"
+            ]
+        );
+        // An empty element takes its default or fixed value.
+        assert!(messages(&typed("<t:count/><t:ratio></t:ratio>"), &schema).is_empty());
+        // Fixed values are compared in the value space.
+        assert!(messages(&typed("<t:ratio>1.50</t:ratio>"), &schema).is_empty());
+        assert_eq!(
+            messages(&typed("<t:ratio>2</t:ratio>"), &schema),
+            vec!["content of <t:ratio> differs from the fixed value '1.5'"]
+        );
+        // xsi:nil elements are not checked.
+        assert!(messages(&typed("<t:date xsi:nil=\"true\"/>"), &schema).len() == 1);
+    }
+
+    #[test]
+    fn resolves_local_declarations_xsi_type_and_qname_prefixes() {
+        let schema = parse_xsd(TYPED).unwrap();
+        assert!(
+            messages(
+                &typed("<t:box><t:date>2026-01-01</t:date></t:box>"),
+                &schema
+            )
+            .is_empty()
+        );
+        assert!(!messages(&typed("<t:box><t:date>soon</t:date></t:box>"), &schema).is_empty());
+        assert!(messages(&typed("<t:name>t:root</t:name>"), &schema).is_empty());
+        assert_eq!(
+            messages(&typed("<t:name>u:root</t:name>"), &schema),
+            vec![
+                "content of <t:name>: 'u:root' is not a valid xs:QName: the prefix 'u' is not bound to a namespace"
+            ]
+        );
+        assert!(messages(&typed("<t:name xmlns:u=\"urn:u\">u:root</t:name>"), &schema).is_empty());
+        let xs = "xmlns:xs=\"http://www.w3.org/2001/XMLSchema\"";
+        assert!(
+            messages(
+                &typed(&format!("<t:any {xs} xsi:type=\"xs:int\">12</t:any>")),
+                &schema
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            messages(
+                &typed(&format!("<t:any {xs} xsi:type=\"xs:int\">twelve</t:any>")),
+                &schema
+            ),
+            vec![
+                "content of <t:any>: 'twelve' is not a valid xs:int: expected an integer such as '-12' (digits only)"
+            ]
+        );
+    }
+
+    #[test]
+    fn validates_attribute_values_at_their_location() {
+        let schema = parse_xsd(TYPED).unwrap();
+        let source = "<t:root xmlns:t=\"urn:typed\"\r\n  level=\"9\" stamp=\"été\"/>";
+        let diagnostics = validate_document_located(source, &schema);
+        assert_eq!(diagnostics.len(), 2, "{diagnostics:?}");
+        assert_eq!(
+            diagnostics[0].kind,
+            XsdDiagnosticKind::InvalidAttributeValue
+        );
+        assert_eq!(&source[diagnostics[0].offset..diagnostics[0].end], "9");
+        assert_eq!(
+            diagnostics[0].message,
+            "attribute @level of <t:root>: '9' must be at most 5 (maxInclusive of t:Level)"
+        );
+        assert_eq!(&source[diagnostics[1].offset..diagnostics[1].end], "été");
+        assert!(
+            diagnostics[1]
+                .message
+                .contains("is not a valid xs:dateTime")
+        );
+        assert!(
+            validate_document("<t:root xmlns:t=\"urn:typed\" level=\" 3 \"/>", &schema).is_empty()
+        );
+    }
+
+    #[test]
+    fn reports_enumerations_with_their_own_kind() {
+        let schema = parse_xsd(ENUMERATION).unwrap();
+        let diagnostics = validate_document("<item>green</item>", &schema);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].kind, XsdDiagnosticKind::InvalidEnumeration);
+        assert_eq!(diagnostics[0].kind.id(), "invalidEnumeration");
+        assert_eq!(
+            XsdDiagnosticKind::InvalidAttributeValue.id(),
+            "invalidAttributeValue"
+        );
+    }
+
+    #[test]
+    fn checks_content_kinds() {
+        let schema = parse_xsd(TYPED).unwrap();
+        assert_eq!(
+            messages(
+                &typed("<t:date><t:date>2026-01-01</t:date></t:date>"),
+                &schema
+            ),
+            vec!["element <t:date> has the simple type xs:date and cannot contain elements"]
+        );
+        assert_eq!(
+            messages(
+                &typed("<t:box>text<t:date>2026-01-01</t:date></t:box>"),
+                &schema
+            ),
+            vec!["element <t:box> cannot contain text (its type has element-only content)"]
+        );
+        // Elements matched by a processContents="skip" wildcard are not
+        // checked.
+        assert!(messages(&typed("<t:skip><t:date>nope</t:date></t:skip>"), &schema).is_empty());
+    }
+
+    #[test]
+    fn checks_the_expanded_name_of_the_root() {
+        let schema = parse_xsd(TYPED).unwrap();
+        assert!(validate_document("<t:root xmlns:t=\"urn:typed\"/>", &schema).is_empty());
+        assert!(validate_document("<root xmlns=\"urn:typed\"/>", &schema).is_empty());
+        assert_eq!(
+            messages("<t:root xmlns:t=\"urn:other\"/>", &schema),
+            vec!["root element <t:root> not declared in the XSD schema"]
+        );
     }
 
     #[test]
@@ -2584,7 +3017,7 @@ mod tests {
         assert!(
             validate_document("<value>nope</value>", &schema)[0]
                 .message
-                .contains("union")
+                .contains("not valid for any member type of Value (xs:integer, xs:boolean)")
         );
     }
 
@@ -2602,9 +3035,14 @@ mod tests {
 
         assert_eq!(schema.restrictions["Amount"].total_digits, Some(4));
         assert!(
-            validate_document("<amount>12.345</amount>", &schema)
+            validate_document("<amount>1.234</amount>", &schema)
                 .iter()
                 .any(|diagnostic| diagnostic.message.contains("fractionDigits"))
+        );
+        assert!(
+            validate_document("<amount>12.345</amount>", &schema)
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("totalDigits"))
         );
         assert!(validate_document("<amount>123.4</amount>", &schema).is_empty());
     }
@@ -2628,12 +3066,12 @@ mod tests {
         assert!(
             validate_document("<score>0</score>", &schema)[0]
                 .message
-                .contains("minimum inclusive")
+                .contains("'0' must be at least 1 (minInclusive of Score)")
         );
         assert!(
             validate_document("<score>10</score>", &schema)[0]
                 .message
-                .contains("maximum exclusive")
+                .contains("maxExclusive")
         );
         assert!(validate_document("<score>5</score>", &schema).is_empty());
     }
@@ -2654,7 +3092,7 @@ mod tests {
         assert!(
             validate_document("<code>AB</code>", &schema)[0]
                 .message
-                .contains("incorrect length")
+                .contains("requires exactly 3 (length)")
         );
         assert!(validate_document("<code>ABC</code>", &schema).is_empty());
     }
@@ -2697,7 +3135,7 @@ mod tests {
         assert!(
             validate_document("<code>x</code>", &schema)
                 .iter()
-                .any(|diagnostic| diagnostic.message.contains("too short"))
+                .any(|diagnostic| diagnostic.message.contains("minLength"))
         );
     }
 
