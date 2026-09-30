@@ -23,6 +23,7 @@ All notable changes to this project are documented in this file. The format is b
 - DTD support: internal and external subsets, entity checks with expansion limits, validation, completion, hover, go to definition, quick fixes, and a DTD language for `.dtd`/`.ent` files (new `dtd-core` crate) (#35).
 - Completion templates for `<?xml ...?>`, `<?xml-model ...?>` and `<?xml-stylesheet ...?>` (#17).
 - Completion query characters (`<`, `/`, `>`, space, `=`, `"`, `?`) so Zed keeps completions open while typing XML (#19).
+- Conformance testing: about 200 specification cases (XML 1.0, Namespaces, RFC 7303, XSD 1.0), 73 real-world documents, the roxmltree and libxml2 corpora, the W3C XML and XSD conformance suites and the libxml2 schema tests (fetched by `scripts/fetch-test-suites.sh`), with baselines of known failures, a `Conformance suites` CI job, and an LSP smoke test over every fixture (new `xml-conformance` crate) (#38).
 - `CONTRIBUTING.md`, `CHANGELOG.md` and `AGENTS.md`; the README now focuses on users (installation, configuration, troubleshooting).
 
 ### Changed
