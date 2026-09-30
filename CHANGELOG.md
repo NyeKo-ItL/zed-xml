@@ -33,6 +33,7 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Fixed
 
+- Downloaded `xml-lsp` binaries are cached under a versioned path, so an outdated or locked binary from a previous extension version cannot be reused.
 - The cached `xml-lsp` binary is reused when its version matches, instead of being downloaded again on every start (#16).
 - Formatting keeps explicit empty elements (`<tag></tag>`) as written (#17).
 - Incremental document synchronization handles full replacements and out-of-range edits (#18).
