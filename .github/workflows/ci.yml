@@ -7,6 +7,11 @@ on:
     tags:
       - "v*"
 
+# Least privilege by default; the jobs that write (version sync, release)
+# declare their own permissions.
+permissions:
+  contents: read
+
 concurrency:
   # A new push to a pull request cancels its previous checks; the release
   # events (tag push, merged version-sync pull request) get their own group.

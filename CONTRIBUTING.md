@@ -112,6 +112,7 @@ Every pull request runs these jobs of `.github/workflows/ci.yml`; all must pass:
 | Dependencies (cargo-deny) | `cargo deny check` with [`deny.toml`](deny.toml): licences compatible with MIT, RustSec advisories (vulnerable, unmaintained, unsound or yanked crates), wildcard versions, and crates.io as the only source. Duplicate versions are reported as warnings. |
 | Coverage | `cargo llvm-cov` over the workspace; the summary is written to the job summary and the `coverage` artifact holds `lcov.info` and an HTML report (`html/index.html`). No external service is involved. |
 | Conformance suites | The external suites and the fixture smoke test (below). |
+| CodeQL (`codeql.yml`) | Code scanning of the Rust code and of the workflows on pull requests, `main` and weekly, with `.github/codeql/codeql-config.yml` (test files excluded). It replaces GitHub's default setup, which must stay disabled: both cannot upload results for the same repository. |
 
 The Clippy toolchain is pinned so that lints introduced by a new stable Rust release never break an unrelated pull request. To move to a newer release, in a dedicated `ci:` pull request: install it (`rustup toolchain install 1.NN -c clippy -t wasm32-wasip2`), run `cargo +1.NN clippy --workspace --all-targets -- -D warnings` and `cargo +1.NN clippy -p zed-xml --target wasm32-wasip2 -- -D warnings`, fix the new warnings (keeping code within the MSRV), and update `CLIPPY_TOOLCHAIN`. Locally, `cargo clippy` with your own toolchain is fine; when it reports a lint CI does not, fix it too.
 
@@ -127,7 +128,7 @@ cargo bench -p xml-lsp --bench server -- hover   # one group or benchmark
 
 Select benchmarks with `--bench <name>`: `--benches` also runs the library test harnesses, which reject criterion's options.
 
-Tests live next to the code (`#[cfg(test)] mod tests`). Language-server features get unit tests in their module plus an LSP round-trip test in `crates/xml-lsp/src/main.rs`; see [AGENTS.md](AGENTS.md#testing) for the patterns.
+Tests live next to the code (`#[cfg(test)] mod tests`; modules that use `std::env::temp_dir()` are in a `tests.rs` file, which CodeQL ignores). Language-server features get unit tests in their module plus an LSP round-trip test in `crates/xml-lsp/src/tests.rs`; see [AGENTS.md](AGENTS.md#testing) for the patterns.
 
 ## Pull requests
 
