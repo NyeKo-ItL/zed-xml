@@ -11,7 +11,7 @@ Guidance for coding agents (and humans) working in this repository. It complemen
 
 `zed-xml` is a [Zed](https://zed.dev) extension for XML (XML, XSD, XSLT, SVG, WSDL, plist, XJB, Android XML) and DTD files. It has two deliverables built from one Cargo workspace:
 
-1. **The extension** (`extension.toml`, `src/lib.rs`, `languages/`): a `wasm32-wasip2` module that declares the tree-sitter grammars (`xml` and `dtd` from `tree-sitter-grammars/tree-sitter-xml`), the Zed languages and their queries, and starts the language server. It resolves the server from `XML_LSP_PATH`, else a cached binary whose `--version` matches the extension version and whose SHA-256 matches the recorded checksum, else the matching GitHub release asset, verified against its published `.sha256` (dependency-free SHA-256 in `src/sha256.rs`). Supported platforms are the `SUPPORTED_PLATFORMS` table of `src/lib.rs`, kept in sync with the release matrix of `ci.yml` by a unit test. It forwards `lsp.xml-lsp.settings` as `initializationOptions` and as the answer to `workspace/configuration`.
+1. **The extension** (`extension.toml`, `src/lib.rs`, `languages/`): a `wasm32-wasip2` module that declares the tree-sitter grammars (`xml` and `dtd` from `tree-sitter-grammars/tree-sitter-xml`), the Zed languages and their queries, and starts the language server. It resolves the server from the `lsp.xml-lsp.binary.path` setting, else `XML_LSP_PATH`, else a cached binary whose `--version` matches the extension version and whose SHA-256 matches the recorded checksum, else the matching GitHub release asset, verified against its published `.sha256` (dependency-free SHA-256 in `src/sha256.rs`). Supported platforms are the `SUPPORTED_PLATFORMS` table of `src/lib.rs`, kept in sync with the release matrix of `ci.yml` by a unit test. It forwards `lsp.xml-lsp.settings` as `initializationOptions` and as the answer to `workspace/configuration`.
 2. **The language server** `xml-lsp` (`crates/xml-lsp`): a native Rust LSP server over stdio (`lsp-server` + `serde_json`, JSON values rather than `lsp-types`), serving the languages `XML` and `DTD`. Behaviour is modelled on LemMinX (the Red Hat XML language server used by VS Code/Eclipse), with IntelliJ as a second reference.
 
 ## Architecture
@@ -117,7 +117,7 @@ CI denies every clippy warning (with the toolchain pinned by `CLIPPY_TOOLCHAIN` 
 
 ## Versioning and release
 
-All crates and `extension.toml` share one version; the extension downloads the `xml-lsp` release with exactly its own version. Never bump versions by hand in a feature pull request: pushing a `vX.Y.Z` tag lets CI open the version-sync pull request, and merging it builds and publishes the binaries (details in [CONTRIBUTING.md](CONTRIBUTING.md#release-process)). A new workspace crate must be added to the version-sync list in `.github/workflows/ci.yml`.
+All crates and `extension.toml` share one version; the extension downloads the `xml-lsp` release with exactly its own version. Never bump versions by hand in a feature pull request: pushing a `vX.Y.Z` tag lets CI open the version-sync pull request, and merging it builds and publishes the binaries (details in [CONTRIBUTING.md](CONTRIBUTING.md#release-process)). A new workspace crate must be added to the version-sync list in `.github/workflows/ci.yml`. The versioned `process:exec` and `download_file` capabilities of `extension.toml` are updated by that job and checked by the unit tests of `src/lib.rs`.
 
 ## Documentation rules
 

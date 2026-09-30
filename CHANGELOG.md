@@ -28,6 +28,8 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Changed
 
+- `lsp.xml-lsp.binary.path`, `binary.arguments` and `binary.env` Zed settings, taking precedence over `XML_LSP_PATH`, like other Zed language server extensions.
+- `extension.toml` declares a `download_file` capability scoped to this repository's release of the extension version (kept in step by the version-sync job, checked by unit tests).
 - Release binaries for Linux aarch64, static musl Linux (x86_64 and aarch64; the extension now downloads these on Linux, so it no longer depends on the distribution's glibc), macOS x86_64 and Windows arm64, in addition to Linux x86_64 (glibc), macOS arm64 and Windows x86_64.
 - SHA-256 checksums for every release asset (`<asset>.sha256` and `SHA256SUMS`); the extension verifies the downloaded binary (and the cached one) before starting it, with `XML_LSP_DOWNLOAD_SHA256` for custom download URLs.
 - A clear error listing the supported platforms when no prebuilt binary exists for the current one.
