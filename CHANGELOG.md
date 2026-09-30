@@ -47,6 +47,7 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Fixed
 
+- Formatting no longer drops the whitespace between inline elements of mixed content (`<code>jar</code> <code>war</code>` lost its space, changing the text).
 - XSD content models are now checked with an automaton built from the component model (sequences, choices, `xs:all`, group references, wildcards with their namespace constraint, occurrence ranges on groups, extension, substitution groups) instead of name-keyed lists: valid documents are no longer rejected when several elements share a name (`<xs:element ref="comment" minOccurs="0"/>`), a `choice` accepts exactly one alternative, nested groups and extensions are honoured, abstract elements are refused, and empty elements (`<a/>`) are checked for missing children. Misplaced and surplus children are reported on the child (`unexpectedOrder`, `tooManyElements`, with the expected names), missing ones on the parent (`missingElement`).
 - Prefixed or default-namespace root elements (`<t:root xmlns:t="urn:x">`) are matched by expanded name instead of being reported as undeclared.
 - Deeply nested documents (100 000 levels) no longer overflow the stack in selection ranges, and no longer make namespace resolution, the tag tree, range formatting, document symbols, references, code actions and diagnostics quadratic; formatting a document whose indentation would take gigabytes is refused; XSD schemas nested more than 256 levels are reported instead of being parsed.
