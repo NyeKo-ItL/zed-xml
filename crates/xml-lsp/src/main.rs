@@ -15,6 +15,8 @@ mod formatting;
 mod highlight;
 mod hover;
 mod identity;
+#[cfg(test)]
+mod latency;
 mod linked_editing;
 mod links;
 mod navigation;

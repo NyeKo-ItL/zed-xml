@@ -198,6 +198,9 @@ jobs:
           -p xsd-core --bench xsd_core
           -p xml-lsp --bench server
           -- --quick --noplot
+      # Latency budgets of the requests on a 1 MB document (generous: they
+      # only catch algorithmic regressions).
+      - run: cargo test --release -p xml-lsp latency -- --nocapture
 
   prepare_release_pr:
     name: Prepare release version PR
