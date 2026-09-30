@@ -263,7 +263,15 @@ pub fn load_schema_set(path: &Path) -> Result<XsdSchema, String> {
             }
         }
     }
-    Ok(merge_schemas(schemas))
+    schema_set(merge_schemas(schemas))
+}
+
+/// The merged schema set, or its component errors (an invalid schema).
+pub fn schema_set(schema: XsdSchema) -> Result<XsdSchema, String> {
+    match schema.problems.first() {
+        Some(problem) => Err(format!("invalid schema: {problem}")),
+        None => Ok(schema),
+    }
 }
 
 /// Validates `instance` against the schema set rooted at `schema_path`.

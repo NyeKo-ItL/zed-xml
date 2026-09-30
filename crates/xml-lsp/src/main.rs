@@ -10,6 +10,7 @@ mod folding;
 mod formatting;
 mod highlight;
 mod hover;
+mod identity;
 mod linked_editing;
 mod links;
 mod rename;
@@ -33,8 +34,8 @@ use xml_core::format_xml;
 use xml_core::{XmlDiagnostic, auto_close_tag, complete_xml, parse_xml};
 use xsd_core::{
     LocatedXsdDiagnostic, XsdDiagnosticKind, XsdSchema, complete_attribute_values,
-    complete_attributes, complete_elements, is_remote_location, merge_schemas, parse_xsd,
-    percent_decode, resolve_schema_dependencies_with, resolve_schema_locations_with,
+    complete_attributes, complete_elements, identity_links, is_remote_location, merge_schemas,
+    parse_xsd, percent_decode, resolve_schema_dependencies_with, resolve_schema_locations_with,
     validate_document_located,
 };
 
@@ -766,6 +767,15 @@ impl XmlLanguageServer {
         let line = position.get("line")?.as_u64()? as usize;
         let character = position.get("character")?.as_u64()? as usize;
         let offset = offset_at(&source, line, character);
+        let links = self.identity_links(uri, &source);
+        if identity::applies(&links, offset) {
+            let include_declaration = params
+                .get("context")
+                .and_then(|context| context.get("includeDeclaration"))
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            return identity::references(&links, uri, &source, offset, include_declaration);
+        }
         let name = element_name_at(&source, offset)?;
         let mut locations = Vec::new();
         if let Some((path, schema_source, declaration_offset)) =
@@ -810,6 +820,10 @@ impl XmlLanguageServer {
         ) {
             return Some(links);
         }
+        let identity_links = self.identity_links(uri, &source);
+        if let Some(location) = identity::definition(&identity_links, uri, &source, offset) {
+            return Some(location);
+        }
         if let Some(grammar) = self.dtd_grammar(uri, &source)
             && let Some(location) = dtd::definition(&grammar, uri, &source, offset)
         {
@@ -833,6 +847,26 @@ impl XmlLanguageServer {
                 "end": position_at(&source, declaration + name.len() + 1),
             },
         }]))
+    }
+
+    /// ID/IDREF (XSD and DTD) and key/keyref links of the document.
+    fn identity_links(&mut self, uri: &str, source: &str) -> identity::Links {
+        let mut links = Vec::new();
+        if let Some(schema) = self.load_schema(uri, source) {
+            links.extend(
+                identity_links(source, &schema)
+                    .into_iter()
+                    .map(|link| (link.reference, link.target)),
+            );
+        }
+        if let Some(grammar) = self.dtd_grammar(uri, source) {
+            for link in dtd_core::id_links(source, &grammar.dtd) {
+                if !links.contains(&link) {
+                    links.push(link);
+                }
+            }
+        }
+        links
     }
 
     fn xsd_definition(
@@ -1300,6 +1334,15 @@ fn load_schema_graph(
             cache.insert(path.clone(), (modified, schema.clone()));
             schema
         };
+        // Component errors: the schema is invalid but still used.
+        for problem in &schema.problems {
+            errors.push(SchemaLoadError {
+                path: path.clone(),
+                message: format!("invalid XSD schema: {problem}"),
+                offset: 0,
+                remote: false,
+            });
+        }
         if let Some(namespace) = &schema.target_namespace {
             let paths = index.entry(namespace.clone()).or_default();
             if !paths.contains(&path) {
@@ -2785,6 +2828,144 @@ mod tests {
         );
 
         assert_eq!(client.request(9, "shutdown", json!(null)), Value::Null);
+        client.notify(EXIT_METHOD, json!(null));
+        server_thread.join().expect("server thread should stop");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn navigates_ids_and_keys_and_reports_identity_problems() {
+        let directory =
+            std::env::temp_dir().join(format!("xml-lsp-identity {}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("directory should be created");
+        std::fs::write(
+            directory.join("library.xsd"),
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <xs:element name="library">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="book" maxOccurs="unbounded">
+          <xs:complexType>
+            <xs:attribute name="id" type="xs:ID"/>
+            <xs:attribute name="isbn" type="xs:string"/>
+          </xs:complexType>
+        </xs:element>
+        <xs:element name="loan" minOccurs="0" maxOccurs="unbounded">
+          <xs:complexType>
+            <xs:attribute name="book" type="xs:IDREF"/>
+            <xs:attribute name="isbn" type="xs:string"/>
+          </xs:complexType>
+        </xs:element>
+      </xs:sequence>
+    </xs:complexType>
+    <xs:key name="isbn">
+      <xs:selector xpath="book"/>
+      <xs:field xpath="@isbn"/>
+    </xs:key>
+    <xs:keyref name="loanIsbn" refer="isbn">
+      <xs:selector xpath="loan"/>
+      <xs:field xpath="@isbn"/>
+    </xs:keyref>
+  </xs:element>
+</xs:schema>"#,
+        )
+        .expect("schema should be written");
+        let uri = path_to_uri(&directory.join("library.xml"));
+
+        let (server, connection) = Connection::memory();
+        let server_thread = thread::spawn(|| run(server).expect("server loop should succeed"));
+        let client = TestClient {
+            connection,
+            diagnostics: Default::default(),
+        };
+        client.request(1, INITIALIZE_METHOD, json!({"capabilities": {}}));
+        client.notify("initialized", json!({}));
+
+        // Line 1: the book "é1" with the ISBN "42"; line 2: a duplicate
+        // ISBN; line 3: two loans.
+        let source = "<library xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:noNamespaceSchemaLocation=\"library.xsd\">\r\n<book id=\"é1\" isbn=\"42\"/>\r\n<book id=\"b2\" isbn=\"42\"/>\r\n<loan book=\"é1\" isbn=\"42\"/><loan book=\"é1\" isbn=\"7\"/>\r\n</library>";
+        client.notify(
+            DID_OPEN_METHOD,
+            json!({"textDocument": {"uri": uri, "text": source}}),
+        );
+        let published = client.take_diagnostics(2);
+        let rules = published.last().expect("diagnostics should be published")["diagnostics"]
+            .as_array()
+            .expect("diagnostics should be an array")
+            .iter()
+            .map(|diagnostic| {
+                (
+                    diagnostic["data"]["rule"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
+                    diagnostic["range"]["start"].clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rules,
+            [
+                (
+                    "duplicateKey".to_owned(),
+                    json!({"line": 2, "character": 20})
+                ),
+                (
+                    "unknownKeyref".to_owned(),
+                    json!({"line": 3, "character": 49})
+                ),
+            ]
+        );
+
+        // From the IDREF of the first loan to the ID of the book.
+        let definition = client.request(
+            3,
+            "textDocument/definition",
+            json!({"textDocument": {"uri": uri}, "position": {"line": 3, "character": 12}}),
+        );
+        assert_eq!(
+            definition,
+            json!([{"uri": uri, "range": {
+                "start": {"line": 1, "character": 10},
+                "end": {"line": 1, "character": 12},
+            }}])
+        );
+        // From the keyref value to the key value.
+        let definition = client.request(
+            4,
+            "textDocument/definition",
+            json!({"textDocument": {"uri": uri}, "position": {"line": 3, "character": 23}}),
+        );
+        assert_eq!(
+            definition[0]["range"]["start"],
+            json!({"line": 1, "character": 20})
+        );
+        // References of the ID: both loans.
+        let references = client.request(
+            5,
+            "textDocument/references",
+            json!({
+                "textDocument": {"uri": uri},
+                "position": {"line": 1, "character": 11},
+                "context": {"includeDeclaration": false},
+            }),
+        );
+        let starts = references
+            .as_array()
+            .expect("references should be an array")
+            .iter()
+            .map(|location| location["range"]["start"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            starts,
+            [
+                json!({"line": 3, "character": 12}),
+                json!({"line": 3, "character": 39}),
+            ]
+        );
+
+        assert_eq!(client.request(6, "shutdown", json!(null)), Value::Null);
         client.notify(EXIT_METHOD, json!(null));
         server_thread.join().expect("server thread should stop");
         let _ = std::fs::remove_dir_all(&directory);

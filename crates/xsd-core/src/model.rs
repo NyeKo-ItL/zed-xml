@@ -13,9 +13,16 @@
 //! nested markup (XHTML...) is reduced to its text and whitespace is
 //! grouped into paragraphs. `xs:appinfo` is ignored.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use quick_xml::{Reader, events::Event};
+use xml_core::names::is_ncname;
+
+use crate::identity::{XsdIdentityConstraint, XsdIdentityKind, parse_xpath};
 
 /// XML Schema namespace.
 pub const XSD_NAMESPACE: &str = "http://www.w3.org/2001/XMLSchema";
@@ -78,6 +85,8 @@ pub struct XsdElementDecl {
     pub substitution_groups: Vec<XsdQName>,
     pub global: bool,
     pub documentation: Option<String>,
+    /// `xs:unique`, `xs:key` and `xs:keyref` of the declaration.
+    pub identity_constraints: Vec<XsdIdentityConstraint>,
 }
 
 /// Attribute declaration, global or local (possibly a `ref`).
@@ -253,6 +262,11 @@ pub struct XsdModel {
     pub types: Vec<XsdTypeDef>,
     pub groups: Vec<XsdGroupDef>,
     pub attribute_groups: Vec<XsdAttributeGroupDef>,
+    /// Every identity constraint of the document (global and local
+    /// declarations).
+    pub identity_constraints: Vec<XsdIdentityConstraint>,
+    /// Errors of the components (the schema is invalid but usable).
+    pub problems: Vec<String>,
 }
 
 /// Parses an XSD document into a model of documented components.
@@ -272,6 +286,8 @@ pub fn parse_xsd_model(source: &str) -> Result<XsdModel, String> {
         attribute_form_qualified: root.attribute("attributeFormDefault").as_deref()
             == Some("qualified"),
         target_namespace,
+        identity_constraints: RefCell::default(),
+        problems: RefCell::default(),
     };
     let mut model = XsdModel {
         target_namespace: context.target_namespace.clone(),
@@ -281,6 +297,18 @@ pub fn parse_xsd_model(source: &str) -> Result<XsdModel, String> {
         ..XsdModel::default()
     };
     context.top_level(&root, &mut model);
+    check_components(&root, &mut context.problems.borrow_mut());
+    model.identity_constraints = context.identity_constraints.take();
+    let mut names = HashSet::new();
+    for constraint in &model.identity_constraints {
+        if !names.insert(constraint.name.as_str()) {
+            context.problems.borrow_mut().push(format!(
+                "the identity constraint name '{}' is declared twice",
+                constraint.name
+            ));
+        }
+    }
+    model.problems = context.problems.take();
     Ok(model)
 }
 
@@ -470,6 +498,73 @@ struct Context<'a> {
     target_namespace: Option<String>,
     element_form_qualified: bool,
     attribute_form_qualified: bool,
+    identity_constraints: RefCell<Vec<XsdIdentityConstraint>>,
+    problems: RefCell<Vec<String>>,
+}
+
+/// Checks over the whole schema document: `id` attributes of the
+/// components are NCNames unique in the document, identity constraints are
+/// only declared in elements, with only their own attributes (annotation
+/// contents are not components).
+fn check_components(root: &Node, problems: &mut Vec<String>) {
+    let mut seen = HashSet::new();
+    let mut stack = vec![(root, "")];
+    while let Some((node, parent)) = stack.pop() {
+        if !is_xsd(node, &node.local) || node.local == "annotation" {
+            continue;
+        }
+        if let Some(id) = node.attribute("id") {
+            let id = id.trim().to_owned();
+            if !is_ncname(&id) {
+                problems.push(format!("'{id}' is not a valid id of <xs:{}>", node.local));
+            } else if !seen.insert(id.clone()) {
+                problems.push(format!("the id '{id}' is used twice in the schema"));
+            }
+        }
+        let allowed: &[&str] = match node.local.as_str() {
+            "unique" | "key" | "keyref" => {
+                if parent != "element" {
+                    problems.push(format!(
+                        "xs:{} is only allowed in an xs:element declaration, not in xs:{parent}",
+                        node.local
+                    ));
+                }
+                if node.local == "keyref" {
+                    &["id", "name", "refer"]
+                } else {
+                    &["id", "name"]
+                }
+            }
+            "selector" | "field" => {
+                if !matches!(parent, "unique" | "key" | "keyref") {
+                    problems.push(format!(
+                        "xs:{} is only allowed in xs:unique, xs:key or xs:keyref",
+                        node.local
+                    ));
+                }
+                &["id", "xpath"]
+            }
+            _ => &[],
+        };
+        if !allowed.is_empty() {
+            for (key, _) in &node.attributes {
+                if !key.contains(':') && key != "xmlns" && !allowed.contains(&key.as_str()) {
+                    problems.push(format!(
+                        "the attribute '{key}' is not allowed on xs:{}",
+                        node.local
+                    ));
+                }
+            }
+        }
+        let local = node.local.as_str();
+        stack.extend(
+            node.elements()
+                .map(|child| (child, local))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev(),
+        );
+    }
 }
 
 impl Context<'_> {
@@ -604,7 +699,127 @@ impl Context<'_> {
             substitution_groups: self.qname_list(node, "substitutionGroup"),
             global,
             documentation: documentation(node),
+            identity_constraints: self.identity_constraints(node),
         })
+    }
+
+    /// Identity constraints of an element declaration; invalid ones are
+    /// reported in `problems` and left out.
+    fn identity_constraints(&self, node: &Node) -> Vec<XsdIdentityConstraint> {
+        let mut constraints = Vec::new();
+        let mut after_constraint = false;
+        for child in node.elements() {
+            let kind = match child.local.as_str() {
+                "unique" => XsdIdentityKind::Unique,
+                "key" => XsdIdentityKind::Key,
+                "keyref" => XsdIdentityKind::KeyRef,
+                "simpleType" | "complexType" if is_xsd(child, &child.local) => {
+                    if after_constraint {
+                        self.problems.borrow_mut().push(format!(
+                            "in the declaration of '{}', xs:{} must come before the identity constraints",
+                            node.attribute("name").unwrap_or_default(),
+                            child.local
+                        ));
+                    }
+                    continue;
+                }
+                _ => continue,
+            };
+            if !is_xsd(child, &child.local) {
+                continue;
+            }
+            after_constraint = true;
+            match self.identity_constraint(child, kind) {
+                Ok(constraint) => {
+                    self.identity_constraints
+                        .borrow_mut()
+                        .push(constraint.clone());
+                    constraints.push(constraint);
+                }
+                Err(error) => self.problems.borrow_mut().push(format!(
+                    "xs:{} '{}': {error}",
+                    kind.element_name(),
+                    child.attribute("name").unwrap_or_default()
+                )),
+            }
+        }
+        constraints
+    }
+
+    fn identity_constraint(
+        &self,
+        node: &Node,
+        kind: XsdIdentityKind,
+    ) -> Result<XsdIdentityConstraint, String> {
+        let name = node
+            .attribute("name")
+            .ok_or_else(|| "the name attribute is missing".to_owned())?
+            .trim()
+            .to_owned();
+        if !is_ncname(&name) {
+            return Err(format!("'{name}' is not a valid name (NCName)"));
+        }
+        let refer = match kind {
+            XsdIdentityKind::KeyRef => Some(
+                self.qname_attribute(node, "refer")
+                    .ok_or_else(|| "the refer attribute is missing".to_owned())?,
+            ),
+            _ => None,
+        };
+        let mut annotation = false;
+        let mut selector = None;
+        let mut fields = Vec::new();
+        for child in node.elements() {
+            let local = child.local.as_str();
+            if !is_xsd(child, local) {
+                return Err(format!("unexpected element <{local}>"));
+            }
+            match local {
+                "annotation" if !annotation && selector.is_none() => annotation = true,
+                "selector" if selector.is_none() => selector = Some(self.xpath(child, false)?),
+                "field" if selector.is_some() => fields.push(self.xpath(child, true)?),
+                _ => return Err(format!("unexpected xs:{local}")),
+            }
+        }
+        let selector = selector.ok_or_else(|| "xs:selector is missing".to_owned())?;
+        if fields.is_empty() {
+            return Err("xs:field is missing".to_owned());
+        }
+        Ok(XsdIdentityConstraint {
+            kind,
+            name,
+            namespace: self.target_namespace.clone(),
+            refer,
+            selector,
+            fields,
+        })
+    }
+
+    /// `xpath` of an `xs:selector` or `xs:field`.
+    fn xpath(&self, node: &Node, field: bool) -> Result<crate::identity::XsdXPath, String> {
+        let mut annotation = false;
+        for child in node.elements() {
+            if is_xsd(child, "annotation") && !annotation {
+                annotation = true;
+            } else {
+                return Err(format!("unexpected <{}> in xs:{}", child.local, node.local));
+            }
+        }
+        let expression = node
+            .attribute("xpath")
+            .ok_or_else(|| format!("the xpath attribute of xs:{} is missing", node.local))?;
+        let scope = &self.scopes[node.scope];
+        let resolve = |prefix: &str| {
+            if prefix == "xml" {
+                return Some(XML_NAMESPACE.to_owned());
+            }
+            scope
+                .get(prefix)
+                .filter(|namespace| !namespace.is_empty())
+                .cloned()
+        };
+        parse_xpath(&expression, field, &resolve)
+            .map_err(|error| format!("invalid xpath '{expression}': {error}"))
     }
 
     fn attribute(&self, node: &Node, global: bool) -> Option<XsdAttributeDecl> {

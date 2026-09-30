@@ -40,7 +40,7 @@ pub use parser::{
 };
 pub use validate::{
     EntityReference, InstanceProblem, InstanceProblemKind, check_entity_references,
-    entity_reference_at, general_entity_references, validate_instance,
+    entity_reference_at, general_entity_references, id_links, validate_instance,
 };
 pub use xml_core::names::{is_name, is_name_char, is_nmtoken};
 

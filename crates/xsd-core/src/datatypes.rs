@@ -440,6 +440,42 @@ impl Value {
         }
     }
 
+    /// Grouping key of the value: values that [`Value::equals`] considers
+    /// equal always have the same key (values with the same key still have
+    /// to be compared). Used to find duplicates in identity constraints.
+    pub fn identity_key(&self) -> String {
+        match self {
+            Self::String(value) => format!("s{value}"),
+            Self::Boolean(value) => format!("b{value}"),
+            Self::Decimal(value) => {
+                let zero = value.integer.is_empty() && value.fraction.is_empty();
+                let sign = if value.negative && !zero { "-" } else { "" };
+                format!("n{sign}{}.{}", value.integer, value.fraction)
+            }
+            Self::Float(value) if value.is_nan() => "fNaN".to_owned(),
+            Self::Float(value) if *value == 0.0 => "f0".to_owned(),
+            Self::Float(value) => format!("f{}", value.to_bits()),
+            Self::Duration(_) => "d".to_owned(),
+            Self::Temporal(_) => "t".to_owned(),
+            Self::Binary(octets) => {
+                let mut key = String::from("x");
+                for octet in octets {
+                    key.push_str(&format!("{octet:02x}"));
+                }
+                key
+            }
+            Self::QName { local, .. } => format!("q{local}"),
+            Self::List(items) => {
+                let mut key = String::from("l");
+                for item in items {
+                    key.push_str(&item.identity_key());
+                    key.push('\u{1}');
+                }
+                key
+            }
+        }
+    }
+
     /// Order in the value space (`None` when the values are incomparable).
     pub fn compare(&self, other: &Value) -> Option<Ordering> {
         match (self, other) {
@@ -1294,7 +1330,39 @@ impl ValueError {
     }
 }
 
+/// Role of a simple type in the `xs:ID`/`xs:IDREF` checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdKind {
+    /// Derived from `xs:ID`: unique in the document.
+    Id,
+    /// Derived from `xs:IDREF`: names an `xs:ID` of the document.
+    IdRef,
+    /// Derived from `xs:IDREFS`, or a list of `xs:IDREF`.
+    IdRefs,
+}
+
 impl<'a> SimpleType<'a> {
+    /// Whether the values are IDs or ID references.
+    pub fn id_kind(&self) -> Option<IdKind> {
+        match &self.variety {
+            Variety::Atomic(builtin) => {
+                if builtin.derives_from(BuiltinType::IdRefs) {
+                    Some(IdKind::IdRefs)
+                } else if builtin.derives_from(BuiltinType::IdRef) {
+                    Some(IdKind::IdRef)
+                } else if builtin.derives_from(BuiltinType::Id) {
+                    Some(IdKind::Id)
+                } else {
+                    None
+                }
+            }
+            Variety::List(item) => {
+                (item.id_kind() == Some(IdKind::IdRef)).then_some(IdKind::IdRefs)
+            }
+            Variety::Union(_) => None,
+        }
+    }
+
     /// Built-in type. The built-in list types (`NMTOKENS`, `IDREFS`,
     /// `ENTITIES`) stay atomic here: [`BuiltinType::parse`] splits them into
     /// a [`Value::List`] of at least one item.
