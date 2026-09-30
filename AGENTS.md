@@ -34,7 +34,7 @@ Keep the dependency direction: core crates never depend on `xml-lsp` or on LSP J
 
 - `xml_core::tags`: `scan_tags` (start/end/self-closing tags with name ranges, tolerant), `scan_attributes`, `scan_markup` (comments, CDATA, processing instructions, declarations), `XmlTagTree` (elements with parent/depth, `tag_pair_at`, `innermost_element_at`, `ancestors`, orphan end tags), `qualified_name_parts`, `namespace_declaration`, `resolve_namespace`, `XML_NAMESPACE`.
 - `xml_core::names`: `is_name`, `is_nmtoken`, `is_ncname`, `is_qname`, `is_name_start_char`, `is_name_char`.
-- `xml_core::wellformed`: `check_well_formedness` returning every problem with a stable `XmlProblemKind::id()`.
+- `xml_core::wellformed`: `check_well_formedness` returning every problem with a stable `XmlProblemKind::id()`. `xml_core::strict`: the XML 1.0 grammar check (`check`, run by `parse_xml` when the tolerant checks find nothing) and `mask_doctype` (use it before handing a source to `quick-xml`, which cannot lex a DTD).
 - `xml_core` formatter (`format.rs`, re-exported): `FormatOptions`, `format_xml_with`, `format_xml_range`, `LineEnding`, `SplitAttributes`, `EmptyElements`.
 - `xml_core::diff::diff_text`: turns a rewritten text into minimal `TextChange`s; use it for any edit that rewrites a document.
 - `xml_core::text`: `decode_bytes` (byte order marks, UTF-16, declared ISO-8859-1), `strip_bom`; `xml_core::resource::read_text_file` decodes through it.

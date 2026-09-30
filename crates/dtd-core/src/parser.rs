@@ -227,7 +227,11 @@ pub fn load_document_dtd(
     }
     let source = builder.add_document(document, path);
     if let Some(subset) = &doctype.internal_subset {
+        builder.dtd.optional_declarations = has_parameter_reference(&document[subset.clone()]);
         builder.parse_internal_subset(source, subset.clone());
+    }
+    if doctype.system_id.is_some() {
+        builder.dtd.optional_declarations = true;
     }
     if let Some((system, range)) = &doctype.system_id {
         builder.parse_external_subset(
@@ -243,6 +247,14 @@ pub fn load_document_dtd(
         );
     }
     Some((doctype, builder.finish()))
+}
+
+/// Whether `text` contains a parameter entity reference (`%name;`).
+fn has_parameter_reference(text: &str) -> bool {
+    text.match_indices('%').any(|(index, _)| {
+        let rest = &text[index + 1..];
+        rest.find(';').is_some_and(|end| is_name(&rest[..end]))
+    })
 }
 
 /// Decodes the content of a character reference (`#10`, `#x1F`).

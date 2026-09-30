@@ -117,6 +117,11 @@ pub struct XmlProblem {
 /// Reports the well-formedness problems of the source, in document
 /// order.
 pub fn check_well_formedness(source: &str) -> Vec<XmlProblem> {
+    // The DOCTYPE is lexed by the strict check and the DTD parser: its
+    // literals and comments must not look like tags.
+    let dtd_may_declare_prefixes = dtd_may_declare_prefixes(source);
+    let masked = crate::strict::mask_doctype(source);
+    let source = masked.as_ref();
     let tags = scan_tags(source);
     let mut problems = Vec::new();
     check_tags(source, &tags, &mut problems);
@@ -124,7 +129,7 @@ pub fn check_well_formedness(source: &str) -> Vec<XmlProblem> {
         check_attributes(source, tag, &mut problems);
     }
     check_text(source, &tags, &mut problems);
-    check_namespaces(source, &tags, &mut problems);
+    check_namespaces(source, &tags, dtd_may_declare_prefixes, &mut problems);
     problems.sort_by_key(|problem| (problem.range.start, problem.range.end));
     problems
 }
@@ -334,19 +339,24 @@ fn starts_with_reference(text: &str) -> bool {
 /// Namespace of the `xmlns` prefix, which cannot be bound or declared.
 const XMLNS_NAMESPACE: &str = "http://www.w3.org/2000/xmlns/";
 
+/// A DTD can declare default `xmlns:*` attributes that the document does not
+/// show: prefixes are then not checked.
+fn dtd_may_declare_prefixes(source: &str) -> bool {
+    source.find("<!DOCTYPE").is_some_and(|start| {
+        let doctype = &source[start..];
+        doctype[..doctype.find("]>").unwrap_or(doctype.len())].contains("xmlns:")
+    })
+}
+
 /// Checks the constraints of Namespaces in XML 1.0 on element and attribute
 /// names and on `xmlns` declarations, walking the tags once with a stack of
 /// the bindings in scope.
-fn check_namespaces(source: &str, tags: &[XmlTag], problems: &mut Vec<XmlProblem>) {
-    // A DTD can declare default `xmlns:*` attributes that the document does
-    // not show: prefixes are then not checked.
-    let dtd_may_declare_prefixes = source
-        .find("<!DOCTYPE")
-        .map(|start| {
-            let doctype = &source[start..];
-            &doctype[..doctype.find("]>").unwrap_or(doctype.len())]
-        })
-        .is_some_and(|doctype| doctype.contains("xmlns:"));
+fn check_namespaces(
+    source: &str,
+    tags: &[XmlTag],
+    dtd_may_declare_prefixes: bool,
+    problems: &mut Vec<XmlProblem>,
+) {
     // `prefix -> stack of namespaces` ("" is the default namespace).
     let mut bindings: HashMap<&str, Vec<&str>> = HashMap::new();
     let mut open: Vec<Vec<&str>> = Vec::new();

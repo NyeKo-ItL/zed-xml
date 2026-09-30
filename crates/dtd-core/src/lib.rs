@@ -379,6 +379,11 @@ pub struct Dtd {
     /// Declarations may be missing (external subset or external parameter
     /// entity not read).
     pub incomplete: bool,
+    /// The document has an external subset, or a parameter entity reference
+    /// in its internal subset: an undeclared general entity is then a
+    /// validity error, not a well-formedness error (XML 1.0, "Entity
+    /// Declared").
+    pub optional_declarations: bool,
     element_index: HashMap<String, usize>,
     attribute_index: HashMap<String, Vec<usize>>,
     general_index: HashMap<String, usize>,
