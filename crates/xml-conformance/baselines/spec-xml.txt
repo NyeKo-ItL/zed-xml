@@ -1,3 +1,0 @@
-# Known failures of the `spec-xml` suite, one case per line.
-# Regenerate with `BLESS=1 cargo test -p xml-conformance`.
-xml §2.1 [1] empty document

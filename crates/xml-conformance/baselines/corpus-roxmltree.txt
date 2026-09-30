@@ -1,5 +1,0 @@
-# Known failures of the `corpus-roxmltree` suite, one case per line.
-# Regenerate with `BLESS=1 cargo test -p xml-conformance`.
-entity_err_005.xml
-entity_err_006.xml
-entity_err_009.xml

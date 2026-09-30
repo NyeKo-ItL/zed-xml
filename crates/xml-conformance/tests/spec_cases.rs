@@ -925,7 +925,7 @@ fn run_well_formedness(name: &str, cases: &[(&str, &str, bool)]) {
         });
         run.record(*case, outcome);
     }
-    run.check_against_baseline();
+    run.check();
 }
 
 #[test]
@@ -947,7 +947,7 @@ fn xsd_datatype_cases() {
             validity_case(&body, &format!("<v>{value}</v>"), *valid),
         );
     }
-    run.check_against_baseline();
+    run.check();
 }
 
 #[test]
@@ -956,7 +956,7 @@ fn xsd_structure_cases() {
     for (case, body, instance, valid) in STRUCTURE_CASES {
         run.record(*case, validity_case(body, instance, *valid));
     }
-    run.check_against_baseline();
+    run.check();
 }
 
 fn validity_case(body: &str, instance: &str, valid: bool) -> Outcome {

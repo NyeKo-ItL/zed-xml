@@ -73,5 +73,5 @@ fn libxml2_schema_regression_tests() {
         });
         run.record(stem, outcome);
     }
-    run.check_against_baseline();
+    run.check();
 }

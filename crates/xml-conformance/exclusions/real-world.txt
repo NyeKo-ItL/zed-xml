@@ -1,0 +1,1 @@
+maven/commons-lang-pom.xml [valid against maven/maven-4.0.0.xsd]	true positive: the document uses a Maven extension attribute (combine.self) the published schema does not declare

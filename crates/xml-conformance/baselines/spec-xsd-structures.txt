@@ -1,2 +1,0 @@
-# Known failures of the `spec-xsd-structures` suite, one case per line.
-# Regenerate with `BLESS=1 cargo test -p xml-conformance`.

@@ -95,7 +95,7 @@ fn real_world_documents() {
         );
     }
 
-    run.check_against_baseline();
+    run.check();
 }
 
 fn check_document(path: &Path) -> Outcome {

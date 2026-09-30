@@ -49,7 +49,7 @@ fn w3c_xml_conformance_suite() {
         };
         run.record(id, outcome);
     }
-    run.check_against_baseline();
+    run.check();
 }
 
 fn base_of(node: roxmltree::Node<'_, '_>, root: &Path) -> std::path::PathBuf {

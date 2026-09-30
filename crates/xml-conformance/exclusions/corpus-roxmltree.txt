@@ -1,0 +1,2 @@
+entity_err_005.xml	well-formed per XML 1.0, but the server deliberately reports an expansion beyond its security limits (dtd_core::MAX_ENTITY_EXPANSION, MAX_DOCUMENT_EXPANSION)
+entity_err_006.xml	well-formed per XML 1.0, but the server deliberately reports an expansion beyond its security limits (dtd_core::MAX_ENTITY_EXPANSION, MAX_DOCUMENT_EXPANSION)
