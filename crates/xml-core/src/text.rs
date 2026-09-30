@@ -57,9 +57,10 @@ pub fn decode_bytes(bytes: &[u8]) -> Option<String> {
             if body.len() % 2 != 0 {
                 return None;
             }
-            let units = body.chunks_exact(2).map(|pair| match encoding {
-                TextEncoding::Utf16Le => u16::from_le_bytes([pair[0], pair[1]]),
-                _ => u16::from_be_bytes([pair[0], pair[1]]),
+            let (pairs, _) = body.as_chunks::<2>();
+            let units = pairs.iter().map(|&pair| match encoding {
+                TextEncoding::Utf16Le => u16::from_le_bytes(pair),
+                _ => u16::from_be_bytes(pair),
             });
             char::decode_utf16(units)
                 .collect::<Result<String, _>>()
