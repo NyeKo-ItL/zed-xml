@@ -1222,4 +1222,20 @@ mod tests {
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(problems[0].message.len() < 400, "{}", problems[0].message);
     }
+
+    #[test]
+    fn an_undeclared_entity_is_only_a_validity_error_with_an_external_subset_or_parameter_references()
+     {
+        let load = |source: &str| {
+            load_document_dtd(source, None, &mut crate::NoLoader)
+                .map(|(_, dtd)| dtd)
+                .unwrap()
+        };
+        let plain = load("<!DOCTYPE a [<!ELEMENT a ANY>]><a>&e;</a>");
+        assert!(!plain.optional_declarations);
+        let parameter = load("<!DOCTYPE a [<!ENTITY % p \"<!ENTITY x 'y'>\">%p;]><a>&e;</a>");
+        assert!(parameter.optional_declarations);
+        let external = load("<!DOCTYPE a SYSTEM \"a.dtd\"><a>&e;</a>");
+        assert!(external.optional_declarations);
+    }
 }

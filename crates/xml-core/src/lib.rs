@@ -4,6 +4,7 @@ pub mod diff;
 mod format;
 pub mod names;
 pub mod resource;
+pub mod strict;
 pub mod tags;
 pub mod text;
 pub mod wellformed;
@@ -110,7 +111,8 @@ pub fn parse_xml(source: &str) -> XmlParseResult {
             )],
         };
     }
-    let mut reader = Reader::from_str(source);
+    let masked = strict::mask_doctype(source);
+    let mut reader = Reader::from_str(&masked);
     let mut stack = Vec::new();
     let mut document = XmlDocument::default();
     // `quick-xml` diagnostics and a "covered by the tolerant check" flag.
@@ -240,6 +242,25 @@ pub fn parse_xml(source: &str) -> XmlParseResult {
         offset: problem.range.start,
         end: problem.range.end,
     }));
+    // Everything the tolerant checks do not locate: the strict grammar
+    // check, only once the document has no other problem (it would repeat
+    // or cascade from them).
+    if diagnostics
+        .iter()
+        .all(|diagnostic| !diagnostic.blocks_formatting())
+    {
+        diagnostics.extend(
+            strict::check(source)
+                .into_iter()
+                .map(|problem| XmlDiagnostic {
+                    kind: XmlDiagnosticKind::Syntax,
+                    rule: Some(problem.rule),
+                    message: problem.message,
+                    offset: problem.range.start,
+                    end: problem.range.end,
+                }),
+        );
+    }
 
     XmlParseResult {
         document,

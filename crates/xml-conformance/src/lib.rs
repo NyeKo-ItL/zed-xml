@@ -105,10 +105,17 @@ fn declared_encoding(bytes: &[u8]) -> Option<&'static encoding_rs::Encoding> {
     encoding_rs::Encoding::for_label(label.as_bytes())
 }
 
-/// Well-formedness verdict of `xml-core`: the diagnostics the language server
-/// publishes before any schema validation (`parse_xml` includes the tolerant
-/// checks of `wellformed::check_well_formedness`).
+/// Well-formedness verdict of the language server for a document without
+/// files around it: the diagnostics of `xml-core` (`parse_xml` includes the
+/// tolerant checks of `wellformed::check_well_formedness` and the strict
+/// grammar check), the DTD grammar errors of its internal subset and its
+/// entity reference errors.
 pub fn well_formedness_errors(source: &str) -> Vec<String> {
+    server_errors(source, None, false)
+}
+
+/// Diagnostics of `xml-core` alone.
+pub fn xml_core_errors(source: &str) -> Vec<String> {
     parse_xml(source)
         .diagnostics
         .into_iter()
@@ -121,6 +128,91 @@ pub fn well_formedness_errors(source: &str) -> Vec<String> {
             )
         })
         .collect()
+}
+
+/// Reads the external subset and parameter entities next to the document,
+/// like the language server does for local files.
+struct FileLoader;
+
+impl dtd_core::ExternalLoader for FileLoader {
+    fn load(
+        &mut self,
+        _public: Option<&str>,
+        system: &str,
+        base: Option<&Path>,
+    ) -> Result<(PathBuf, String), dtd_core::LoadError> {
+        let failure = |message: String| dtd_core::LoadError {
+            message,
+            remote: false,
+        };
+        let path = base
+            .and_then(Path::parent)
+            .map_or_else(|| PathBuf::from(system), |directory| directory.join(system));
+        let bytes = fs::read(&path).map_err(|error| failure(error.to_string()))?;
+        let text = decode(&bytes).ok_or_else(|| failure("undecodable".to_owned()))?;
+        Ok((path, text))
+    }
+}
+
+/// Everything the language server reports about the well-formedness of the
+/// document at `path` (`None`: no file, nothing external is read): the diagnostics of `xml-core`, the DTD grammar errors
+/// (internal subset and readable external subset), the entity reference
+/// errors and, with `validate`, the DTD validity errors.
+pub fn server_errors(source: &str, path: Option<&Path>, validate: bool) -> Vec<String> {
+    let mut errors = xml_core_errors(source);
+    let loaded = match path {
+        Some(path) => {
+            dtd_core::load_document_dtd(source, Some(path.to_path_buf()), &mut FileLoader)
+        }
+        None => dtd_core::load_document_dtd(source, None, &mut dtd_core::NoLoader),
+    };
+    let dtd = loaded.as_ref().map(|(_, dtd)| dtd);
+    if let Some(dtd) = dtd {
+        errors.extend(
+            dtd.problems
+                .iter()
+                // Validity constraints and unread resources are not
+                // well-formedness errors.
+                .filter(|problem| {
+                    !matches!(
+                        problem.kind,
+                        dtd_core::DtdProblemKind::ExternalLoad { .. }
+                            | dtd_core::DtdProblemKind::DuplicateElement
+                            | dtd_core::DtdProblemKind::DuplicateNotation
+                            | dtd_core::DtdProblemKind::MultipleIdAttributes
+                            | dtd_core::DtdProblemKind::IdAttributeDefault
+                            | dtd_core::DtdProblemKind::InvalidDefaultValue
+                            | dtd_core::DtdProblemKind::UndeclaredNotation
+                    )
+                })
+                .map(|problem| format!("dtd-grammar: {}", problem.message)),
+        );
+    }
+    let incomplete = dtd.is_some_and(|dtd| dtd.incomplete || dtd.optional_declarations);
+    errors.extend(
+        dtd_core::check_entity_references(source, dtd)
+            .into_iter()
+            // Without the whole DTD an entity may be declared elsewhere.
+            .filter(|problem| {
+                !(incomplete
+                    && matches!(
+                        problem.kind,
+                        dtd_core::InstanceProblemKind::UndefinedEntity { .. }
+                    ))
+            })
+            .map(|problem| format!("xml-entity: {}", problem.message)),
+    );
+    if validate
+        && let Some(dtd) = dtd
+        && !dtd.incomplete
+    {
+        errors.extend(
+            dtd_core::validate_instance(source, dtd)
+                .into_iter()
+                .map(|problem| format!("dtd-validation: {}", problem.message)),
+        );
+    }
+    errors
 }
 
 /// Structural fingerprint of a document, used to check that formatting

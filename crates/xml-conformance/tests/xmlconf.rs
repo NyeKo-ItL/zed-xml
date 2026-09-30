@@ -16,7 +16,7 @@
 
 use std::{fs, path::Path};
 
-use xml_conformance::{Outcome, SuiteRun, decode, external_suite, guarded, well_formedness_errors};
+use xml_conformance::{Outcome, SuiteRun, decode, external_suite, guarded, server_errors};
 
 #[test]
 fn w3c_xml_conformance_suite() {
@@ -104,7 +104,7 @@ fn run_case(kind: &str, path: &Path) -> Outcome {
             Outcome::Skip("encoding not supported by the test driver".to_owned())
         };
     };
-    let errors = well_formedness_errors(&source);
+    let errors = server_errors(&source, Some(path), kind == "valid");
     match (kind, errors.is_empty()) {
         ("valid" | "invalid", true) | ("not-wf", false) => Outcome::Pass,
         ("valid" | "invalid", false) => {
