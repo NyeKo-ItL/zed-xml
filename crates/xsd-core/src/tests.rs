@@ -208,7 +208,7 @@ fn supports_any_elements_and_attributes() {
     let schema = parse_xsd(
         r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
                 <xs:element name="root"><xs:complexType><xs:sequence>
-                    <xs:any minOccurs="0" maxOccurs="2"/>
+                    <xs:any minOccurs="0" maxOccurs="2" processContents="lax"/>
                 </xs:sequence><xs:anyAttribute processContents="lax"/></xs:complexType></xs:element>
             </xs:schema>"#,
     )

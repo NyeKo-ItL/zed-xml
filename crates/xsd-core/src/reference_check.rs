@@ -17,6 +17,19 @@ use crate::{
     },
 };
 
+/// Whether a particle contains a reference to the group `name`.
+fn particle_refers_to_group(particle: &XsdParticle, name: &str) -> bool {
+    match particle {
+        XsdParticle::GroupRef {
+            name: reference, ..
+        } => reference.local == name,
+        XsdParticle::Group { particles, .. } => particles
+            .iter()
+            .any(|inner| particle_refers_to_group(inner, name)),
+        XsdParticle::Element(_) | XsdParticle::Any(_) => false,
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Space {
     Type,
@@ -224,9 +237,163 @@ impl XsdModelSet {
         self.cycles(&mut problems);
         self.default_values(&mut problems);
         self.attribute_uses_problems(&mut problems);
+        self.redefine_problems(complete, &mut problems);
         problems.sort();
         problems.dedup();
         problems
+    }
+
+    /// `xs:redefine` semantics (XML Schema 1.0 Part 1, src-redefine 6.2 and
+    /// 7.2): the redefined component exists in the redefined schema, and a
+    /// redefined group or attribute group that does not refer to itself is
+    /// a restriction of the original.
+    fn redefine_problems(&self, complete: bool, problems: &mut Vec<String>) {
+        for (schema, model) in self.models().iter().enumerate() {
+            for (kind, name) in &model.redefined {
+                match *kind {
+                    "group" => {
+                        let Some(definition) =
+                            model.groups.iter().find(|group| group.name == *name)
+                        else {
+                            continue;
+                        };
+                        let original = self.replaced_group(
+                            definition.namespace.as_deref(),
+                            name,
+                            schema,
+                            definition,
+                        );
+                        let Some(original) = original else {
+                            if complete {
+                                problems.push(format!(
+                                    "xs:redefine: the redefined schema has no group '{name}'"
+                                ));
+                            }
+                            continue;
+                        };
+                        let (Some(own), Some(base)) = (&definition.content, &original.item.content)
+                        else {
+                            continue;
+                        };
+                        if particle_refers_to_group(own, name) {
+                            continue;
+                        }
+                        let derived = XsdTypeDef {
+                            complex: true,
+                            content: Some(own.clone()),
+                            ..XsdTypeDef::default()
+                        };
+                        let original_type = XsdTypeDef {
+                            complex: true,
+                            content: Some(base.clone()),
+                            ..XsdTypeDef::default()
+                        };
+                        let (own_model, base_model) = (
+                            self.content_model(XsdTypeRef {
+                                schema,
+                                name: None,
+                                definition: Some(&derived),
+                            }),
+                            self.content_model(XsdTypeRef {
+                                schema: original.schema,
+                                name: None,
+                                definition: Some(&original_type),
+                            }),
+                        );
+                        if let (Some(own_model), Some(base_model)) = (own_model, base_model)
+                            && let Err(reason) = own_model.restricts(&base_model)
+                        {
+                            problems.push(format!(
+                                "xs:redefine: the group '{name}' must be a restriction of the group it redefines: {reason}"
+                            ));
+                        }
+                    }
+                    "attributeGroup" => {
+                        let Some(definition) = model
+                            .attribute_groups
+                            .iter()
+                            .find(|group| group.name == *name)
+                        else {
+                            continue;
+                        };
+                        let original = self.replaced_attribute_group(
+                            definition.namespace.as_deref(),
+                            name,
+                            schema,
+                            definition,
+                        );
+                        let Some(original) = original else {
+                            if complete {
+                                problems.push(format!(
+                                    "xs:redefine: the redefined schema has no attribute group '{name}'"
+                                ));
+                            }
+                            continue;
+                        };
+                        if definition
+                            .attribute_group_refs
+                            .iter()
+                            .any(|reference| reference.local == *name)
+                        {
+                            continue;
+                        }
+                        // Without a reference to itself, the new group must
+                        // not allow more than the original.
+                        for own in &definition.attributes {
+                            let known = original.item.attributes.iter().find(|candidate| {
+                                candidate.name == own.name && candidate.namespace == own.namespace
+                            });
+                            if known.is_none() && original.item.any_attribute.is_none() {
+                                problems.push(format!(
+                                    "xs:redefine: the attribute '{}' of the attribute group '{name}' is not in the attribute group it redefines",
+                                    own.name
+                                ));
+                            }
+                        }
+                        for base in &original.item.attributes {
+                            if base.usage != XsdUse::Required {
+                                continue;
+                            }
+                            let kept = definition.attributes.iter().any(|own| {
+                                own.name == base.name
+                                    && own.namespace == base.namespace
+                                    && own.usage == XsdUse::Required
+                            });
+                            if !kept {
+                                problems.push(format!(
+                                    "xs:redefine: the required attribute '{}' of the attribute group '{name}' must stay required",
+                                    base.name
+                                ));
+                            }
+                        }
+                    }
+                    "type" => {
+                        let Some(definition) = model
+                            .types
+                            .iter()
+                            .find(|definition| definition.name.as_deref() == Some(name))
+                        else {
+                            continue;
+                        };
+                        if complete
+                            && self
+                                .replaced_type(
+                                    definition.namespace.as_deref(),
+                                    name,
+                                    schema,
+                                    definition,
+                                )
+                                .is_none()
+                        {
+                            problems.push(format!(
+                                "xs:redefine: the redefined schema has no type '{name}'"
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 
     fn unresolved_references(
