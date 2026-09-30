@@ -113,6 +113,16 @@ The Clippy toolchain is pinned so that lints introduced by a new stable Rust rel
 
 Jobs share a [`Swatinem/rust-cache`](https://github.com/Swatinem/rust-cache) cache per pull request, and a new push cancels the checks still running for the previous one. To reproduce coverage locally: `cargo install cargo-llvm-cov`, then `cargo llvm-cov --workspace --html` (report in `target/llvm-cov/html`).
 
+Performance is measured with [criterion](https://docs.rs/criterion) benchmarks (dev-dependency only): `crates/xml-core/benches/xml_core.rs` (parsing, well-formedness, tag tree, formatting at 100 KB and 1 MB), `crates/xsd-core/benches/xsd_core.rs` (schema parsing and merging, validation, completion) and `crates/xml-lsp/benches/server.rs` (the server binary over stdio on a 1 MB document bound to a schema: diagnostics after a change, highlight, hover, completion, code actions, folding, document symbols). The `Benchmarks` CI job runs them in quick mode, which only checks that they run. To compare a change, save a baseline before it and compare after:
+
+```sh
+cargo bench -p xml-core --bench xml_core -p xsd-core --bench xsd_core -p xml-lsp --bench server -- --save-baseline before
+cargo bench -p xml-core --bench xml_core -p xsd-core --bench xsd_core -p xml-lsp --bench server -- --baseline before
+cargo bench -p xml-lsp --bench server -- hover   # one group or benchmark
+```
+
+Select benchmarks with `--bench <name>`: `--benches` also runs the library test harnesses, which reject criterion's options.
+
 Tests live next to the code (`#[cfg(test)] mod tests`). Language-server features get unit tests in their module plus an LSP round-trip test in `crates/xml-lsp/src/main.rs`; see [AGENTS.md](AGENTS.md#testing) for the patterns.
 
 ## Pull requests

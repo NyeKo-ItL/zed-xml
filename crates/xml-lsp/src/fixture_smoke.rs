@@ -211,6 +211,7 @@ fn exercise_offsets(path: &Path, source: &str, offsets: Vec<usize>) -> Vec<Strin
         check("formatting", Some(edits.clone()));
         let formatted = formatting::apply_edits(source, &edits);
         server.documents.insert(uri.clone(), formatted.clone());
+        server.analyses.invalidate(&uri);
         if let Some(again) = server.formatting(&format) {
             let reformatted = formatting::apply_edits(&formatted, &again);
             if reformatted != formatted {

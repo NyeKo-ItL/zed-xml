@@ -150,13 +150,16 @@ pub(crate) struct IndexedSymbol {
 /// Element and the attributes of its start tag.
 struct Parsed<'s> {
     source: &'s str,
-    tree: XmlTagTree,
+    tree: Arc<XmlTagTree>,
     attributes: Vec<Vec<XmlAttribute>>,
 }
 
 impl<'s> Parsed<'s> {
     fn new(source: &'s str) -> Self {
-        let tree = XmlTagTree::parse(source);
+        Self::with_tree(source, Arc::new(XmlTagTree::parse(source)))
+    }
+
+    fn with_tree(source: &'s str, tree: Arc<XmlTagTree>) -> Self {
         let attributes = tree
             .elements()
             .iter()
@@ -336,8 +339,14 @@ fn has_enumeration(parsed: &Parsed, simple_type: usize) -> bool {
 /// Hierarchical `DocumentSymbol[]`: one symbol per element (tolerant of
 /// malformed documents), `detail` = identifying attribute (`id="x"`).
 /// The range of an unclosed element covers its descendants.
+#[cfg(test)]
 pub(crate) fn document_symbols(source: &str) -> Vec<Value> {
-    let parsed = Parsed::new(source);
+    document_symbols_in(source, Arc::new(XmlTagTree::parse(source)))
+}
+
+/// [`document_symbols`] with the tag tree of `source` already built.
+pub(crate) fn document_symbols_in(source: &str, tree: Arc<XmlTagTree>) -> Vec<Value> {
+    let parsed = Parsed::with_tree(source, tree);
     let lines = LineIndex::new(source);
     let elements = parsed.tree.elements();
     let mut children: Vec<Vec<usize>> = vec![Vec::new(); elements.len()];

@@ -187,13 +187,14 @@ pub fn instance_ranges(source: &str, component: &RenamedComponent) -> Vec<Range<
 
 /// Converts ranges into LSP `TextEdit`s replaced by `new_text`.
 pub fn text_edits(source: &str, ranges: &[Range<usize>], new_text: &str) -> Vec<Value> {
+    let lines = crate::selection::LineIndex::new(source);
     ranges
         .iter()
         .map(|range| {
             json!({
                 "range": {
-                    "start": position_at(source, range.start),
-                    "end": position_at(source, range.end),
+                    "start": lines.position(source, range.start),
+                    "end": lines.position(source, range.end),
                 },
                 "newText": new_text,
             })

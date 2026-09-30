@@ -35,7 +35,17 @@ pub struct Settings {
     pub auto_detect_catalogs: bool,
     /// `xml.fileAssociations`.
     pub file_associations: Vec<FileAssociation>,
+    /// `xml.maxFileSize` (extension, bytes, `None`: no limit): beyond it,
+    /// grammar validation and the whole-document features (symbols,
+    /// folding, colors, links, code actions, selection ranges) are skipped.
+    pub max_file_size: Option<usize>,
 }
+
+/// Default of `xml.maxFileSize`: 10 MiB.
+pub const DEFAULT_MAX_FILE_SIZE: usize = 10 * 1024 * 1024;
+
+/// Default of `xml.validation.debounce`, in milliseconds.
+pub const DEFAULT_VALIDATION_DEBOUNCE: u64 = 200;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -49,7 +59,15 @@ impl Default for Settings {
             catalogs: Vec::new(),
             auto_detect_catalogs: false,
             file_associations: Vec::new(),
+            max_file_size: Some(DEFAULT_MAX_FILE_SIZE),
         }
+    }
+}
+
+impl Settings {
+    /// The document exceeds `xml.maxFileSize`.
+    pub fn is_large(&self, source: &str) -> bool {
+        self.max_file_size.is_some_and(|limit| source.len() > limit)
     }
 }
 
@@ -169,6 +187,9 @@ pub struct ValidationSettings {
     /// `xml.validation.resolveExternalEntities`: referenced external general
     /// entities must be resolvable (never read).
     pub resolve_external_entities: bool,
+    /// `xml.validation.debounce` (extension): delay in milliseconds between
+    /// the last change of a document and its validation.
+    pub debounce_ms: u64,
 }
 
 impl Default for ValidationSettings {
@@ -179,6 +200,7 @@ impl Default for ValidationSettings {
             no_grammar: NoGrammar::Ignore,
             disallow_doc_type_decl: false,
             resolve_external_entities: false,
+            debounce_ms: DEFAULT_VALIDATION_DEBOUNCE,
         }
     }
 }
@@ -287,6 +309,20 @@ impl Settings {
         if let Some(value) = flag("validation.resolveExternalEntities") {
             validation.resolve_external_entities = value;
         }
+        if let Some(value) = get("validation.debounce").and_then(Value::as_u64) {
+            // More than 10 s would look like validation never runs.
+            validation.debounce_ms = value.min(10_000);
+        }
+        match get("maxFileSize") {
+            Some(Value::Number(number)) => {
+                settings.max_file_size = number
+                    .as_u64()
+                    .map(|limit| (limit > 0).then_some(limit as usize))
+                    .unwrap_or(settings.max_file_size);
+            }
+            Some(Value::Null) => settings.max_file_size = None,
+            _ => {}
+        }
 
         if let Some(value) = flag("completion.autoCloseTags") {
             settings.auto_close_tags = value;
@@ -332,6 +368,7 @@ impl Settings {
             && self.file_associations == other.file_associations
             && self.catalogs == other.catalogs
             && self.auto_detect_catalogs == other.auto_detect_catalogs
+            && self.max_file_size == other.max_file_size
     }
 }
 
@@ -574,16 +611,20 @@ mod tests {
             },
             "validation": {
                 "enabled": false, "schema": {"enabled": "onValidSchema"}, "noGrammar": "warning",
-                "disallowDocTypeDecl": true, "resolveExternalEntities": true,
+                "disallowDocTypeDecl": true, "resolveExternalEntities": true, "debounce": 50,
             },
             "completion": {"autoCloseTags": false},
             "symbols": {"enabled": false, "maxItemsComputed": 10},
             "colors": {"enabled": false},
             "catalogs": ["catalog.xml", 3],
             "autoDetectCatalogs": true,
+            "maxFileSize": 1024,
             "fileAssociations": [{"pattern": "**/*.pom", "systemId": "maven.xsd"}],
         }}}));
         assert!(settings.auto_detect_catalogs);
+        assert_eq!(settings.max_file_size, Some(1024));
+        assert!(settings.is_large(&"x".repeat(1025)));
+        assert!(!settings.is_large(&"x".repeat(1024)));
         assert!(!settings.format.enabled);
         assert_eq!(
             settings.format.split_attributes,
@@ -616,6 +657,7 @@ mod tests {
                 no_grammar: NoGrammar::Warning,
                 disallow_doc_type_decl: true,
                 resolve_external_entities: true,
+                debounce_ms: 50,
             }
         );
         assert!(!settings.auto_close_tags);
@@ -630,6 +672,36 @@ mod tests {
                 system_id: "maven.xsd".to_owned(),
             }]
         );
+    }
+
+    #[test]
+    fn reads_performance_settings_with_their_defaults_and_bounds() {
+        let defaults = Settings::default();
+        assert_eq!(defaults.max_file_size, Some(DEFAULT_MAX_FILE_SIZE));
+        assert_eq!(defaults.validation.debounce_ms, DEFAULT_VALIDATION_DEBOUNCE);
+        let read = |value: Value| Settings::from_value(&json!({"xml": value}));
+        // 0 or null: no limit; invalid types keep the default.
+        assert_eq!(read(json!({"maxFileSize": 0})).max_file_size, None);
+        assert_eq!(read(json!({"maxFileSize": null})).max_file_size, None);
+        assert_eq!(
+            read(json!({"maxFileSize": "big"})).max_file_size,
+            Some(DEFAULT_MAX_FILE_SIZE)
+        );
+        assert_eq!(
+            read(json!({"validation": {"debounce": 0}}))
+                .validation
+                .debounce_ms,
+            0
+        );
+        assert_eq!(
+            read(json!({"validation": {"debounce": 999_999}}))
+                .validation
+                .debounce_ms,
+            10_000
+        );
+        assert!(!read(json!({"maxFileSize": 0})).is_large(&"x".repeat(1 << 20)));
+        // A changed limit changes the published diagnostics.
+        assert!(!defaults.same_validation(&read(json!({"maxFileSize": 5}))));
     }
 
     #[test]

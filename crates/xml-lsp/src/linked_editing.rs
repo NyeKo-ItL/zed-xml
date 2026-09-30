@@ -27,8 +27,14 @@ pub const XML_NAME_WORD_PATTERN: &str = concat!(
 /// (`<a>...</a>`). Returns `None` for a self-closing element, an unclosed
 /// element, an orphan end tag, mismatched names, or a cursor outside a tag
 /// name.
+#[cfg(test)]
 pub fn linked_editing_ranges(source: &str, offset: usize) -> Option<Value> {
-    let pair = XmlTagTree::parse(source).tag_pair_at(offset)?;
+    linked_editing_ranges_in(source, &XmlTagTree::parse(source), offset)
+}
+
+/// [`linked_editing_ranges`] with the tag tree of `source` already built.
+pub fn linked_editing_ranges_in(source: &str, tree: &XmlTagTree, offset: usize) -> Option<Value> {
+    let pair = tree.tag_pair_at(offset)?;
     if !pair.is_complete() {
         return None;
     }

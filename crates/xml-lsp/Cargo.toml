@@ -19,3 +19,8 @@ xsd-core = { path = "../xsd-core" }
 
 [dev-dependencies]
 xml-conformance = { path = "../xml-conformance" }
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "server"
+harness = false

@@ -10,3 +10,10 @@ path = "src/lib.rs"
 
 [dependencies]
 quick-xml = "0.38"
+
+[dev-dependencies]
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "xml_core"
+harness = false
