@@ -206,7 +206,7 @@ fn read_text(context: &mut DtdContext<'_>, path: &Path) -> Result<String, LoadEr
     {
         return Ok(text.to_string());
     }
-    let text = fs::read_to_string(path)
+    let text = xml_core::text::read_text_file(path)
         .map_err(|cause| error(format!("DTD '{}' is unreadable: {cause}", path.display())))?;
     context.cache.insert(
         path.to_path_buf(),

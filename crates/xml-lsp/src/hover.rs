@@ -384,15 +384,17 @@ pub(crate) fn load_models(
                 Some((cached, model, dependencies)) if *cached == modified => {
                     Some((model.clone(), dependencies.clone()))
                 }
-                _ => fs::read_to_string(&path).ok().and_then(|source| {
-                    let model = Arc::new(parse_xsd_model(&source).ok()?);
-                    let dependencies = dependency_paths(&source, &path, context.catalogs);
-                    context.cache.insert(
-                        path.clone(),
-                        (modified, model.clone(), dependencies.clone()),
-                    );
-                    Some((model, dependencies))
-                }),
+                _ => xml_core::text::read_text_file(&path)
+                    .ok()
+                    .and_then(|source| {
+                        let model = Arc::new(parse_xsd_model(&source).ok()?);
+                        let dependencies = dependency_paths(&source, &path, context.catalogs);
+                        context.cache.insert(
+                            path.clone(),
+                            (modified, model.clone(), dependencies.clone()),
+                        );
+                        Some((model, dependencies))
+                    }),
             }
         };
         if let Some((model, dependencies)) = loaded {

@@ -28,6 +28,7 @@ All notable changes to this project are documented in this file. The format is b
 - XSD identity constraints (`textDocument/publishDiagnostics`): unique `xs:ID` values and existing `xs:IDREF(S)` targets, `xs:unique`/`xs:key`/`xs:keyref` with the XPath subset of their selectors and fields (values compared in the value space, attribute defaults included), and invalid constraint declarations reported as schema errors; new `data.rule` values `duplicateId`, `unknownIdref`, `duplicateKey`, `missingKeyField`, `invalidKeyField`, `unknownKeyref`. Go to definition (`textDocument/definition`) from an `IDREF(S)` (XSD or DTD) or keyref value to the ID or key it designates, and references (`textDocument/references`) from an ID or key to its references.
 - XSD datatype validation (`textDocument/publishDiagnostics`): the 44 XSD 1.0 built-in types with their derivation hierarchy and `whiteSpace` handling, list and union types, every constraining facet (enumerations and bounds compared in the value space, date/time partial order, durations), XSD regular expressions translated to the `regex` crate with a cache, element and attribute values resolved through local declarations, `xsi:type` and `QName` prefixes, `default`/`fixed` values, and precise messages on the value (`'2024-13-01' is not a valid xs:date: month must be 01-12`); new `data.rule` values `invalidEnumeration` and `invalidAttributeValue`.
 - `CONTRIBUTING.md`, `CHANGELOG.md` and `AGENTS.md`; the README now focuses on users (installation, configuration, troubleshooting).
+- Server robustness: diagnostics computed on a background worker (latest snapshot only, stale results dropped, `version` in `publishDiagnostics`), `$/cancelRequest` (`RequestCancelled` for queued requests), panic isolation per request and notification (`InternalError`, logged on stderr), LSP-conformant `shutdown`/`exit` (requests after `shutdown` rejected, exit code 0 or 1), `positionEncoding` negotiation (UTF-8, UTF-16, UTF-32), byte order marks and UTF-16 files read from disk (new `xml_core::text`).
 
 ### Changed
 
@@ -49,6 +50,8 @@ All notable changes to this project are documented in this file. The format is b
 - The cached `xml-lsp` binary is reused when its version matches, instead of being downloaded again on every start (#16).
 - Formatting keeps explicit empty elements (`<tag></tag>`) as written (#17).
 - Incremental document synchronization handles full replacements and out-of-range edits (#18).
+- A position beyond the end of its line means the end of that line (it meant the end of the document), and edits never split a CRLF line break (formatting of documents mixing LF and CRLF returned invalid ranges).
+- A non-ASCII character between DTD declarations no longer panics the DTD parser.
 
 ## [0.9.0] - 2026-09-29
 

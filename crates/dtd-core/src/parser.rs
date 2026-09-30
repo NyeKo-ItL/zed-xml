@@ -1016,13 +1016,15 @@ impl<'l> DtdBuilder<'l> {
                 documentation = None;
                 continue;
             }
-            let stop = text[index + 1..end]
+            // The unexpected character may be longer than one byte.
+            let next = index + text[index..].chars().next().map_or(1, char::len_utf8);
+            let stop = text[next.min(end)..end]
                 .find(['<', '%'])
-                .map_or(end, |offset| index + 1 + offset);
+                .map_or(end, |offset| next + offset);
             let unexpected_end = index + text[index..stop].trim_end().len();
             self.problem(
                 DtdProblemKind::Syntax,
-                Self::at(source, index..unexpected_end.max(index + 1)),
+                Self::at(source, index..unexpected_end.max(next.min(end))),
                 "unexpected content in the DTD: '<!…>' declaration expected",
             );
             documentation = None;

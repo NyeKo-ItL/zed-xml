@@ -52,8 +52,10 @@ pub fn format_options(params: &Value, source: &str, settings: &FormatSettings) -
 /// Edits (`TextEdit[]`) formatting the whole document, or `None` if the
 /// document is invalid.
 pub fn document_edits(source: &str, options: &FormatOptions) -> Option<Value> {
-    let formatted = format_xml_with(source, options).ok()?;
-    Some(text_edits(source, 0..source.len(), &formatted))
+    // A byte order mark is kept: only the text after it is reformatted.
+    let (body, bom) = xml_core::text::strip_bom(source);
+    let formatted = format_xml_with(body, options).ok()?;
+    Some(text_edits(source, bom..source.len(), &formatted))
 }
 
 /// Edits (`TextEdit[]`) formatting the region enclosing `range`, or `None`

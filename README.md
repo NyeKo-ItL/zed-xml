@@ -36,6 +36,7 @@ Install the extension from Zed's extensions page (`zed: extensions`), or from a 
 - Workspace-aware revalidation when an open XSD changes.
 - Verified server downloads: prebuilt `xml-lsp` binaries for Linux (static musl builds, any distribution), macOS and Windows on x86_64 and arm64, each published with a SHA-256 checksum that the extension checks before starting the binary; unsupported platforms get an error listing the supported ones.
 - Standard Zed language server binary settings: `lsp.xml-lsp.binary.path`, `arguments` and `env` (see [Language server](#language-server)).
+- Robust server: validation runs on a background thread with the latest document snapshot (typing, completion and hover never wait for a large schema; results of outdated versions are dropped and publications carry the document `version`), `$/cancelRequest` answers queued requests with `RequestCancelled`, a failing request answers `InternalError` instead of stopping the server, clean `shutdown`/`exit` (exit code 0 after `shutdown`), negotiated `positionEncoding` (`utf-8` when the client offers it, else `utf-16`, or `utf-32`), documents with a byte order mark (kept by formatting), and UTF-16/ISO-8859-1 schemas, DTDs and catalogs read from disk.
 - LemMinX-style `xml.*` settings (formatting, validation, file associations, completion, symbols, colors) from Zed `lsp.xml-lsp.settings`, applied live (see [Configuration](#configuration)).
 
 ## Language server
