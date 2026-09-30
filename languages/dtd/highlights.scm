@@ -125,4 +125,3 @@
 
 (Comment) @comment
 
-(ERROR) @error

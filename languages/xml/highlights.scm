@@ -32,4 +32,3 @@
   (CData) @markup.raw
   "]]>" @markup.heading)
 (Comment) @comment
-(ERROR) @error
