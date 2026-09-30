@@ -44,7 +44,6 @@ use crate::{
     encode_uri_path,
     hover::{self, Document, HoverContext},
     links::XSI_NAMESPACE,
-    offset_at,
     selection::LineIndex,
     uri_to_path,
 };
@@ -149,6 +148,12 @@ pub(crate) struct Actions<'a> {
     range: Range<usize>,
     only: Option<Vec<String>>,
     diagnostics: Vec<(Range<usize>, &'a Value)>,
+    /// Indexes of `diagnostics` sorted by start, and the length of the
+    /// longest one: [`Actions::matching`] only visits the diagnostics that
+    /// can touch a range (a document with thousands of problems stays
+    /// linear).
+    by_start: Vec<usize>,
+    longest: usize,
     lines: LineIndex,
     pub(crate) actions: Vec<Value>,
 }
@@ -167,22 +172,35 @@ impl<'a> Actions<'a> {
                 .map(str::to_owned)
                 .collect()
         });
+        let lines = LineIndex::new(source);
         let diagnostics = context
             .get("diagnostics")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
             .filter_map(|diagnostic| {
-                Some((lsp_range(source, diagnostic.get("range")?)?, diagnostic))
+                Some((
+                    lsp_range(&lines, source, diagnostic.get("range")?)?,
+                    diagnostic,
+                ))
             })
-            .collect();
+            .collect::<Vec<(Range<usize>, &Value)>>();
+        let mut by_start = (0..diagnostics.len()).collect::<Vec<_>>();
+        by_start.sort_by_key(|&index| diagnostics[index].0.start);
+        let longest = diagnostics
+            .iter()
+            .map(|(range, _)| range.len())
+            .max()
+            .unwrap_or(0);
         Self {
             uri,
             source,
             range,
             only,
             diagnostics,
-            lines: LineIndex::new(source),
+            by_start,
+            longest,
+            lines,
             actions: Vec::new(),
         }
     }
@@ -213,9 +231,19 @@ impl<'a> Actions<'a> {
         id: &str,
         range: &Range<usize>,
     ) -> Vec<Value> {
-        self.diagnostics
+        // Candidates start at most `longest` bytes before the range and not
+        // after its end.
+        let first = self.by_start.partition_point(|&index| {
+            self.diagnostics[index].0.start.saturating_add(self.longest) < range.start
+        });
+        let last = self
+            .by_start
+            .partition_point(|&index| self.diagnostics[index].0.start <= range.end);
+        let mut matching = self.by_start[first..last.max(first)]
             .iter()
-            .filter(|(diagnostic_range, diagnostic)| {
+            .copied()
+            .filter(|&index| {
+                let (diagnostic_range, diagnostic) = &self.diagnostics[index];
                 diagnostic.get("code").and_then(Value::as_str) == Some(code)
                     && touches(diagnostic_range, range)
                     && diagnostic
@@ -224,7 +252,12 @@ impl<'a> Actions<'a> {
                         .and_then(Value::as_str)
                         .is_none_or(|value| value == id)
             })
-            .map(|(_, diagnostic)| (*diagnostic).clone())
+            .collect::<Vec<_>>();
+        // In the order of the request.
+        matching.sort_unstable();
+        matching
+            .into_iter()
+            .map(|index| self.diagnostics[index].1.clone())
             .collect()
     }
 
@@ -270,11 +303,11 @@ fn touches(left: &Range<usize>, right: &Range<usize>) -> bool {
     left.start <= right.end && right.start <= left.end
 }
 
-fn lsp_range(source: &str, range: &Value) -> Option<Range<usize>> {
+fn lsp_range(lines: &LineIndex, source: &str, range: &Value) -> Option<Range<usize>> {
     let offset = |position: &Value| {
         let line = position.get("line")?.as_u64()? as usize;
         let character = position.get("character")?.as_u64()? as usize;
-        Some(offset_at(source, line, character))
+        Some(lines.offset(source, line, character))
     };
     let start = offset(range.get("start")?)?;
     let end = offset(range.get("end")?)?;

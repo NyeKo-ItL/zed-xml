@@ -35,11 +35,15 @@ use quick_xml::{Reader, events::Event};
 use serde_json::{Value, json};
 #[cfg(test)]
 use xml_core::format_xml;
-use xml_core::{XmlDiagnostic, auto_close_tag, complete_xml, parse_xml};
+use xml_core::{
+    XmlDiagnostic, auto_close_tag, complete_xml, parse_xml,
+    resource::{MAX_RESOURCE_SIZE, read_text_file},
+};
 use xsd_core::{
-    LocatedXsdDiagnostic, XsdDiagnosticKind, XsdSchema, complete_attribute_values,
-    complete_attributes, complete_elements, identity_links, percent_decode,
-    resolve_schema_dependencies_with, resolve_schema_locations_with, validate_document_located,
+    LocatedXsdDiagnostic, MAX_SCHEMA_DOCUMENTS, XsdDiagnosticKind, XsdSchema,
+    complete_attribute_values, complete_attributes, complete_elements, identity_links,
+    is_remote_location, percent_decode, resolve_schema_dependencies_with,
+    resolve_schema_locations_with, validate_document_located,
 };
 
 #[cfg(test)]
@@ -858,10 +862,13 @@ impl XmlLanguageServer {
         let mut queue = self.schema_references(uri, source).ok()?;
         let mut visited = HashSet::new();
         while let Some(reference) = queue.pop() {
-            if !visited.insert(reference.path.clone()) {
+            if visited.len() >= MAX_SCHEMA_DOCUMENTS {
+                return None;
+            }
+            if !visited.insert(reference.path.clone()) || is_remote_location(&reference.path) {
                 continue;
             }
-            let schema_source = xml_core::text::read_text_file(&reference.path).ok()?;
+            let schema_source = read_text_file(&reference.path, MAX_RESOURCE_SIZE).ok()?;
             if let Some(offset) = xsd_element_name_offset(&schema_source, name) {
                 return Some((reference.path, schema_source, offset));
             }
@@ -1405,11 +1412,11 @@ fn element_name_at(source: &str, offset: usize) -> Option<String> {
 }
 
 fn xml_symbols(source: &str) -> Value {
+    let lines = selection::LineIndex::new(source);
     let mut reader = Reader::from_str(source);
     let mut stack: Vec<(String, usize)> = Vec::new();
     let mut search_from = 0usize;
     let mut symbols = Vec::new();
-    let lines = selection::LineIndex::new(source);
     loop {
         match reader.read_event() {
             Ok(Event::Start(element)) => {

@@ -10,8 +10,6 @@
 //! as editors do when they open such a file, so offsets computed on the
 //! decoded text match the positions of the editor.
 
-use std::{fs, io, path::Path};
-
 /// The byte order mark, as it appears at the start of a decoded text.
 pub const BYTE_ORDER_MARK: char = '\u{FEFF}';
 
@@ -75,18 +73,6 @@ pub fn decode_bytes(bytes: &[u8]) -> Option<String> {
     })
 }
 
-/// Reads and decodes an XML or DTD file ([`decode_bytes`]); undecodable
-/// content is an [`io::ErrorKind::InvalidData`] error.
-pub fn read_text_file(path: impl AsRef<Path>) -> io::Result<String> {
-    let bytes = fs::read(path)?;
-    decode_bytes(&bytes).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "the file is not valid in its declared or detected encoding",
-        )
-    })
-}
-
 /// Single-byte encoding declared by `<?xml ... encoding="..."?>`, when it
 /// can be decoded without a table.
 fn declared_encoding(bytes: &[u8]) -> Option<TextEncoding> {
@@ -110,7 +96,10 @@ fn declared_encoding(bytes: &[u8]) -> Option<TextEncoding> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
+    use crate::resource::{ResourceError, read_text_file};
 
     fn utf16(text: &str, little_endian: bool, bom: bool) -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -173,12 +162,9 @@ mod tests {
         fs::create_dir_all(&directory).unwrap();
         let path = directory.join("utf16.xsd");
         fs::write(&path, utf16("<schema/>", true, true)).unwrap();
-        assert_eq!(read_text_file(&path).unwrap(), "<schema/>");
+        assert_eq!(read_text_file(&path, 100).as_deref(), Ok("<schema/>"));
         fs::write(&path, b"<a>\xFF</a>").unwrap();
-        assert_eq!(
-            read_text_file(&path).unwrap_err().kind(),
-            io::ErrorKind::InvalidData
-        );
+        assert_eq!(read_text_file(&path, 100), Err(ResourceError::NotUtf8));
         let _ = fs::remove_dir_all(&directory);
     }
 }

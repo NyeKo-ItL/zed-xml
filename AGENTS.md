@@ -36,13 +36,17 @@ Keep the dependency direction: core crates never depend on `xml-lsp` or on LSP J
 - `xml_core::wellformed`: `check_well_formedness` returning every problem with a stable `XmlProblemKind::id()`.
 - `xml_core` formatter (`format.rs`, re-exported): `FormatOptions`, `format_xml_with`, `format_xml_range`, `LineEnding`, `SplitAttributes`, `EmptyElements`.
 - `xml_core::diff::diff_text`: turns a rewritten text into minimal `TextChange`s; use it for any edit that rewrites a document.
-- `xml_core::text`: `read_text_file`/`decode_bytes` (byte order marks, UTF-16, declared ISO-8859-1), `strip_bom`. Read every schema, DTD, catalog or workspace file through `read_text_file`, never `fs::read_to_string`.
+- `xml_core::text`: `decode_bytes` (byte order marks, UTF-16, declared ISO-8859-1), `strip_bom`; `xml_core::resource::read_text_file` decodes through it.
 - `xsd_core::model`: `parse_xsd_model`, `XsdModelSet` (resolution across schemas: global components, `resolve_element_path`, `resolve_attribute`, `attribute_uses`, `child_elements`, `simple_type_info`, `enumeration`; `ResolvedElement::skipped` marks elements matched by a `processContents="skip"` wildcard). Prefer it over the flat maps for new features. `XsdSchema::models` holds the models of a parsed/merged flat schema, which the validator uses for value checks.
 - `xsd_core::datatypes`: `BuiltinType` (hierarchy, `white_space`, `parse` into a comparable `Value`), `WhiteSpace`, `Decimal`, `XsdModelSet::simple_type` returning a `SimpleType` (atomic/list/union with its facets per restriction step) whose `validate`/`values_equal` check a value in the value space. Use it for any value check instead of ad-hoc parsing.
 - `xsd_core::pattern`: `translate`/`compile`/`is_match` of XSD regular expressions (cached compiled `regex::Regex`).
 - `xsd_core::identity`: `XsdIdentityConstraint` (parsed with the element declarations of the model), `parse_xpath` (selector/field XPath subset), `XsdModelSet::identity_problems`; `xsd_core::identity_links` and `dtd_core::id_links` return (reference, target) ranges of IDREF/keyref values. Schema component errors that do not prevent validation go to `XsdSchema::problems` (the server reports them as schema errors, the conformance suites as invalid schemas through `xml_conformance::schema_set`).
 - `dtd_core`: `Dtd::allowed_children`, `ContentAutomaton`, `validate::{check_entity_references, validate_instance, entity_reference_at}`, `is_name`/`is_nmtoken`.
 - In `xml-lsp`: `selection::LineIndex` (offset to LSP position in O(log n)), `position_at`/`offset_at` in `main.rs` (both in the negotiated `positions::PositionEncoding`), `rename::is_ncname`/`is_qname`, `links::unescape`/`uri_scheme`/`doctype_external_id`, `code_actions::Actions` and `edit_distance`, `symbols::match_score` and `scan_workspace`, `hover::load_models`/`instance_models`/`Document`, `catalog::Catalogs`, `schemas::SchemaStore` (`self.schemas.load`, never `parse_xsd` on a schema file), `analysis::AnalysisCache` (`self.analyses.tree(uri, source)` instead of `XmlTagTree::parse` in request handlers).
+- `xml_core::resource`: `read_text_file` (the only way to read a file a document refers to: refuses network paths and non-regular files, bounded size, decodes BOM/UTF-16/ISO-8859-1), `is_local_file` (existence check that never probes network paths), `is_network_path`, `MAX_RESOURCE_SIZE`.
+- `xsd_core::model`: `parse_xsd_model`, `XsdModelSet` (resolution across schemas: global components, `resolve_element_path`, `resolve_attribute`, `attribute_uses`, `child_elements`, `simple_type_info`, `enumeration`). Prefer it over the flat maps for new features.
+- `dtd_core`: `Dtd::allowed_children`, `ContentAutomaton`, `validate::{check_entity_references, validate_instance, entity_reference_at}`, `is_name`/`is_nmtoken`.
+- In `xml-lsp`: `selection::LineIndex` (offset to UTF-16 position in O(log n), and back with `offset`; use it instead of `position_at`/`offset_at` whenever more than a couple of positions are converted), `position_at`/`offset_at` in `main.rs`, `rename::is_ncname`/`is_qname`, `links::unescape`/`uri_scheme`/`doctype_external_id`, `code_actions::Actions` and `edit_distance`, `symbols::match_score` and `scan_workspace`, `hover::load_models`/`instance_models`/`Document`, `catalog::Catalogs`.
 
 ### `crates/xml-lsp/src` module map
 
@@ -119,8 +123,14 @@ CI denies every clippy warning (with the toolchain pinned by `CLIPPY_TOOLCHAIN` 
 
 ## Security
 
-- The server never downloads anything: remote schemas, DTDs and entities (`http(s)://`) are resolved only through XML catalogs to local files, otherwise reported as a warning.
-- External general entities are never read; DTD entity expansion is computed, not materialized, and bounded (`dtd_core::MAX_ENTITY_EXPANSION`, `MAX_PARAMETER_EXPANSION`, `MAX_ENTITY_DEPTH`). Keep these limits for any new expansion code ("billion laughs").
+The user-facing rules are in [docs/configuration.md](docs/configuration.md#security-model) and [SECURITY.md](SECURITY.md); keep them true.
+
+- The server never downloads anything: remote schemas, DTDs and entities (any non-`file:` scheme) are resolved only through XML catalogs to local files, otherwise reported as a warning. Network paths (UNC, `file://host/…`) count as remote: check `is_network_path`/`is_remote_location` before any `metadata`, `is_file` or `exists` call on a path that comes from a document or a catalog.
+- Read referenced files only through `xml_core::resource::read_text_file` with a size limit, never `fs::read_to_string`.
+- External general entities are never read; DTD entity expansion is computed, not materialized, and bounded (`dtd_core::MAX_ENTITY_EXPANSION`, `MAX_PARAMETER_EXPANSION`, `MAX_ENTITY_DEPTH`, `MAX_DOCUMENT_EXPANSION` for attribute values). Keep these limits for any new expansion code ("billion laughs", "quadratic blowup").
+- Graphs of referenced documents are bounded and cycle-safe (`xsd_core::MAX_SCHEMA_DOCUMENTS`, the catalog file limit, `dtd_core::MAX_SOURCES`).
+- No recursion on document structure: 100 000 nested elements must not overflow a 2 MiB test thread, and LSP answers must not nest JSON deeply (serializing and dropping a `serde_json::Value` is recursive). Per-element work must not walk all ancestors (use `XmlTagTree` parents and `resolve_namespace`, which only visits declaring ancestors). `fixture_smoke::every_request_handles_pathological_documents` checks this (100 000 levels in release builds).
+- Documents above `xml.maxFileSize` only get well-formedness diagnostics and the light features (`Settings::is_large`).
 - Keep workspace scans bounded (`symbols::scan_workspace` limits files and sizes, skips hidden directories, `target/` and `node_modules/`).
 - The extension only reads its own work directory and the environment variables it documents.
 

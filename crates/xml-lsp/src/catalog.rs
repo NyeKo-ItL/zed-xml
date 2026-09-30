@@ -33,6 +33,7 @@ use std::{
     time::SystemTime,
 };
 
+use xml_core::resource::{MAX_RESOURCE_SIZE, is_network_path, read_text_file};
 use xml_core::tags::{
     XmlAttribute, XmlTagTree, qualified_name_parts, resolve_namespace, scan_attributes,
 };
@@ -44,6 +45,9 @@ use crate::{links::unescape, path_to_uri};
 pub const CATALOG_NAMESPACE: &str = "urn:oasis:names:tc:entity:xmlns:xml:catalog";
 /// Maximum depth of successive delegations.
 const MAX_DELEGATION_DEPTH: usize = 16;
+/// Maximum number of catalog files loaded (roots, `nextCatalog` and
+/// delegation targets), so that a runaway catalog chain stays bounded.
+const MAX_CATALOG_FILES: usize = 64;
 /// Name of the catalog detected at the root of the workspace folders
 /// (`xml.catalogsAutoDetect`).
 pub const AUTO_DETECTED_CATALOG: &str = "catalog.xml";
@@ -402,7 +406,7 @@ pub fn catalog_paths(configured: &[String], roots: &[PathBuf], auto_detect: bool
             match roots
                 .iter()
                 .map(|root| root.join(value))
-                .find(|path| path.exists())
+                .find(|path| !is_network_path(path) && path.exists())
                 .or_else(|| roots.first().map(|root| root.join(value)))
             {
                 Some(path) => path,
@@ -418,7 +422,7 @@ pub fn catalog_paths(configured: &[String], roots: &[PathBuf], auto_detect: bool
         for root in roots {
             let path = root.join(AUTO_DETECTED_CATALOG);
             if !paths.contains(&path)
-                && xml_core::text::read_text_file(&path).is_ok_and(|source| is_catalog(&source))
+                && read_text_file(&path, MAX_RESOURCE_SIZE).is_ok_and(|source| is_catalog(&source))
             {
                 paths.push(path);
             }
@@ -451,6 +455,9 @@ fn home_directory() -> Option<PathBuf> {
 type Stamp = Option<(SystemTime, u64)>;
 
 fn stamp(path: &Path) -> Stamp {
+    if is_network_path(path) {
+        return None;
+    }
     let metadata = fs::metadata(path).ok()?;
     Some((metadata.modified().ok()?, metadata.len()))
 }
@@ -546,16 +553,20 @@ impl Catalogs {
         let mut reachable = HashSet::new();
         let mut queue = self.roots.iter().cloned().collect::<VecDeque<_>>();
         while let Some(path) = queue.pop_front() {
-            if !reachable.insert(path.clone()) {
+            if reachable.contains(&path) {
                 continue;
             }
+            if reachable.len() >= MAX_CATALOG_FILES {
+                break;
+            }
+            reachable.insert(path.clone());
             let current = stamp(&path);
             let up_to_date = self
                 .files
                 .get(&path)
                 .is_some_and(|loaded| loaded.stamp == current);
             if !up_to_date {
-                let catalog = match xml_core::text::read_text_file(&path) {
+                let catalog = match read_text_file(&path, MAX_RESOURCE_SIZE) {
                     Ok(source) => parse_catalog(&source, &path_to_uri(&path)).map(Arc::new),
                     Err(error) => Err(format!("unreadable catalog: {error}")),
                 };
@@ -842,6 +853,15 @@ pub fn catalog_problems(document_uri: &str, source: &str) -> Vec<CatalogProblem>
         .iter()
         .filter_map(|entry| {
             let path = target_path(&entry.target)?;
+            if is_network_path(&path) {
+                return Some(CatalogProblem {
+                    range: entry.target_range.clone(),
+                    message: format!(
+                        "Network path never accessed: {} (use a local copy)",
+                        path.display()
+                    ),
+                });
+            }
             let message = match entry.kind {
                 EntryKind::RewriteSystem | EntryKind::RewriteUri => {
                     // Only a directory prefix (`…/`) can be checked.
@@ -1342,6 +1362,69 @@ mod tests {
         assert!(problems[1].message.starts_with("Directory not found"));
         assert!(problems[2].message.starts_with("Catalog not found"));
         assert!(catalog_problems(&uri, "<root/>").is_empty());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn bounds_catalog_chains_and_never_reads_network_or_devices() {
+        let root = directory("limits");
+        // A `nextCatalog` cycle, then a chain longer than the bound.
+        write(
+            &root.join("a.xml"),
+            &catalog(r#"<nextCatalog catalog="b.xml"/><uri name="urn:a" uri="a.xsd"/>"#),
+        );
+        write(
+            &root.join("b.xml"),
+            &catalog(r#"<nextCatalog catalog="a.xml"/><uri name="urn:b" uri="b.xsd"/>"#),
+        );
+        let catalogs = Catalogs::new(vec![root.join("a.xml")]);
+        assert_eq!(catalogs.files().len(), 2);
+        assert!(catalogs.resolve_uri("urn:b").is_some());
+        assert_eq!(catalogs.resolve_uri("urn:missing"), None);
+
+        for index in 0..MAX_CATALOG_FILES + 10 {
+            write(
+                &root.join(format!("chain{index}.xml")),
+                &catalog(&format!(
+                    r#"<nextCatalog catalog="chain{}.xml"/><uri name="urn:{index}" uri="{index}.xsd"/>"#,
+                    index + 1
+                )),
+            );
+        }
+        let catalogs = Catalogs::new(vec![root.join("chain0.xml")]);
+        assert_eq!(catalogs.files().len(), MAX_CATALOG_FILES);
+        assert!(catalogs.resolve_uri("urn:0").is_some());
+        assert_eq!(
+            catalogs.resolve_uri(&format!("urn:{}", MAX_CATALOG_FILES + 5)),
+            None
+        );
+
+        // Network shares are neither read as catalogs nor checked as targets.
+        write(
+            &root.join("network.xml"),
+            &catalog(
+                r#"<nextCatalog catalog="file://server/share/catalog.xml"/>
+<uri name="urn:share" uri="file://server/share/s.xsd"/>"#,
+            ),
+        );
+        let catalogs = Catalogs::new(vec![root.join("network.xml")]);
+        let share = catalogs.resolve_location("urn:share").unwrap();
+        assert!(is_network_path(&share), "{share:?}");
+        let source = fs::read_to_string(root.join("network.xml")).unwrap();
+        let problems = catalog_problems(&path_to_uri(&root.join("network.xml")), &source);
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(
+            problems
+                .iter()
+                .all(|problem| problem.message.starts_with("Network path never accessed"))
+        );
+        #[cfg(unix)]
+        {
+            let device = root.join("device.xml");
+            std::os::unix::fs::symlink("/dev/zero", &device).unwrap();
+            let catalogs = Catalogs::new(vec![device]);
+            assert!(catalogs.resolve_uri("urn:a").is_none());
+        }
         let _ = fs::remove_dir_all(&root);
     }
 }

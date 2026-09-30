@@ -108,4 +108,43 @@ A document with a `<!DOCTYPE>` is validated against its DTD, like LemMinX:
 - Diagnostics codes: `dtd-grammar` (DTD syntax and grammar errors — duplicate elements, several `ID` attributes, undeclared notation, entity recursion or expansion limit —, loading failures, and a summary on the DOCTYPE system identifier for errors inside an external DTD), `xml-entity` (`&name;` references that are undeclared, unparsed, recursive, too large, or external/containing `<` in an attribute value; checked in every document), `dtd-validation` (root element name, undeclared elements and attributes, content models, required/fixed/enumerated attributes, `ID`/`IDREF(S)`, `NMTOKEN(S)`, `ENTITY/ENTITIES`). `data.kind` carries a stable identifier (`undefinedEntity`, `unexpectedElement`, `missingAttribute`, …).
 - When the external DTD cannot be loaded, the document is not validated against it and undeclared entity references are warnings. A DTD that declares no element (e.g. only `<!ENTITY nbsp "&#160;">`) only defines entities: the document structure is not checked. Undeclared `xmlns`, `xmlns:*`, `xml:*` and `xsi:*` attributes are accepted so that documents also bound to an XSD validate with both grammars. The content of an element that references an entity containing markup (or an external entity) is not checked against its model.
 - `.dtd` and `.ent` files use the DTD language: syntax errors, completion, hover, go to definition and document symbols; the XML formatter does not touch them.
-- Entity expansion is never materialized for general entities (only their size is computed) and is limited to 1 MiB per entity, 4 MiB of parameter-entity replacement text and 32 nesting levels.
+- Entity expansion is never materialized for general entities (only their size is computed) and is limited to 1 MiB per entity, 4 MiB of parameter-entity replacement text and 32 nesting levels. Attribute values referencing entities are normalized within a budget of 8 MiB per document (and per DTD for attribute defaults); beyond it, one `dtd-validation` / `expansionBudget` diagnostic says that the remaining values are not checked. Content models are matched within a budget of about 2.7·10⁸ automaton steps per document. See [Security model](#security-model).
+
+## Security model
+
+`xml-lsp` analyses files that may come from untrusted sources (a cloned repository, a downloaded document). Opening such a file must not let it read arbitrary data into the editor, reach the network or exhaust the machine. The rules below apply to every feature; limits are fixed unless a setting is named. To report a vulnerability, see [SECURITY.md](../SECURITY.md).
+
+### No network access
+
+- The server never opens a network connection and has no HTTP client. Remote locations (`http://`, `https://`, `ftp://` and any other non-`file:` scheme) in `xsi:schemaLocation`, `xs:include`/`xs:import`/`xs:redefine`, `<!DOCTYPE>` identifiers, external parameter entities, `xi:include`, XSLT imports, `<?xml-stylesheet?>`/`<?xml-model?>`, `xml.fileAssociations` and catalog entries are only resolved through `xml.catalogs` to local files; otherwise they are reported (a warning for schemas and DTDs) or shown as plain links that the editor opens.
+- Network file-system paths are treated as remote too and are never read or even probed: UNC paths (`\\server\share\…`, `//server/share/…`), Windows device paths (`\\.\…`, `\\?\UNC\…`) and `file://host/…` URIs naming a host other than `localhost`. This prevents a document from triggering SMB/WebDAV connections (and the credential leaks that come with them on Windows).
+
+### Local files
+
+- A document may reference any local file through a relative or absolute path, like in LemMinX and IntelliJ: resolving `../common/types.xsd` is the normal case. What the server reads is limited to what it needs to parse schemas, DTDs and catalogs, and it only reports what those grammars say (diagnostics, completion, hover); nothing is written.
+- Only regular files are read. Symbolic links are followed, but a link to a device (`/dev/zero`, `/dev/random`), a FIFO, a socket or a directory is refused, so a document cannot block the server or stream endless data into it.
+- Sizes are checked before and while reading: schemas, catalogs and other referenced resources at most 16 MiB, DTDs and external parameter entities 4 MiB, workspace files indexed for workspace symbols 4 MiB. Invalid UTF-8 is refused.
+- External general entities (`<!ENTITY chap SYSTEM "chap.xml">`) are never read, only checked for existence with `xml.validation.resolveExternalEntities`. `xml.validation.disallowDocTypeDecl` rejects DOCTYPEs altogether.
+- The workspace scan behind workspace symbols skips hidden directories, `target/` and `node_modules/`, does not follow symbolic links, and stops after 100 000 entries or 5000 files.
+
+### Bounded work
+
+| What | Limit |
+|------|-------|
+| Expansion of one general entity ("billion laughs") | 1 MiB (computed, never materialized) |
+| Parameter-entity replacement text per grammar | 4 MiB |
+| Entity and conditional section nesting | 32 levels |
+| Sources (files, replacement texts) of one DTD | 256 |
+| Entity text expanded into attribute values ("quadratic blowup") | 8 MiB per document, 8 MiB of attribute defaults per DTD |
+| Content model matching | about 2.7·10⁸ automaton steps per document |
+| Content model group nesting in a DTD | 64 levels |
+| Schema documents loaded for one document (`xs:include`/`xs:import` graph, cycles included) | 256 |
+| Catalog files loaded (`nextCatalog`, `delegate*`) | 64, delegation depth 16 |
+| XSD nesting depth | 256 levels (deeper schemas are reported as invalid) |
+| XML nesting depth reported by well-formedness checks | 512 levels |
+| Documents analysed as a whole | `xml.maxFileSize` (10 MiB by default) |
+| Formatted output | 8 times the input, at least 64 MiB (deeply nested siblings would otherwise format into gigabytes) |
+| Selection range chain | 256 ranges (innermost ranges and the whole document) |
+| Quoted values and name lists in diagnostic messages | 80 characters, 50 names |
+
+Deeply nested documents (100 000 levels and more) are handled without recursion: parsers, the tag tree, namespace resolution, the formatter, document symbols (nested up to 128 levels, flat beyond) and selection ranges are iterative or bounded, and the LSP answers never nest deeper than a few hundred JSON levels. A smoke test runs every request over generated hostile documents to keep it so.

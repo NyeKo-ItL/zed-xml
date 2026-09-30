@@ -30,6 +30,7 @@ All notable changes to this project are documented in this file. The format is b
 - `CONTRIBUTING.md`, `CHANGELOG.md` and `AGENTS.md`; the README now focuses on users (installation, configuration, troubleshooting).
 - Server robustness: diagnostics computed on a background worker (latest snapshot only, stale results dropped, `version` in `publishDiagnostics`), `$/cancelRequest` (`RequestCancelled` for queued requests), panic isolation per request and notification (`InternalError`, logged on stderr), LSP-conformant `shutdown`/`exit` (requests after `shutdown` rejected, exit code 0 or 1), `positionEncoding` negotiation (UTF-8, UTF-16, UTF-32), byte order marks and UTF-16 files read from disk (new `xml_core::text`).
 - Incremental analysis: tag trees cached per document version and shared by highlights, linked editing, folding and document symbols; parsed schemas and merged schema sets cached by modification time; debounced validation (`xml.validation.debounce`); a size budget for large documents (`xml.maxFileSize`, `large-file` information diagnostic); `criterion` benchmarks for `xml-core`, `xsd-core` and the server, run in quick mode by a `Benchmarks` CI job. On a 1 MB document: document symbols about 40 times faster (no more quadratic position conversion), highlights 3 times, diagnostics after a change 1.7 times, completion 1.4 times.
+- Security hardening: `SECURITY.md` (private vulnerability reporting) and a security model in `docs/configuration.md`; network shares (UNC paths, `file://host/…`) and non-regular files (devices, FIFOs, directories) are never read, referenced files are read with size bounds; at most 256 schema documents and 64 catalog files are loaded per document; attribute values expanding entities are bounded per document ("quadratic blowup", new `expansionBudget` diagnostic kind), and so are content model matching and diagnostic messages.
 
 ### Changed
 
@@ -46,6 +47,7 @@ All notable changes to this project are documented in this file. The format is b
 ### Fixed
 
 - Prefixed or default-namespace root elements (`<t:root xmlns:t="urn:x">`) are matched by expanded name instead of being reported as undeclared.
+- Deeply nested documents (100 000 levels) no longer overflow the stack in selection ranges, and no longer make namespace resolution, the tag tree, range formatting, document symbols, references, code actions and diagnostics quadratic; formatting a document whose indentation would take gigabytes is refused; XSD schemas nested more than 256 levels are reported instead of being parsed.
 - Declared the `xml-lsp --version` process capability for versioned downloaded binaries on Windows and Unix-like platforms; release synchronization updates the permission names with the version.
 - Downloaded `xml-lsp` binaries are cached under a versioned path, so an outdated or locked binary from a previous extension version cannot be reused.
 - The cached `xml-lsp` binary is reused when its version matches, instead of being downloaded again on every start (#16).

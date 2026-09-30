@@ -23,7 +23,7 @@
 //! and `<!DOCTYPE ...>` declarations are ignored by [`scan_tags`] and
 //! listed separately by [`scan_markup`].
 
-use std::ops::Range;
+use std::{collections::HashMap, ops::Range};
 
 /// Kind of a tag found in the source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,7 +144,17 @@ impl XmlTagPair {
 pub struct XmlTagTree {
     elements: Vec<XmlElement>,
     orphan_end_tags: Vec<XmlTag>,
+    /// For each element, the nearest strict ancestor whose start tag may
+    /// declare a namespace (contains `xmlns`): namespace resolution only
+    /// visits these, so it stays constant time in a deeply nested document
+    /// without declarations.
+    namespace_parents: Vec<Option<usize>>,
 }
+
+/// Maximum number of declaring ancestors visited to resolve a prefix (a
+/// document declaring namespaces on thousands of nested elements is
+/// hostile: beyond, the prefix is considered undeclared).
+const MAX_NAMESPACE_SCOPES: usize = 4096;
 
 impl XmlTagTree {
     /// Parses the source and pairs the tags.
@@ -156,31 +166,55 @@ impl XmlTagTree {
     pub fn parse(source: &str) -> Self {
         let mut elements: Vec<XmlElement> = Vec::new();
         let mut orphan_end_tags = Vec::new();
+        let mut namespace_parents: Vec<Option<usize>> = Vec::new();
+        let mut declares: Vec<bool> = Vec::new();
         let mut open: Vec<usize> = Vec::new();
+        // Positions in `open` of the open elements, by name: an end tag
+        // finds its element without scanning the whole stack (linear even
+        // for many unmatched end tags deep in a document).
+        let mut open_by_name: HashMap<&str, Vec<usize>> = HashMap::new();
 
         for tag in scan_tags(source) {
             match tag.kind {
                 XmlTagKind::Start | XmlTagKind::SelfClosing => {
                     let is_start = tag.kind == XmlTagKind::Start;
+                    let parent = open.last().copied();
+                    namespace_parents.push(parent.and_then(|parent| {
+                        if declares[parent] {
+                            Some(parent)
+                        } else {
+                            namespace_parents[parent]
+                        }
+                    }));
+                    declares.push(source[tag.range.clone()].contains("xmlns"));
+                    let name = tag.name(source);
                     elements.push(XmlElement {
                         start_tag: tag,
                         end_tag: None,
-                        parent: open.last().copied(),
+                        parent,
                         depth: open.len(),
                     });
                     if is_start {
+                        open_by_name.entry(name).or_default().push(open.len());
                         open.push(elements.len() - 1);
                     }
                 }
                 XmlTagKind::End => {
                     let name = tag.name(source);
-                    let matching = open
-                        .iter()
-                        .rposition(|&index| elements[index].name(source) == name);
+                    let matching = open_by_name
+                        .get(name)
+                        .and_then(|positions| positions.last())
+                        .copied();
                     match matching {
                         Some(position) => {
                             let index = open[position];
-                            open.truncate(position);
+                            for closed in open.drain(position..).rev() {
+                                if let Some(positions) =
+                                    open_by_name.get_mut(elements[closed].name(source))
+                                {
+                                    positions.pop();
+                                }
+                            }
                             elements[index].end_tag = Some(tag);
                         }
                         None => orphan_end_tags.push(tag),
@@ -192,7 +226,18 @@ impl XmlTagTree {
         Self {
             elements,
             orphan_end_tags,
+            namespace_parents,
         }
+    }
+
+    /// Ancestors of `index` (nearest first) whose start tag may declare a
+    /// namespace, bounded by [`MAX_NAMESPACE_SCOPES`].
+    fn namespace_ancestors(&self, index: usize) -> impl Iterator<Item = usize> + '_ {
+        std::iter::successors(
+            self.namespace_parents.get(index).copied().flatten(),
+            |&parent| self.namespace_parents.get(parent).copied().flatten(),
+        )
+        .take(MAX_NAMESPACE_SCOPES)
     }
 
     /// Elements in the order of their start tag (a parent always precedes
@@ -299,7 +344,7 @@ pub fn namespace_declaration<'t>(
     prefix: Option<&str>,
 ) -> Option<(usize, &'t XmlAttribute)> {
     std::iter::once(element)
-        .chain(tree.ancestors(element))
+        .chain(tree.namespace_ancestors(element))
         .find_map(|index| {
             attributes
                 .get(index)?

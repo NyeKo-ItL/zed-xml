@@ -28,6 +28,7 @@ use std::{
 };
 
 use serde_json::{Value, json};
+use xml_core::resource::is_local_file;
 use xml_core::tags::{
     XmlAttribute, XmlMarkupKind, XmlTagTree, qualified_name_parts, resolve_namespace,
     scan_attributes, scan_markup,
@@ -348,17 +349,17 @@ pub fn resolve_reference(
                 .as_deref()
                 .and_then(|namespace| catalogs.resolve_uri(namespace))
                 .and_then(|target| target_path(&target))
-                .filter(|path| path.is_file()),
+                .filter(|path| is_local_file(path)),
             LinkKind::Doctype => catalogs
                 .resolve_external(reference.key.as_deref(), Some(value))
                 .and_then(|target| target_path(&target))
-                .filter(|path| path.is_file()),
+                .filter(|path| is_local_file(path)),
             _ => None,
         }
         .or_else(|| {
             catalogs
                 .resolve_location(value)
-                .filter(|path| path.is_file())
+                .filter(|path| is_local_file(path))
         });
         if let Some(path) = cataloged {
             return Some(LinkTarget::File(path));
@@ -380,7 +381,7 @@ pub fn resolve_target(document_uri: &str, value: &str) -> Option<LinkTarget> {
             "http" | "https" => Some(LinkTarget::Url(value.to_owned())),
             "file" => {
                 let path = uri_to_path(strip_query_and_fragment(value));
-                path.is_file().then_some(LinkTarget::File(path))
+                is_local_file(&path).then_some(LinkTarget::File(path))
             }
             _ => None,
         };
@@ -402,7 +403,7 @@ pub fn resolve_target(document_uri: &str, value: &str) -> Option<LinkTarget> {
         } else {
             resolve_path(base.as_deref()?, candidate)
         };
-        path.is_file().then_some(LinkTarget::File(path))
+        is_local_file(&path).then_some(LinkTarget::File(path))
     })
 }
 
