@@ -56,6 +56,8 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Fixed
 
+- Formatting no longer changes the text of mixed content or grows on every run: a processing instruction after text stays inline (it gained a line break each time), `<p>&b;</p>` keeps its closing tag on the same line, whitespace before a CDATA section or a reference is kept, and a DOCTYPE whose quoted literals contain markup (`<!ENTITY b 'a/>'>`) is emitted as it was written. The line ending of the result no longer depends on the line breaks of leading whitespace, the DOCTYPE, comments, CDATA sections or processing instructions, which made formatting non-idempotent on documents mixing `\r\n` and `\n`.
+- A `\r` ending the document is an ordinary character for LSP positions in both directions (an edit at the end of such a document landed before it).
 - `xs:redefine` and `xs:override` schemas are loaded as dependencies (their `schemaLocation` was ignored), and a redefined type or group extends the definition it replaces instead of itself.
 - A schema that only defines types, groups or attributes (as included by other schemas) is no longer rejected for containing no `xs:element`; only a document that is not an `xs:schema` is.
 - Elements and types no longer resolve to a same-named component of another namespace: only components without namespace ("chameleon" schemas) match any namespace. An unqualified child where the schema requires qualified ones is reported as being in the wrong namespace, with the expected expanded name.

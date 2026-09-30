@@ -120,18 +120,31 @@ pub(crate) fn floor_position_offset(source: &str, offset: usize) -> usize {
     offset
 }
 
-/// Content of the line starting at `start` (up to its `\n`, a final `\r`
-/// removed).
+/// Content of the line starting at `start` (up to its `\n`, the `\r` of a
+/// CRLF removed; a `\r` ending the document is an ordinary character, as
+/// [`position_at`](crate::position_at) counts it).
 pub(crate) fn line_content(source: &str, start: usize) -> &str {
     let rest = source.get(start..).unwrap_or_default();
-    let line = rest.find('\n').map_or(rest, |end| &rest[..end]);
-    line.strip_suffix('\r').unwrap_or(line)
+    match rest.find('\n') {
+        Some(end) => rest[..end].strip_suffix('\r').unwrap_or(&rest[..end]),
+        None => rest,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_carriage_return_ending_the_document_is_a_character() {
+        let source = "<a/>\r\n<b/>\r";
+        let end = source.len();
+        let position = crate::position_at(source, end);
+        assert_eq!(position, json!({"line": 1, "character": 5}));
+        assert_eq!(crate::offset_at(source, 1, 5), end);
+        assert_eq!(crate::offset_at(source, 0, 9), 4);
+    }
 
     #[test]
     fn negotiates_the_client_preference_with_utf16_as_fallback() {

@@ -91,7 +91,10 @@ scripts/fetch-test-suites.sh
 cargo test --release -p xml-conformance
 cargo test --release -p xml-lsp fixture_smoke   # also covers fixtures over 64 KB
 BLESS=1 cargo test --release -p xml-conformance # after a fix, rewrite the baselines and review the diff
+XML_LSP_MUTATIONS=300 XML_LSP_MUTATION_SEED=1 cargo test --release -p xml-lsp mutated   # longer fuzzing session
 ```
+
+`fixture_smoke::every_request_handles_mutated_fixtures` mutates every small fixture (truncation, cuts, duplicated spans, stray markup, deterministic seed) and checks that no request panics, ranges stay inside the document and formatting is idempotent; a failure prints the mutated document, which becomes a unit test.
 
 A change that makes more cases pass must delete their lines from `crates/xml-conformance/baselines/`; a new failure fails the build. See [tests/README.md](tests/README.md) for what each suite checks and how to add fixtures.
 
