@@ -283,19 +283,46 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Keep in sync with SUPPORTED_PLATFORMS in src/lib.rs (the extension
+        # downloads the musl builds on Linux) and with CONTRIBUTING.md.
+        # `smoke` runs the binary, so it is false for cross-compiled targets
+        # (x86_64 macOS on the arm64 runner, arm64 Windows with the MSVC
+        # cross tools of the x64 runner).
         include:
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            binary: xml-lsp.exe
-            asset: xml-lsp-x86_64-pc-windows-msvc.exe
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             binary: xml-lsp
-            asset: xml-lsp-x86_64-unknown-linux-gnu
-          - os: macos-14
+            smoke: true
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            binary: xml-lsp
+            musl: true
+            smoke: true
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            binary: xml-lsp
+            smoke: true
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            binary: xml-lsp
+            musl: true
+            smoke: true
+          - os: macos-latest
             target: aarch64-apple-darwin
             binary: xml-lsp
-            asset: xml-lsp-aarch64-apple-darwin
+            smoke: true
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            binary: xml-lsp
+            smoke: false
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary: xml-lsp.exe
+            smoke: true
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            binary: xml-lsp.exe
+            smoke: false
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -304,16 +331,40 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - run: cargo build -p xml-lsp --release --target ${{ matrix.target }}
+      - name: Install the musl toolchain
+        if: matrix.musl
+        run: sudo apt-get update && sudo apt-get install --yes musl-tools
+      - run: cargo build -p xml-lsp --release --locked --target ${{ matrix.target }}
       - name: Prepare release asset
+        id: asset
         shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          BINARY: ${{ matrix.binary }}
+          SMOKE: ${{ matrix.smoke }}
         run: |
+          EXTENSION=""
+          if [[ "$BINARY" == *.exe ]]; then EXTENSION=".exe"; fi
+          ASSET="xml-lsp-$TARGET$EXTENSION"
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "dist/${{ matrix.asset }}"
+          cp "target/$TARGET/release/$BINARY" "dist/$ASSET"
+          if [[ "$SMOKE" == "true" ]]; then
+            VERSION=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/xml-lsp/Cargo.toml)
+            OUTPUT=$("dist/$ASSET" --version | tr -d '\r')
+            if [[ "$OUTPUT" != "xml-lsp $VERSION" ]]; then
+              echo "::error::dist/$ASSET --version printed '$OUTPUT', expected 'xml-lsp $VERSION'"
+              exit 1
+            fi
+          fi
+          if [[ "$TARGET" == *-linux-musl ]] && file "dist/$ASSET" | grep -q "dynamically linked"; then
+            echo "::error::$ASSET must be statically linked"
+            exit 1
+          fi
+          echo "name=$ASSET" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         with:
           name: xml-lsp-${{ matrix.target }}
-          path: dist/${{ matrix.asset }}
+          path: dist/${{ steps.asset.outputs.name }}
           if-no-files-found: error
 
   release:
@@ -337,6 +388,23 @@ jobs:
           pattern: xml-lsp-*
           path: dist
           merge-multiple: true
+      - name: Write SHA-256 checksums
+        shell: bash
+        working-directory: dist
+        run: |
+          shopt -s nullglob
+          assets=(xml-lsp-*)
+          if [[ ${#assets[@]} -ne 8 ]]; then
+            echo "::error::expected 8 release binaries, found ${#assets[@]}: ${assets[*]}"
+            exit 1
+          fi
+          sha256sum "${assets[@]}" > SHA256SUMS
+          for asset in "${assets[@]}"; do
+            awk -v asset="$asset" '$2 == asset' SHA256SUMS > "$asset.sha256"
+            test -s "$asset.sha256"
+          done
+          sha256sum --check SHA256SUMS
+          cat SHA256SUMS
       - name: Move release tag to merged commit
         id: tag
         env:
@@ -346,9 +414,40 @@ jobs:
         run: |
           RELEASE_TAG="${RELEASE_BRANCH#release/version-sync-}"
           git push --force origin "$MERGE_SHA:refs/tags/$RELEASE_TAG"
+          # git-cliff reads the local tag to find the commits of this release.
+          git tag --force "$RELEASE_TAG" "$MERGE_SHA"
           echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+      - name: List the commits of the release
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --latest --strip all
+        env:
+          OUTPUT: commits.md
+      - name: Write the release notes
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.release_tag }}
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          {
+            # The hand-written CHANGELOG.md section of this version, if any.
+            awk -v heading="## [$VERSION]" '
+              index($0, heading) == 1 { found = 1; next }
+              found && /^## / { exit }
+              found { print }
+            ' CHANGELOG.md
+            echo
+            echo "## Commits"
+            cat commits.md
+            echo
+            echo "## Verifying the downloads"
+            echo
+            echo "Each binary has a \`.sha256\` file and \`SHA256SUMS\` lists them all; the Zed extension checks the checksum before it starts a downloaded server. To check a download manually: \`sha256sum --check --ignore-missing SHA256SUMS\` (or \`shasum -a 256 -c\` on macOS)."
+          } > release-notes.md
+          cat release-notes.md
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.release_tag }}
           files: dist/*
-          generate_release_notes: true
+          body_path: release-notes.md

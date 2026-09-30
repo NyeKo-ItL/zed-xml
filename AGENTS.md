@@ -11,7 +11,7 @@ Guidance for coding agents (and humans) working in this repository. It complemen
 
 `zed-xml` is a [Zed](https://zed.dev) extension for XML (XML, XSD, XSLT, SVG, WSDL, plist, XJB, Android XML) and DTD files. It has two deliverables built from one Cargo workspace:
 
-1. **The extension** (`extension.toml`, `src/lib.rs`, `languages/`): a `wasm32-wasip2` module that declares the tree-sitter grammars (`xml` and `dtd` from `tree-sitter-grammars/tree-sitter-xml`), the Zed languages and their queries, and starts the language server. It resolves the server from `XML_LSP_PATH`, else a cached binary whose `--version` matches the extension version, else the matching GitHub release asset. It forwards `lsp.xml-lsp.settings` as `initializationOptions` and as the answer to `workspace/configuration`.
+1. **The extension** (`extension.toml`, `src/lib.rs`, `languages/`): a `wasm32-wasip2` module that declares the tree-sitter grammars (`xml` and `dtd` from `tree-sitter-grammars/tree-sitter-xml`), the Zed languages and their queries, and starts the language server. It resolves the server from `XML_LSP_PATH`, else a cached binary whose `--version` matches the extension version and whose SHA-256 matches the recorded checksum, else the matching GitHub release asset, verified against its published `.sha256` (dependency-free SHA-256 in `src/sha256.rs`). Supported platforms are the `SUPPORTED_PLATFORMS` table of `src/lib.rs`, kept in sync with the release matrix of `ci.yml` by a unit test. It forwards `lsp.xml-lsp.settings` as `initializationOptions` and as the answer to `workspace/configuration`.
 2. **The language server** `xml-lsp` (`crates/xml-lsp`): a native Rust LSP server over stdio (`lsp-server` + `serde_json`, JSON values rather than `lsp-types`), serving the languages `XML` and `DTD`. Behaviour is modelled on LemMinX (the Red Hat XML language server used by VS Code/Eclipse), with IntelliJ as a second reference.
 
 ## Architecture
@@ -20,7 +20,7 @@ Guidance for coding agents (and humans) working in this repository. It complemen
 
 | Crate | Responsibility |
 |-------|----------------|
-| `zed-xml` (root, `src/lib.rs`) | Zed extension: server command, download and version check, settings forwarding. No XML logic. |
+| `zed-xml` (root, `src/lib.rs`, `src/sha256.rs`) | Zed extension: server command, download with checksum and version check, supported platforms, settings forwarding. No XML logic. |
 | `crates/xml-core` | XML-only building blocks, no LSP types: `parse_xml` (quick-xml + tolerant well-formedness, `XmlDiagnostic` with codes `xml-syntax`/`xml-structure`), basic completion (`complete_xml`, `auto_close_tag`), formatter, tag scanner, text diff. |
 | `crates/xsd-core` | XSD: flat `XsdSchema` (`parse_xsd`, `merge_schemas`) used for validation (`validate_document_located`) and completion (`complete_elements`/`complete_attributes`/`complete_attribute_values`); schema location resolution (`resolve_schema_locations_with`, `resolve_schema_dependencies_with`, `LocationResolver`, `resolve_location`, `file_uri_to_path`, `percent_decode`, `resolve_path`); and the namespace-resolved component model in `model`. |
 | `crates/dtd-core` | DTD: `find_doctype`, `parse_dtd`/`load_document_dtd` with an `ExternalLoader`, `Dtd` (declarations, sources, problems), content models as NFAs (`content`), instance validation and entity checks (`validate`), XML name predicates (`names`). Depends on `xml-core`. |

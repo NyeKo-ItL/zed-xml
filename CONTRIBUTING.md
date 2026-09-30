@@ -127,9 +127,23 @@ Tests live next to the code (`#[cfg(test)] mod tests`). Language-server features
 
 Versions are kept identical in `Cargo.toml`, `crates/*/Cargo.toml`, `Cargo.lock` and `extension.toml`: the extension downloads the `xml-lsp` release whose version equals its own and checks it with `--version`. The pipeline in `.github/workflows/ci.yml` does the synchronization:
 
-1. Move the `Unreleased` entries of `CHANGELOG.md` under the new version and merge that to `main`.
+1. Move the `Unreleased` entries of `CHANGELOG.md` under a `## [X.Y.Z] - YYYY-MM-DD` heading and merge that to `main`. `CHANGELOG.md` is written by hand for users and stays the source of truth; to check that nothing is missing, list the conventional commits since the last tag with [git-cliff](https://git-cliff.org) (`cargo install git-cliff`, then `git cliff --unreleased`, configured by `cliff.toml`).
 2. Push a tag `vX.Y.Z` on `main`. The `prepare_release_pr` job bumps every version to `X.Y.Z`, runs `cargo check --workspace` to refresh `Cargo.lock`, pushes the branch `release/version-sync-vX.Y.Z` and opens the pull request `chore: synchronize release version vX.Y.Z`.
-3. Merge that pull request. The `native` job builds `xml-lsp` for `x86_64-pc-windows-msvc`, `x86_64-unknown-linux-gnu` and `aarch64-apple-darwin`; the `release` job moves the tag to the merge commit and publishes a GitHub release with the binaries (`xml-lsp-<target>[.exe]`) and generated notes.
+3. Merge that pull request. The `native` job builds `xml-lsp` for the targets below and runs `--version` on those built natively (musl builds must be statically linked). The `release` job writes `SHA256SUMS` and one `<asset>.sha256` per binary, moves the tag to the merge commit, and publishes a GitHub release with the binaries, the checksum files and the release notes.
+
+   | Target | Runner | Used by the extension on |
+   |--------|--------|--------------------------|
+   | `x86_64-unknown-linux-musl` | `ubuntu-latest` | Linux x86_64 |
+   | `aarch64-unknown-linux-musl` | `ubuntu-24.04-arm` | Linux aarch64 |
+   | `x86_64-unknown-linux-gnu` | `ubuntu-latest` | (other clients) |
+   | `aarch64-unknown-linux-gnu` | `ubuntu-24.04-arm` | (other clients) |
+   | `aarch64-apple-darwin` | `macos-latest` | macOS Apple silicon |
+   | `x86_64-apple-darwin` | `macos-latest` (cross-compiled) | macOS Intel |
+   | `x86_64-pc-windows-msvc` | `windows-latest` | Windows x86_64 |
+   | `aarch64-pc-windows-msvc` | `windows-latest` (cross-compiled) | Windows arm64 |
+
+   Adding a platform means adding it to this matrix and to `SUPPORTED_PLATFORMS` in `src/lib.rs` (a unit test checks that every supported platform is built, and the `release` job checks the number of binaries).
+   The release notes are the `CHANGELOG.md` section of the version, followed by the commits of the release grouped by type (`git cliff --latest --strip all` with `cliff.toml`; `chore: synchronize release version` commits are skipped) and instructions to verify the checksums.
 4. To ship the extension through the Zed registry, update this repository's submodule and its `version` in `extensions.toml` in [zed-industries/extensions](https://github.com/zed-industries/extensions), as described in Zed's [publishing guide](https://zed.dev/docs/extensions/developing-extensions). The release must exist first, since the extension downloads the server from it.
 
 ## License
