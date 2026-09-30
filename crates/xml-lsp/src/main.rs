@@ -426,6 +426,7 @@ impl XmlLanguageServer {
         }
         extra.extend(catalog_diagnostics(uri, source));
         extra.extend(xslt::diagnostics(uri, source));
+        extra.extend(schema_document_diagnostics(source));
         extra.extend(self.dtd_diagnostics(uri, source));
         if validation.schema != settings::SchemaValidation::Never {
             extra.extend(self.schema_diagnostics(uri, source));
@@ -1328,6 +1329,31 @@ fn xsd_error_diagnostic_at(
         "data": {"category": "xsd", "kind": "validation", "rule": diagnostic.kind.id()},
         "message": diagnostic.message,
     })
+}
+
+/// Problems of a schema document itself (the document is an `xs:schema`).
+fn schema_document_diagnostics(source: &str) -> Vec<Value> {
+    let problems = xsd_core::schema_check::check_schema_document(source);
+    if problems.is_empty() {
+        return Vec::new();
+    }
+    let lines = selection::LineIndex::new(source);
+    problems
+        .into_iter()
+        .map(|problem| {
+            json!({
+                "range": {
+                    "start": lines.position(source, problem.range.start),
+                    "end": lines.position(source, problem.range.end),
+                },
+                "severity": 1,
+                "source": "xml-lsp",
+                "code": "xsd-schema",
+                "data": {"category": "xsd", "kind": problem.rule},
+                "message": problem.message,
+            })
+        })
+        .collect()
 }
 
 fn xsd_schema_error_diagnostic(error: schemas::SchemaLoadError) -> Value {
@@ -4731,6 +4757,32 @@ i:noNamespaceSchemaLocation=\"missing.xsd\">\r\n  \
         assert_eq!(bound_edits[0]["newText"], "entry");
 
         std::fs::remove_file(schema_path).expect("schema should be removed");
+    }
+
+    #[test]
+    fn reports_representation_problems_in_schema_documents() {
+        let mut server = XmlLanguageServer::new();
+        let source = "<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\">\n  <xs:element name=\"a\" foo=\"1\"/>\n  <xs:element/>\n</xs:schema>";
+        let published = server.diagnostics("file:///tmp/a.xsd", source);
+        let diagnostics = published["diagnostics"].as_array().unwrap();
+        assert_eq!(
+            diagnostics
+                .iter()
+                .map(|diagnostic| (
+                    diagnostic["code"].as_str().unwrap(),
+                    diagnostic["data"]["kind"].as_str().unwrap(),
+                    diagnostic["range"]["start"]["line"].as_u64().unwrap()
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("xsd-schema", "invalidSchemaAttribute", 1),
+                ("xsd-schema", "missingSchemaAttribute", 2),
+            ]
+        );
+        assert_eq!(diagnostics[0]["range"]["start"]["character"], 23);
+        // An ordinary document is not a schema.
+        let other = server.diagnostics("file:///tmp/a.xml", "<root><element/></root>");
+        assert!(other["diagnostics"].as_array().unwrap().is_empty());
     }
 
     #[test]

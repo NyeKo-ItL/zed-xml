@@ -361,7 +361,6 @@ pub fn parse_xsd_model(source: &str) -> Result<XsdModel, String> {
         ..XsdModel::default()
     };
     context.top_level(&root, &mut model);
-    check_components(&root, &mut context.problems.borrow_mut());
     model.identity_constraints = context.identity_constraints.take();
     let mut names = HashSet::new();
     for constraint in &model.identity_constraints {
@@ -596,71 +595,6 @@ struct Context<'a> {
     attribute_form_qualified: bool,
     identity_constraints: RefCell<Vec<XsdIdentityConstraint>>,
     problems: RefCell<Vec<String>>,
-}
-
-/// Checks over the whole schema document: `id` attributes of the
-/// components are NCNames unique in the document, identity constraints are
-/// only declared in elements, with only their own attributes (annotation
-/// contents are not components).
-fn check_components(root: &Node, problems: &mut Vec<String>) {
-    let mut seen = HashSet::new();
-    let mut stack = vec![(root, "")];
-    while let Some((node, parent)) = stack.pop() {
-        if !is_xsd(node, &node.local) || node.local == "annotation" {
-            continue;
-        }
-        if let Some(id) = node.attribute("id") {
-            let id = id.trim().to_owned();
-            if !is_ncname(&id) {
-                problems.push(format!("'{id}' is not a valid id of <xs:{}>", node.local));
-            } else if !seen.insert(id.clone()) {
-                problems.push(format!("the id '{id}' is used twice in the schema"));
-            }
-        }
-        let allowed: &[&str] = match node.local.as_str() {
-            "unique" | "key" | "keyref" => {
-                if parent != "element" {
-                    problems.push(format!(
-                        "xs:{} is only allowed in an xs:element declaration, not in xs:{parent}",
-                        node.local
-                    ));
-                }
-                if node.local == "keyref" {
-                    &["id", "name", "refer"]
-                } else {
-                    &["id", "name"]
-                }
-            }
-            "selector" | "field" => {
-                if !matches!(parent, "unique" | "key" | "keyref") {
-                    problems.push(format!(
-                        "xs:{} is only allowed in xs:unique, xs:key or xs:keyref",
-                        node.local
-                    ));
-                }
-                &["id", "xpath"]
-            }
-            _ => &[],
-        };
-        if !allowed.is_empty() {
-            for (key, _) in &node.attributes {
-                if !key.contains(':') && key != "xmlns" && !allowed.contains(&key.as_str()) {
-                    problems.push(format!(
-                        "the attribute '{key}' is not allowed on xs:{}",
-                        node.local
-                    ));
-                }
-            }
-        }
-        let local = node.local.as_str();
-        stack.extend(
-            node.elements()
-                .map(|child| (child, local))
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev(),
-        );
-    }
 }
 
 impl Context<'_> {

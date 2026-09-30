@@ -33,6 +33,7 @@ use crate::{
     tags::{
         XML_NAMESPACE, XmlAttribute, XmlTag, XmlTagKind, scan_attributes, scan_markup, scan_tags,
     },
+    text::decode_references,
 };
 
 /// Kind of a well-formedness problem and the data needed to fix it.
@@ -458,49 +459,6 @@ fn check_namespaces(
             }
         }
     }
-}
-
-/// The text with its character references and the five predefined entity
-/// references replaced by the characters they stand for; other references
-/// are kept.
-fn decode_references(text: &str) -> String {
-    if !text.contains('&') {
-        return text.to_owned();
-    }
-    let mut decoded = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(start) = rest.find('&') {
-        decoded.push_str(&rest[..start]);
-        rest = &rest[start..];
-        let replacement = rest.find(';').and_then(|end| {
-            let body = &rest[1..end];
-            let character = match body {
-                "lt" => Some('<'),
-                "gt" => Some('>'),
-                "amp" => Some('&'),
-                "quot" => Some('"'),
-                "apos" => Some('\''),
-                _ => body
-                    .strip_prefix("#x")
-                    .and_then(|hex| u32::from_str_radix(hex, 16).ok())
-                    .or_else(|| body.strip_prefix('#').and_then(|dec| dec.parse().ok()))
-                    .and_then(char::from_u32),
-            };
-            character.map(|character| (character, end + 1))
-        });
-        match replacement {
-            Some((character, length)) => {
-                decoded.push(character);
-                rest = &rest[length..];
-            }
-            None => {
-                decoded.push('&');
-                rest = &rest[1..];
-            }
-        }
-    }
-    decoded.push_str(rest);
-    decoded
 }
 
 /// Constraint broken by the declaration of `prefix` (`""` for the default
