@@ -907,6 +907,7 @@ version = "0.12.0"
 dependencies = [
  "quick-xml",
  "regex",
+ "xml-core",
 ]
 
 [[package]]

@@ -53,7 +53,7 @@ fn validates_restrictions_from_shared_fixtures() {
     assert!(
         validate_document(RESTRICTED, &schema)
             .iter()
-            .any(|diagnostic| diagnostic.message.contains("too short"))
+            .any(|diagnostic| diagnostic.message.contains("minLength"))
     );
     assert!(validate_document("<code>valid</code>", &schema).is_empty());
 }

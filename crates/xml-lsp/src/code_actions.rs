@@ -547,13 +547,13 @@ fn schema_problems(
             else {
                 continue;
             };
-            let Some(values) = set
-                .attribute_type(declaration)
-                .and_then(|value_type| enumeration_values(set, value_type))
-            else {
+            let Some(value_type) = set.attribute_type(declaration) else {
                 continue;
             };
-            if !is_enumerated(&source[value.clone()], &values) {
+            let Some(values) = enumeration_values(set, value_type) else {
+                continue;
+            };
+            if !is_enumerated(set, value_type, &source[value.clone()], &values) {
                 problems.push(SchemaProblem {
                     kind: SchemaProblemKind::InvalidEnumeration {
                         values,
@@ -725,7 +725,7 @@ fn text_enumeration(
     }
     let values = enumeration_values(set, element_type)?;
     let trimmed = text.trim();
-    if is_enumerated(trimmed, &values) {
+    if is_enumerated(set, element_type, trimmed, &values) {
         return None;
     }
     let start = content.start + (text.len() - text.trim_start().len());
@@ -766,9 +766,15 @@ fn enumeration_values(set: &XsdModelSet, value_type: XsdTypeRef<'_>) -> Option<V
     )
 }
 
-/// Compares a raw value (predefined entities decoded, whitespace collapsed
-/// as a fallback) with the enumerated values.
-fn is_enumerated(raw: &str, values: &[String]) -> bool {
+/// Compares a raw value (predefined entities decoded) with the enumerated
+/// values: as written, with whitespace collapsed, or in the value space of
+/// its type (`1.0` is `1` for an `xs:decimal`).
+fn is_enumerated(
+    set: &XsdModelSet,
+    value_type: XsdTypeRef<'_>,
+    raw: &str,
+    values: &[String],
+) -> bool {
     let value = raw
         .replace("&lt;", "<")
         .replace("&gt;", ">")
@@ -779,6 +785,9 @@ fn is_enumerated(raw: &str, values: &[String]) -> bool {
     values
         .iter()
         .any(|candidate| *candidate == value || *candidate == collapsed)
+        || set
+            .simple_type(value_type)
+            .is_some_and(|simple_type| simple_type.validate(&value, None).is_ok())
 }
 
 fn escape(value: &str) -> String {

@@ -32,9 +32,10 @@ use serde_json::{Value, json};
 use xml_core::format_xml;
 use xml_core::{XmlDiagnostic, auto_close_tag, complete_xml, parse_xml};
 use xsd_core::{
-    LocatedXsdDiagnostic, XsdSchema, complete_attribute_values, complete_attributes,
-    complete_elements, is_remote_location, merge_schemas, parse_xsd, percent_decode,
-    resolve_schema_dependencies_with, resolve_schema_locations_with, validate_document_located,
+    LocatedXsdDiagnostic, XsdDiagnosticKind, XsdSchema, complete_attribute_values,
+    complete_attributes, complete_elements, is_remote_location, merge_schemas, parse_xsd,
+    percent_decode, resolve_schema_dependencies_with, resolve_schema_locations_with,
+    validate_document_located,
 };
 
 #[cfg(test)]
@@ -738,9 +739,13 @@ impl XmlLanguageServer {
         }
         if !schemas.is_empty() {
             let schema = merge_schemas(schemas);
+            // Values outside an enumeration are published by
+            // `code_actions::enumeration_diagnostics`, whose ranges and
+            // messages the enumeration quick fixes match.
             diagnostics.extend(
                 validate_document_located(source, &schema)
                     .iter()
+                    .filter(|diagnostic| diagnostic.kind != XsdDiagnosticKind::InvalidEnumeration)
                     .map(|diagnostic| xsd_error_diagnostic_at(diagnostic, source)),
             );
             let mut context = self.hover_context(uri);
@@ -2780,6 +2785,90 @@ mod tests {
         );
 
         assert_eq!(client.request(9, "shutdown", json!(null)), Value::Null);
+        client.notify(EXIT_METHOD, json!(null));
+        server_thread.join().expect("server thread should stop");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn publishes_datatype_diagnostics_on_values() {
+        let directory =
+            std::env::temp_dir().join(format!("xml-lsp-datatypes {}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("directory should be created");
+        std::fs::write(
+            directory.join("order.xsd"),
+            "<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\">\n  <xs:element name=\"order\">\n    <xs:complexType>\n      <xs:sequence>\n        <xs:element name=\"date\" type=\"xs:date\"/>\n        <xs:element name=\"total\" type=\"Total\"/>\n      </xs:sequence>\n      <xs:attribute name=\"count\" type=\"xs:unsignedByte\"/>\n    </xs:complexType>\n  </xs:element>\n  <xs:simpleType name=\"Total\">\n    <xs:restriction base=\"xs:decimal\">\n      <xs:enumeration value=\"1.0\"/>\n      <xs:enumeration value=\"2.5\"/>\n    </xs:restriction>\n  </xs:simpleType>\n</xs:schema>",
+        )
+        .expect("schema should be written");
+        let uri = path_to_uri(&directory.join("order.xml"));
+
+        let (server, connection) = Connection::memory();
+        let server_thread = thread::spawn(|| run(server).expect("server loop should succeed"));
+        let client = TestClient {
+            connection,
+            diagnostics: Default::default(),
+        };
+        client.request(1, INITIALIZE_METHOD, json!({"capabilities": {}}));
+        client.notify("initialized", json!({}));
+
+        // Non-ASCII text before the values and CRLF line endings: ranges are
+        // UTF-16 positions of the values.
+        let source = "<order xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"\r\n  xsi:noNamespaceSchemaLocation=\"order.xsd\" é=\"\" count=\"300\">\r\n  <date>2024-13-01</date>\r\n  <total>1</total>\r\n</order>";
+        client.notify(
+            DID_OPEN_METHOD,
+            json!({"textDocument": {"uri": uri, "text": source}}),
+        );
+        let published = client.take_diagnostics(2);
+        let diagnostics = published.last().expect("diagnostics should be published")["diagnostics"]
+            .as_array()
+            .expect("diagnostics should be an array")
+            .iter()
+            .filter(|diagnostic| diagnostic["data"]["rule"] != "unexpectedAttribute")
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(diagnostics.len(), 2, "{diagnostics:#?}");
+        assert_eq!(diagnostics[0]["code"], "xsd-validation");
+        assert_eq!(diagnostics[0]["data"]["rule"], "invalidAttributeValue");
+        assert_eq!(
+            diagnostics[0]["range"],
+            json!({"start": {"line": 1, "character": 56}, "end": {"line": 1, "character": 59}})
+        );
+        assert_eq!(
+            diagnostics[0]["message"],
+            "attribute @count of <order>: '300' is not a valid xs:unsignedByte: the value must be at most 255"
+        );
+        assert_eq!(diagnostics[1]["data"]["rule"], "invalidContent");
+        assert_eq!(
+            diagnostics[1]["message"],
+            "content of <date>: '2024-13-01' is not a valid xs:date: month must be 01-12"
+        );
+        // `1` equals the enumerated `1.0` in the value space of xs:decimal.
+
+        client.notify(
+            DID_CHANGE_METHOD,
+            json!({
+                "textDocument": {"uri": uri, "version": 2},
+                "contentChanges": [{"text": source.replace("count=\"300\"", "count=\"30\"").replace("2024-13-01", "2024-12-01").replace("<total>1<", "<total>3<")}],
+            }),
+        );
+        let published = client.take_diagnostics(3);
+        let diagnostics = published.last().expect("diagnostics should be published")["diagnostics"]
+            .as_array()
+            .expect("diagnostics should be an array")
+            .iter()
+            .filter(|diagnostic| diagnostic["data"]["rule"] != "unexpectedAttribute")
+            .cloned()
+            .collect::<Vec<_>>();
+        // The enumeration is reported once, on the value.
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
+        assert_eq!(diagnostics[0]["data"]["rule"], "invalidEnumeration");
+        assert_eq!(
+            diagnostics[0]["range"],
+            json!({"start": {"line": 3, "character": 9}, "end": {"line": 3, "character": 10}})
+        );
+
+        assert_eq!(client.request(4, "shutdown", json!(null)), Value::Null);
         client.notify(EXIT_METHOD, json!(null));
         server_thread.join().expect("server thread should stop");
         let _ = std::fs::remove_dir_all(&directory);

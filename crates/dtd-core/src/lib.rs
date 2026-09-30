@@ -21,7 +21,7 @@
 //! only their size is computed ("billion laughs" attack).
 
 pub mod content;
-mod names;
+use xml_core::names;
 pub mod parser;
 pub mod validate;
 
@@ -34,7 +34,6 @@ use std::{
 };
 
 pub use content::{ContentAutomaton, ContentMatcher, ContentParticle, ContentSpec, Occurrence};
-pub use names::{is_name, is_name_char, is_nmtoken};
 pub use parser::{
     Doctype, DtdBuilder, ExternalLoader, LoadError, NoLoader, find_doctype, load_document_dtd,
     parse_dtd,
@@ -43,6 +42,7 @@ pub use validate::{
     EntityReference, InstanceProblem, InstanceProblemKind, check_entity_references,
     entity_reference_at, general_entity_references, validate_instance,
 };
+pub use xml_core::names::{is_name, is_name_char, is_nmtoken};
 
 /// Predefined entities, always available.
 pub const PREDEFINED_ENTITIES: [(&str, &str); 5] = [
