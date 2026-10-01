@@ -56,7 +56,11 @@ Keep the dependency direction: core crates never depend on `xml-lsp` or on LSP J
 
 | Module | Role |
 |--------|------|
-| `main.rs` | `XmlLanguageServer` state (open documents, schema and DTD caches, settings, catalogs, workspace index, client capabilities), `server_capabilities()`, `run()` (initialize, post-init registrations, request loop), `handle_request` (dispatch by method), notifications (`didOpen`/`didChange`/`didClose`, configuration, workspace folders, watched files), diagnostics (`diagnostics()` is the single place computing them), XSD completion/definition/references, position helpers. Its tests, including the LSP round-trip tests, are in `tests.rs`. |
+| `main.rs` | `XmlLanguageServer` state (open documents, schema and DTD caches, settings, catalogs, workspace index, client capabilities), `server_capabilities()`, `run()` (initialize, post-init registrations, request loop), `handle_request` (dispatch by method), completion, hover, code action, rename and formatting glue, position helpers, and the `tests` module (LSP round trips). New feature logic goes in its own module, not here. |
+| `diagnostics.rs` | `XmlLanguageServer::diagnostics()` (the single place computing diagnostics), schema/DTD diagnostics and the builders of the non-XML `Diagnostic` values. |
+| `navigation.rs` | Go to definition and references (links, ID/IDREF, key/keyref, XSLT, DTD, XSD declarations). |
+| `configuration.rs` | `xml.*` settings and XML catalog (re)loading, configuration requests, catalog file watchers. |
+| `notifications.rs` | Client notifications: `didOpen`/`didChange`/`didClose`, configuration, workspace folders, watched files. |
 | `dispatch.rs` | Request loop plumbing: `Incoming` queue honouring `$/cancelRequest`, `guarded_request`/`guarded_notification` (panic isolation), `RequestError`. |
 | `worker.rs` | `DiagnosticsWorker`: a thread owning a replica `XmlLanguageServer` (fed with `Job`s: document, settings and folder changes) that validates the latest snapshots (changes debounced by `xml.validation.debounce`) and publishes diagnostics, dropping stale results. |
 | `schemas.rs` | `SchemaStore`: parsed XSD files cached by modification time and size (with their dependencies) and merged schema sets, shared by validation and completion; cleared when catalogs change. |
