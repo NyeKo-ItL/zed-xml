@@ -12,7 +12,7 @@ path = "src/main.rs"
 [dependencies]
 lsp-server = "0.10"
 serde_json = "1"
-quick-xml = "0.38"
+quick-xml = "0.42"
 xml-core = { path = "../xml-core" }
 dtd-core = { path = "../dtd-core" }
 xpath-core = { path = "../xpath-core" }
