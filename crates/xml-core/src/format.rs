@@ -733,7 +733,7 @@ impl<'a> Formatter<'a> {
                     }
                     if self.options.trim_trailing_whitespace {
                         let raw = comment.as_ref();
-                        let trimmed = trim_trailing_whitespace(&raw);
+                        let trimmed = trim_trailing_whitespace(raw);
                         self.emit(Event::Comment(BytesText::from_escaped(trimmed)))?;
                     } else {
                         self.emit(Event::Comment(comment.into_owned()))?;

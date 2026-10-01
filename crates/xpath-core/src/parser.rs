@@ -977,33 +977,32 @@ impl Parser<'_> {
         self.advance();
         self.advance();
         match name.as_str() {
-            "document-node" => {
+            "document-node"
                 if self.kind() == &TokenKind::Name
                     && matches!(self.current_text(), "element" | "schema-element")
-                    && self.kind_at(1) == &TokenKind::LeftParen
-                {
-                    self.kind_test()?;
-                }
+                    && self.kind_at(1) == &TokenKind::LeftParen =>
+            {
+                self.kind_test()?;
             }
-            "element" | "attribute" => {
-                if self.kind() != &TokenKind::RightParen {
-                    if self.kind() == &TokenKind::Star || self.is_eqname() {
-                        self.advance();
-                    } else {
-                        return self.expected("a name or '*'");
+            "document-node" => {}
+            "element" | "attribute" if self.kind() != &TokenKind::RightParen => {
+                if self.kind() == &TokenKind::Star || self.is_eqname() {
+                    self.advance();
+                } else {
+                    return self.expected("a name or '*'");
+                }
+                if self.kind() == &TokenKind::Comma {
+                    self.advance();
+                    if !self.is_eqname() {
+                        return self.expected("a type name");
                     }
-                    if self.kind() == &TokenKind::Comma {
+                    self.advance();
+                    if self.kind() == &TokenKind::Question {
                         self.advance();
-                        if !self.is_eqname() {
-                            return self.expected("a type name");
-                        }
-                        self.advance();
-                        if self.kind() == &TokenKind::Question {
-                            self.advance();
-                        }
                     }
                 }
             }
+            "element" | "attribute" => {}
             "schema-element" | "schema-attribute" => {
                 if !self.is_eqname() {
                     return self.expected("a name");

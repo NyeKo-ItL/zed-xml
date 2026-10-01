@@ -1881,14 +1881,14 @@ fn validate(
             }
             Ok(Event::Text(text)) => {
                 if let Some(frame) = stack.last_mut() {
-                    frame.text.push_str(&text.as_ref());
+                    frame.text.push_str(text.as_ref());
                     extend_text_range(frame, borrowed_range(source, text.as_ref()));
                 }
                 continue;
             }
             Ok(Event::CData(data)) => {
                 if let Some(frame) = stack.last_mut() {
-                    frame.text.push_str(&data.as_ref());
+                    frame.text.push_str(data.as_ref());
                     extend_text_range(frame, borrowed_range(source, data.as_ref()));
                 }
                 continue;
