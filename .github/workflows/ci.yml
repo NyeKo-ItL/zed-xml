@@ -174,7 +174,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: target/test-suites
           key: test-suites-${{ hashFiles('scripts/fetch-test-suites.sh') }}
