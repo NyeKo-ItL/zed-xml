@@ -182,6 +182,19 @@ jobs:
       - run: cargo test --release -p xml-conformance
       - run: cargo test --release -p xml-lsp fixture_smoke
 
+  queries:
+    name: Tree-sitter queries
+    if: github.event_name == 'pull_request' && github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools/query-check
+      # Zed silently drops a query that does not compile against the grammar.
+      - run: scripts/check-queries.sh
+
   benchmarks:
     name: Benchmarks
     if: github.event_name == 'pull_request' && github.event.action != 'closed'

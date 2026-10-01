@@ -1,0 +1,16 @@
+# Checks the tree-sitter queries of `languages/` against the grammars pinned
+# in `extension.toml`. Not a member of the main workspace (it needs a C
+# compiler and the grammar sources): see `scripts/check-queries.sh`.
+[package]
+name = "query-check"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+tree-sitter = "0.25"
+
+[build-dependencies]
+cc = "1"
