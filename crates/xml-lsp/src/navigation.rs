@@ -122,11 +122,15 @@ impl XmlLanguageServer {
     pub(crate) fn identity_links(&mut self, uri: &str, source: &str) -> identity::Links {
         let mut links = Vec::new();
         if let Some(schema) = self.load_schema(uri, source) {
-            links.extend(
-                identity_links(source, &schema)
-                    .into_iter()
-                    .map(|link| (link.reference, link.target)),
-            );
+            let cached =
+                self.analyses
+                    .schema_links(uri, source, Arc::as_ptr(&schema) as usize, || {
+                        identity_links(source, &schema)
+                            .into_iter()
+                            .map(|link| (link.reference, link.target))
+                            .collect()
+                    });
+            links.extend(cached.iter().cloned());
         }
         if let Some(grammar) = self.dtd_grammar(uri, source) {
             for link in dtd_core::id_links(source, &grammar.dtd) {

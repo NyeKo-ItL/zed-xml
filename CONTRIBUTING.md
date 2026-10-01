@@ -126,6 +126,8 @@ cargo bench -p xml-core --bench xml_core -p xsd-core --bench xsd_core -p xml-lsp
 cargo bench -p xml-lsp --bench server -- hover   # one group or benchmark
 ```
 
+`cargo test --release -p xml-lsp latency -- --nocapture` checks latency budgets (per cursor move requests 250 ms, whole-document ones 2 to 4 s on a 1 MB document bound to a schema) and prints the timings; it is enforced in release builds only. Lower a budget when a change makes a request much faster, never raise one to make a test pass without a reason.
+
 Select benchmarks with `--bench <name>`: `--benches` also runs the library test harnesses, which reject criterion's options.
 
 Tests live next to the code (`#[cfg(test)] mod tests`; modules that use `std::env::temp_dir()` are in a `tests.rs` file, which CodeQL ignores). Language-server features get unit tests in their module plus an LSP round-trip test in `crates/xml-lsp/src/tests.rs`; see [AGENTS.md](AGENTS.md#testing) for the patterns.
