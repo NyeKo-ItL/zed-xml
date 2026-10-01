@@ -132,7 +132,7 @@ pub fn parse_xml(source: &str) -> XmlParseResult {
                     ));
                     break;
                 }
-                let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
+                let name = element.name().as_ref().to_owned();
                 if stack.is_empty() {
                     if document.root.is_some() {
                         diagnostics.push((
@@ -151,7 +151,7 @@ pub fn parse_xml(source: &str) -> XmlParseResult {
                 stack.push(name);
             }
             Ok(Event::Empty(element)) => {
-                let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
+                let name = element.name().as_ref().to_owned();
                 if stack.is_empty() {
                     if document.root.is_some() {
                         diagnostics.push((
@@ -169,7 +169,7 @@ pub fn parse_xml(source: &str) -> XmlParseResult {
                 document.element_count += 1;
             }
             Ok(Event::End(element)) => {
-                let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
+                let name = element.name().as_ref().to_owned();
                 let message = match stack.pop() {
                     Some(open_name) if open_name == name => continue,
                     Some(open_name) => format!("end tag </{name}> does not match </{open_name}>"),
@@ -289,7 +289,7 @@ pub fn auto_close_tag(source: &str, offset: usize) -> Option<XmlCompletion> {
     loop {
         match reader.read_event() {
             Ok(Event::Start(element)) => {
-                stack.push(String::from_utf8_lossy(element.name().as_ref()).into_owned());
+                stack.push(element.name().as_ref().to_owned());
                 opening_is_last = true;
             }
             Ok(Event::Empty(_)) => opening_is_last = false,
@@ -298,10 +298,7 @@ pub fn auto_close_tag(source: &str, offset: usize) -> Option<XmlCompletion> {
                 opening_is_last = false;
             }
             Ok(Event::Text(text)) => {
-                opening_is_last = text
-                    .decode()
-                    .map(|value| value.trim().is_empty())
-                    .unwrap_or(false);
+                opening_is_last = text.as_ref().trim().is_empty();
             }
             Ok(
                 Event::CData(_)
@@ -419,9 +416,9 @@ fn collect_names(source: &str) -> (BTreeSet<String>, BTreeSet<String>) {
     loop {
         match reader.read_event() {
             Ok(Event::Start(element)) | Ok(Event::Empty(element)) => {
-                elements.insert(String::from_utf8_lossy(element.name().as_ref()).into_owned());
+                elements.insert(element.name().as_ref().to_owned());
                 for attribute in element.attributes().flatten() {
-                    attributes.insert(String::from_utf8_lossy(attribute.key.as_ref()).into_owned());
+                    attributes.insert(attribute.key.as_ref().to_owned());
                 }
             }
             Ok(Event::Eof) | Err(_) => break,
@@ -438,9 +435,7 @@ fn open_elements(source: &str) -> Vec<String> {
 
     loop {
         match reader.read_event() {
-            Ok(Event::Start(element)) => {
-                stack.push(String::from_utf8_lossy(element.name().as_ref()).into_owned())
-            }
+            Ok(Event::Start(element)) => stack.push(element.name().as_ref().to_owned()),
             Ok(Event::End(_)) => {
                 stack.pop();
             }

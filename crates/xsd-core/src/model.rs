@@ -498,10 +498,10 @@ fn build_tree(source: &str) -> Result<(Node, Vec<Scope>), String> {
                         "XSD error: the schema is nested more than {MAX_SCHEMA_DEPTH} levels deep"
                     ));
                 }
-                let qname = String::from_utf8_lossy(element.name().as_ref()).into_owned();
+                let qname = element.name().as_ref().to_owned();
                 let mut attributes = Vec::new();
                 for attribute in element.attributes().flatten() {
-                    let key = String::from_utf8_lossy(attribute.key.as_ref()).into_owned();
+                    let key = attribute.key.as_ref().to_owned();
                     let value = normalized_attribute_value(&attribute).unwrap_or_default();
                     attributes.push((key, value));
                 }
@@ -548,14 +548,14 @@ fn build_tree(source: &str) -> Result<(Node, Vec<Scope>), String> {
             Event::End(_) => close(&mut stack, &mut root),
             Event::Text(text) => {
                 if let Some(node) = stack.last_mut() {
-                    let text = text.decode().map_err(|error| error.to_string())?;
-                    node.children.push(Child::Text(text.into_owned()));
+                    let text = text.as_ref().to_owned();
+                    node.children.push(Child::Text(text));
                 }
             }
             Event::CData(data) => {
                 if let Some(node) = stack.last_mut() {
-                    let text = data.decode().map_err(|error| error.to_string())?;
-                    node.children.push(Child::Text(text.into_owned()));
+                    let text = data.as_ref().to_owned();
+                    node.children.push(Child::Text(text));
                 }
             }
             Event::GeneralRef(reference) => {
@@ -563,7 +563,7 @@ fn build_tree(source: &str) -> Result<(Node, Vec<Scope>), String> {
                     let resolved = match reference.resolve_char_ref() {
                         Ok(Some(character)) => character.to_string(),
                         _ => {
-                            let name = reference.decode().map_err(|error| error.to_string())?;
+                            let name = reference.as_ref().to_owned();
                             match name.as_ref() {
                                 "lt" => "<".to_owned(),
                                 "gt" => ">".to_owned(),
@@ -599,7 +599,7 @@ fn is_true(value: Option<String>) -> bool {
 pub(crate) fn normalized_attribute_value(
     attribute: &quick_xml::events::attributes::Attribute<'_>,
 ) -> Option<String> {
-    let raw = std::str::from_utf8(attribute.value.as_ref()).ok()?;
+    let raw = Some(attribute.value.as_ref())?;
     let normalized = raw.replace("\r\n", " ").replace(['\r', '\n', '\t'], " ");
     quick_xml::escape::unescape(&normalized)
         .ok()

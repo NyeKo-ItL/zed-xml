@@ -699,7 +699,7 @@ fn xml_symbols(source: &str) -> Value {
     loop {
         match reader.read_event() {
             Ok(Event::Start(element)) => {
-                let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
+                let name = element.name().as_ref().to_owned();
                 let start = source[search_from..]
                     .find(&format!("<{name}"))
                     .map(|offset| search_from + offset)
@@ -708,7 +708,7 @@ fn xml_symbols(source: &str) -> Value {
                 stack.push((name, start));
             }
             Ok(Event::Empty(element)) => {
-                let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
+                let name = element.name().as_ref().to_owned();
                 let start = source[search_from..]
                     .find(&format!("<{name}"))
                     .map(|offset| search_from + offset)

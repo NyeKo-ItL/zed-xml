@@ -1704,7 +1704,7 @@ fn direct_children(source: &str) -> Vec<String> {
     loop {
         match reader.read_event() {
             Ok(Event::Start(element)) => {
-                let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
+                let name = element.name().as_ref().to_owned();
                 if !stack.is_empty() && stack.len() == 1 {
                     children.push(name.clone());
                 }
@@ -1712,7 +1712,7 @@ fn direct_children(source: &str) -> Vec<String> {
             }
             Ok(Event::Empty(element)) => {
                 if !stack.is_empty() && stack.len() == 1 {
-                    children.push(String::from_utf8_lossy(element.name().as_ref()).into_owned());
+                    children.push(element.name().as_ref().to_owned());
                 }
             }
             Ok(Event::End(_)) => {
@@ -1730,9 +1730,7 @@ fn open_xml_elements(source: &str) -> Vec<String> {
     let mut stack = Vec::new();
     loop {
         match reader.read_event() {
-            Ok(Event::Start(element)) => {
-                stack.push(String::from_utf8_lossy(element.name().as_ref()).into_owned())
-            }
+            Ok(Event::Start(element)) => stack.push(element.name().as_ref().to_owned()),
             Ok(Event::End(_)) => {
                 stack.pop();
             }
@@ -1750,7 +1748,7 @@ pub fn root_element_name(source: &str) -> Option<String> {
     loop {
         match reader.read_event() {
             Ok(Event::Start(element)) | Ok(Event::Empty(element)) => {
-                return Some(String::from_utf8_lossy(element.name().as_ref()).into_owned());
+                return Some(element.name().as_ref().to_owned());
             }
             Ok(Event::Eof) | Err(_) => return None,
             Ok(_) => {}
@@ -1883,14 +1881,14 @@ fn validate(
             }
             Ok(Event::Text(text)) => {
                 if let Some(frame) = stack.last_mut() {
-                    frame.text.push_str(&String::from_utf8_lossy(text.as_ref()));
+                    frame.text.push_str(&text.as_ref());
                     extend_text_range(frame, borrowed_range(source, text.as_ref()));
                 }
                 continue;
             }
             Ok(Event::CData(data)) => {
                 if let Some(frame) = stack.last_mut() {
-                    frame.text.push_str(&String::from_utf8_lossy(data.as_ref()));
+                    frame.text.push_str(&data.as_ref());
                     extend_text_range(frame, borrowed_range(source, data.as_ref()));
                 }
                 continue;
@@ -1913,7 +1911,7 @@ fn validate(
             Ok(Event::Eof) | Err(_) => break,
             Ok(_) => continue,
         };
-        let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
+        let name = element.name().as_ref().to_owned();
         let start = source
             .get(event_start..)
             .and_then(|rest| rest.find('<'))
@@ -2343,11 +2341,11 @@ fn resolve_reference(reference: &quick_xml::events::BytesRef<'_>) -> Option<char
         return Some(character);
     }
     match reference.as_ref() {
-        b"lt" => Some('<'),
-        b"gt" => Some('>'),
-        b"amp" => Some('&'),
-        b"apos" => Some('\''),
-        b"quot" => Some('"'),
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "amp" => Some('&'),
+        "apos" => Some('\''),
+        "quot" => Some('"'),
         _ => None,
     }
 }
@@ -2358,13 +2356,15 @@ fn namespace_declarations(element: &quick_xml::events::BytesStart<'_>) -> Vec<(S
         .attributes()
         .flatten()
         .filter_map(|attribute| {
-            let key = std::str::from_utf8(attribute.key.as_ref()).ok()?;
+            let key = attribute.key.as_ref();
             let prefix = if key == "xmlns" {
                 ""
             } else {
                 key.strip_prefix("xmlns:")?
             };
-            let value = attribute.unescape_value().ok()?.into_owned();
+            let value = quick_xml::escape::unescape(attribute.value.as_ref())
+                .ok()?
+                .into_owned();
             Some((prefix.to_owned(), value))
         })
         .collect()
@@ -2421,14 +2421,19 @@ fn instance_step(
         .attributes()
         .flatten()
         .find(|attribute| {
-            std::str::from_utf8(attribute.key.as_ref())
-                .ok()
-                .and_then(|key| key.split_once(':'))
+            attribute
+                .key
+                .as_ref()
+                .split_once(':')
                 .is_some_and(|(prefix, local)| {
                     local == "type" && lookup(prefix).as_deref() == Some(XSI_NAMESPACE)
                 })
         })
-        .and_then(|attribute| attribute.unescape_value().ok())
+        .and_then(|attribute| {
+            quick_xml::escape::unescape(attribute.value.as_ref())
+                .ok()
+                .map(|value| value.into_owned())
+        })
         .map(|value| {
             let value = value.trim();
             let (prefix, local) = value.split_once(':').unwrap_or(("", value));
@@ -2475,7 +2480,11 @@ fn is_nil(element: &quick_xml::events::BytesStart<'_>) -> bool {
         .attributes()
         .flatten()
         .find(|attribute| local_name(attribute.key.as_ref()) == "nil")
-        .and_then(|attribute| attribute.unescape_value().ok())
+        .and_then(|attribute| {
+            quick_xml::escape::unescape(attribute.value.as_ref())
+                .ok()
+                .map(|value| value.into_owned())
+        })
         .is_some_and(|value| matches!(value.trim(), "true" | "1"))
 }
 
@@ -2498,11 +2507,9 @@ fn validate_attribute_values<'s>(
     let mut diagnostics = Vec::new();
     let mut types = Vec::new();
     let mut attributes = Vec::new();
-    let element_name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
+    let element_name = element.name().as_ref().to_owned();
     for attribute in element.attributes().flatten() {
-        let Ok(key) = std::str::from_utf8(attribute.key.as_ref()) else {
-            continue;
-        };
+        let key = attribute.key.as_ref();
         if key == "xmlns" || key.starts_with("xmlns:") {
             continue;
         }
@@ -2629,7 +2636,7 @@ fn validate_attribute_values<'s>(
 }
 
 /// Range in `source` of a slice borrowed from it.
-fn borrowed_range(source: &str, slice: &[u8]) -> Option<Range<usize>> {
+fn borrowed_range(source: &str, slice: &str) -> Option<Range<usize>> {
     let base = source.as_ptr() as usize;
     let start = (slice.as_ptr() as usize).checked_sub(base)?;
     (start + slice.len() <= source.len()).then(|| start..start + slice.len())
@@ -2927,7 +2934,11 @@ fn validate_nil(
         .attributes()
         .flatten()
         .find(|attribute| local_name(attribute.key.as_ref()) == "nil")
-        .and_then(|attribute| attribute.unescape_value().ok())
+        .and_then(|attribute| {
+            quick_xml::escape::unescape(attribute.value.as_ref())
+                .ok()
+                .map(|value| value.into_owned())
+        })
         .is_some_and(|value| matches!(value.as_ref(), "true" | "1"));
     if !is_nil {
         return Vec::new();
@@ -2972,11 +2983,11 @@ fn validate_attributes(
     let mut present = Vec::new();
     let mut diagnostics = Vec::new();
     for attribute in element.attributes().flatten() {
-        let raw_name = String::from_utf8_lossy(attribute.key.as_ref());
-        let name = local_name(attribute.key.as_ref()).to_owned();
-        if raw_name == "xmlns"
-            || raw_name.starts_with("xmlns:")
-            || raw_name
+        let key = attribute.key.as_ref();
+        let name = local_name(key).to_owned();
+        if key == "xmlns"
+            || key.starts_with("xmlns:")
+            || key
                 .split_once(':')
                 .and_then(|(prefix, _)| lookup(prefix))
                 .as_deref()
@@ -3057,8 +3068,7 @@ pub fn validate_root(root_name: &str, schema: &XsdSchema) -> Vec<XsdDiagnostic> 
     }
 }
 
-fn local_name(name: &[u8]) -> &str {
-    let name = std::str::from_utf8(name).unwrap_or_default();
+fn local_name(name: &str) -> &str {
     name.rsplit(':').next().unwrap_or(name)
 }
 
@@ -3067,8 +3077,11 @@ fn attribute(element: &quick_xml::events::BytesStart<'_>, wanted: &str) -> Optio
         .attributes()
         .flatten()
         .find(|attribute| local_name(attribute.key.as_ref()) == wanted)
-        .and_then(|attribute| attribute.unescape_value().ok())
-        .map(|value| value.into_owned())
+        .and_then(|attribute| {
+            quick_xml::escape::unescape(attribute.value.as_ref())
+                .ok()
+                .map(|value| value.into_owned())
+        })
 }
 
 fn parse_optional_usize(value: Option<String>) -> Result<Option<usize>, String> {
