@@ -12,7 +12,7 @@ path = "src/lib.rs"
 
 [dependencies]
 encoding_rs = "0.8"
-roxmltree = "0.20"
+roxmltree = "0.21"
 dtd-core = { path = "../dtd-core" }
 xml-core = { path = "../xml-core" }
 xsd-core = { path = "../xsd-core" }
