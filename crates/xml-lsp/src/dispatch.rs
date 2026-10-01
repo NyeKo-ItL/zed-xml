@@ -21,6 +21,25 @@ use std::{
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
 use serde_json::Value;
 
+/// The `result` and `error` members of a response (`lsp-server` 0.10 keeps
+/// them in one `Result`).
+pub(crate) trait ResponseExt {
+    fn result(&self) -> Option<Value>;
+    #[cfg(test)]
+    fn error(&self) -> Option<lsp_server::ResponseError>;
+}
+
+impl ResponseExt for Response {
+    fn result(&self) -> Option<Value> {
+        self.response_result.as_ref().ok().cloned()
+    }
+
+    #[cfg(test)]
+    fn error(&self) -> Option<lsp_server::ResponseError> {
+        self.response_result.as_ref().err().cloned()
+    }
+}
+
 pub(crate) const CANCEL_REQUEST_METHOD: &str = "$/cancelRequest";
 pub(crate) const SHUTDOWN_METHOD: &str = "shutdown";
 
@@ -230,14 +249,14 @@ mod tests {
             unreachable!()
         };
         let response = guarded_request(&request, || panic!("boom {}", 42));
-        let error = response.error.expect("an error should be answered");
+        let error = response.error().expect("an error should be answered");
         assert_eq!(error.code, ErrorCode::InternalError as i32);
         assert!(error.message.contains("boom 42"), "{}", error.message);
         let response = guarded_request(&request, || {
             Err(RequestError::new(ErrorCode::InvalidParams, "bad"))
         });
         assert_eq!(
-            response.error.unwrap().code,
+            response.error().unwrap().code,
             ErrorCode::InvalidParams as i32
         );
         assert_eq!(guarded_notification("x", || panic!("static")), None::<()>);

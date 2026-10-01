@@ -1,4 +1,5 @@
 use super::*;
+use crate::dispatch::ResponseExt;
 use lsp_server::{Request, RequestId};
 use std::thread;
 
@@ -271,7 +272,7 @@ fn serves_document_highlight_requests() {
             match client.receiver.recv().expect("a message should arrive") {
                 Message::Response(response) => {
                     assert_eq!(response.id, RequestId::from(id));
-                    return response.result;
+                    return response.result();
                 }
                 Message::Notification(_) => {}
                 message => panic!("unexpected message {message:?}"),
@@ -363,8 +364,8 @@ fn serves_linked_editing_range_requests() {
             match client.receiver.recv().expect("a message should arrive") {
                 Message::Response(response) => {
                     assert_eq!(response.id, RequestId::from(id));
-                    assert!(response.error.is_none(), "{:?}", response.error);
-                    return response.result;
+                    assert!(response.error().is_none(), "{:?}", response.error());
+                    return response.result();
                 }
                 Message::Notification(_) => {}
                 message => panic!("unexpected message {message:?}"),
@@ -472,7 +473,7 @@ fn serves_folding_range_requests_within_the_client_range_limit() {
             match client.receiver.recv().expect("a message should arrive") {
                 Message::Response(response) => {
                     assert_eq!(response.id, RequestId::from(id));
-                    return response.result;
+                    return response.result();
                 }
                 Message::Notification(_) => {}
                 message => panic!("unexpected message {message:?}"),
@@ -566,7 +567,7 @@ fn serves_selection_range_requests_for_several_positions() {
             match client.receiver.recv().expect("a message should arrive") {
                 Message::Response(response) => {
                     assert_eq!(response.id, RequestId::from(id));
-                    return response.result;
+                    return response.result();
                 }
                 Message::Notification(_) => {}
                 message => panic!("unexpected message {message:?}"),
@@ -739,7 +740,7 @@ impl TestClient {
         match self.next() {
             Message::Response(response) => {
                 assert_eq!(response.id, RequestId::from(id));
-                response.result.expect("request should succeed")
+                response.result().expect("request should succeed")
             }
             message => panic!("unexpected message {message:?}"),
         }
@@ -1487,7 +1488,7 @@ fn serves_document_colors_and_color_presentations() {
             match client.receiver.recv().expect("a message should arrive") {
                 Message::Response(response) => {
                     assert_eq!(response.id, RequestId::from(id));
-                    return response.result.expect("request should succeed");
+                    return response.result().expect("request should succeed");
                 }
                 Message::Notification(_) => {}
                 message => panic!("unexpected message {message:?}"),
@@ -1744,7 +1745,7 @@ fn serves_workspace_and_hierarchical_document_symbols() {
             match client.receiver.recv().expect("a message should arrive") {
                 Message::Response(response) => {
                     assert_eq!(response.id, RequestId::from(id));
-                    return response.result.expect("request should succeed");
+                    return response.result().expect("request should succeed");
                 }
                 Message::Notification(_) => {}
                 message => panic!("unexpected message {message:?}"),
@@ -1901,7 +1902,7 @@ fn serves_code_actions_that_fix_published_diagnostics() {
             match client.receiver.recv().expect("a message should arrive") {
                 Message::Response(response) => {
                     assert_eq!(response.id, RequestId::from(id));
-                    return response.result.expect("request should succeed");
+                    return response.result().expect("request should succeed");
                 }
                 Message::Notification(_) => {}
                 message => panic!("unexpected message {message:?}"),
@@ -2323,7 +2324,7 @@ i:noNamespaceSchemaLocation=\"missing.xsd\">\r\n  \
             match client.receiver.recv().expect("a message should arrive") {
                 Message::Response(response) => {
                     assert_eq!(response.id, RequestId::from(id));
-                    return response.result;
+                    return response.result();
                 }
                 Message::Notification(_) => {}
                 message => panic!("unexpected message {message:?}"),
@@ -2459,7 +2460,7 @@ fn serves_document_and_range_formatting_with_options() {
             match client.receiver.recv().expect("a message should arrive") {
                 Message::Response(response) => {
                     assert_eq!(response.id, RequestId::from(id));
-                    return response.result.expect("a result should be returned");
+                    return response.result().expect("a result should be returned");
                 }
                 Message::Notification(_) => {}
                 message => panic!("unexpected message {message:?}"),
@@ -2665,7 +2666,7 @@ fn serves_prepare_rename_and_rename_requests() {
     };
     let range = |line: u32, start: u32, end: u32| json!({"start": {"line": line, "character": start}, "end": {"line": line, "character": end}});
 
-    let initialize = request(1, INITIALIZE_METHOD, json!({})).result.unwrap();
+    let initialize = request(1, INITIALIZE_METHOD, json!({})).result().unwrap();
     assert_eq!(
         initialize["capabilities"]["renameProvider"],
         json!({"prepareProvider": true})
@@ -2693,11 +2694,11 @@ fn serves_prepare_rename_and_rename_requests() {
     };
 
     assert_eq!(
-        request(2, PREPARE_RENAME_METHOD, params(2, 16)).result,
+        request(2, PREPARE_RENAME_METHOD, params(2, 16)).result(),
         Some(json!({"range": range(2, 14, 18), "placeholder": "item"}))
     );
     assert_eq!(
-        request(3, RENAME_METHOD, rename_params(2, 16, "entry")).result,
+        request(3, RENAME_METHOD, rename_params(2, 16, "entry")).result(),
         Some(json!({"changes": {"file:///document.xml": [
             {"range": range(2, 3, 7), "newText": "entry"},
             {"range": range(2, 14, 18), "newText": "entry"},
@@ -2705,11 +2706,11 @@ fn serves_prepare_rename_and_rename_requests() {
     );
     // Prefix: declaration and uses, UTF-16 positions.
     assert_eq!(
-        request(4, PREPARE_RENAME_METHOD, params(1, 4)).result,
+        request(4, PREPARE_RENAME_METHOD, params(1, 4)).result(),
         Some(json!({"range": range(1, 3, 5), "placeholder": "ns"}))
     );
     assert_eq!(
-        request(5, RENAME_METHOD, rename_params(0, 16, "p")).result,
+        request(5, RENAME_METHOD, rename_params(0, 16, "p")).result(),
         Some(json!({"changes": {"file:///document.xml": [
             {"range": range(0, 1, 3), "newText": "p"},
             {"range": range(0, 15, 17), "newText": "p"},
@@ -2718,26 +2719,26 @@ fn serves_prepare_rename_and_rename_requests() {
         ]}}))
     );
     assert_eq!(
-        request(6, PREPARE_RENAME_METHOD, params(1, 8)).result,
+        request(6, PREPARE_RENAME_METHOD, params(1, 8)).result(),
         Some(json!({"range": range(1, 3, 9), "placeholder": "ns:é😀"}))
     );
     // Content: nothing to rename.
     assert_eq!(
-        request(7, PREPARE_RENAME_METHOD, params(2, 10)).result,
+        request(7, PREPARE_RENAME_METHOD, params(2, 10)).result(),
         Some(Value::Null)
     );
     assert_eq!(
-        request(8, RENAME_METHOD, rename_params(2, 10, "x")).result,
+        request(8, RENAME_METHOD, rename_params(2, 10, "x")).result(),
         Some(Value::Null)
     );
     // Invalid name: InvalidParams error.
     let invalid = request(9, RENAME_METHOD, rename_params(2, 16, "1 bad"));
-    let error = invalid.error.expect("an error should be returned");
+    let error = invalid.error().expect("an error should be returned");
     assert_eq!(error.code, rename::INVALID_PARAMS);
     assert!(error.message.contains("1 bad"));
     assert!(
         request(10, RENAME_METHOD, params(2, 16))
-            .error
+            .error()
             .is_some_and(|error| error.code == rename::INVALID_PARAMS)
     );
     assert_eq!(
@@ -2750,12 +2751,12 @@ fn serves_prepare_rename_and_rename_requests() {
                 "newName": "x",
             })
         )
-        .result,
+        .result(),
         Some(Value::Null)
     );
 
     assert_eq!(
-        request(12, "shutdown", json!(null)).result,
+        request(12, "shutdown", json!(null)).result(),
         Some(Value::Null)
     );
     notify(EXIT_METHOD, json!(null));
@@ -2856,7 +2857,7 @@ fn serves_xslt_diagnostics_navigation_rename_hover_and_completion() {
         .into(),
     );
     match client.next() {
-        Message::Response(response) => assert!(response.error.is_some()),
+        Message::Response(response) => assert!(response.error().is_some()),
         message => panic!("unexpected message {message:?}"),
     }
 
@@ -2995,7 +2996,7 @@ fn serves_initialize_diagnostics_shutdown_and_exit() {
         Message::Response(response) => {
             assert_eq!(response.id, RequestId::from(1));
             assert_eq!(
-                response.result,
+                response.result(),
                 Some(json!({
                     "capabilities": {
                         "positionEncoding": "utf-16",
@@ -3150,7 +3151,7 @@ fn serves_initialize_diagnostics_shutdown_and_exit() {
         Message::Response(response) => {
             assert_eq!(response.id, RequestId::from(4));
             assert_eq!(
-                response.result,
+                response.result(),
                 Some(json!({
                     "isIncomplete": false,
                     "items": [{"label": "item", "insertText": "item"}],
@@ -3201,7 +3202,7 @@ fn serves_initialize_diagnostics_shutdown_and_exit() {
         Message::Response(response) => {
             assert_eq!(response.id, RequestId::from(3));
             assert_eq!(
-                response.result,
+                response.result(),
                 Some(json!([{
                     "range": {
                         "start": {"line": 0, "character": 8},
@@ -3255,7 +3256,7 @@ fn serves_initialize_diagnostics_shutdown_and_exit() {
         Message::Response(response) => {
             assert_eq!(response.id, RequestId::from(5));
             assert_eq!(
-                response.result,
+                response.result(),
                 Some(json!({
                     "isIncomplete": false,
                     "items": [{"label": "</root>", "insertText": "</root>"}],
@@ -3309,7 +3310,7 @@ fn serves_initialize_diagnostics_shutdown_and_exit() {
     match shutdown_response {
         Message::Response(response) => {
             assert_eq!(response.id, RequestId::from(2));
-            assert_eq!(response.result, Some(json!(null)));
+            assert_eq!(response.result(), Some(json!(null)));
         }
         message => panic!("expected shutdown response, got {message:?}"),
     }
@@ -3333,7 +3334,7 @@ fn serves_initialize_diagnostics_shutdown_and_exit() {
         Message::Response(response) => {
             assert_eq!(response.id, RequestId::from(6));
             assert_eq!(
-                response.error.map(|error| error.code),
+                response.error().map(|error| error.code),
                 Some(ErrorCode::InvalidRequest as i32)
             );
         }
@@ -3546,8 +3547,8 @@ fn serves_xsd_documentation_hover_requests() {
             match client.receiver.recv().expect("a message should arrive") {
                 Message::Response(response) => {
                     assert_eq!(response.id, RequestId::from(id));
-                    assert!(response.error.is_none(), "{:?}", response.error);
-                    return response.result;
+                    assert!(response.error().is_none(), "{:?}", response.error());
+                    return response.result();
                 }
                 Message::Notification(_) => {}
                 message => panic!("unexpected message {message:?}"),
@@ -3852,7 +3853,7 @@ fn send_request(client: &TestClient, id: i32, method: &str, params: Value) {
 }
 
 fn error_code(response: &Response) -> Option<i32> {
-    response.error.as_ref().map(|error| error.code)
+    response.error().as_ref().map(|error| error.code)
 }
 
 #[test]
@@ -3919,7 +3920,7 @@ fn a_panicking_handler_answers_an_internal_error_and_the_server_keeps_running() 
     assert_eq!(error_code(&failed), Some(ErrorCode::InternalError as i32));
     assert!(
         failed
-            .error
+            .error()
             .as_ref()
             .is_some_and(|error| error.message.contains("test panic")),
         "{failed:?}"
