@@ -1,7 +1,7 @@
 id = "xml"
 name = "XML"
 description = "XML language support with syntax highlighting, schema-aware diagnostics, formatting, completion, and navigation via the native Rust LSP."
-version = "0.13.0"
+version = "0.14.0"
 schema_version = 1
 authors = ["NyeKo-ItL"]
 repository = "https://github.com/NyeKo-ItL/zed-xml"
@@ -22,12 +22,12 @@ languages = ["XML", "DTD"]
 
 [[capabilities]]
 kind = "process:exec"
-command = "xml-lsp-0.13.0.exe"
+command = "xml-lsp-0.14.0.exe"
 args = ["--version"]
 
 [[capabilities]]
 kind = "process:exec"
-command = "xml-lsp-0.13.0"
+command = "xml-lsp-0.14.0"
 args = ["--version"]
 
 # Downloads the xml-lsp binary and its .sha256 file from this repository's
@@ -36,4 +36,4 @@ args = ["--version"]
 [[capabilities]]
 kind = "download_file"
 host = "github.com"
-path = ["NyeKo-ItL", "zed-xml", "releases", "download", "v0.13.0", "*"]
+path = ["NyeKo-ItL", "zed-xml", "releases", "download", "v0.14.0", "*"]
