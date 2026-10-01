@@ -208,6 +208,9 @@ fn merge_string_lists(
 pub struct SchemaReference {
     pub namespace: Option<String>,
     pub path: PathBuf,
+    /// Which construct named the schema (`xs:include`, `xs:import`,
+    /// `xsi:schemaLocation` ...).
+    pub kind: SchemaLocationKind,
 }
 
 /// Item proposed by XSD completion.
@@ -1045,6 +1048,7 @@ pub fn resolve_schema_locations_with(
                             references.push(SchemaReference {
                                 namespace: Some((*namespace).to_owned()),
                                 path,
+                                kind: SchemaLocationKind::SchemaLocation,
                             });
                         }
                     }
@@ -1060,6 +1064,7 @@ pub fn resolve_schema_locations_with(
                         references.push(SchemaReference {
                             namespace: None,
                             path,
+                            kind: SchemaLocationKind::NoNamespaceSchemaLocation,
                         });
                     }
                 }
@@ -1119,7 +1124,11 @@ pub fn resolve_schema_dependencies_with(
                     base_directory,
                 };
                 if let Some(path) = resolve_schema_location(&request, resolver) {
-                    references.push(SchemaReference { namespace, path });
+                    references.push(SchemaReference {
+                        namespace,
+                        path,
+                        kind,
+                    });
                 }
             }
             Ok(Event::Eof) => break,
@@ -1128,6 +1137,130 @@ pub fn resolve_schema_dependencies_with(
         }
     }
     Ok(references)
+}
+
+/// Target namespace of a schema document (`None` when it has none or is not
+/// readable as a schema).
+pub fn schema_target_namespace(source: &str) -> Option<Option<String>> {
+    model::parse_xsd_model(source)
+        .ok()
+        .map(|model| model.target_namespace)
+}
+
+/// Namespace rules of the `xs:include`, `xs:redefine`, `xs:override` and
+/// `xs:import` elements of a schema document (XML Schema 1.0 Part 1 §4.2.1,
+/// §4.2.3): an included schema has no target namespace or the one of the
+/// including schema; an import names the target namespace of the imported
+/// schema, which is not the one of the importing schema, and is only without
+/// `namespace` when the importing schema has a target namespace; a schema
+/// does not redefine itself. `target_namespace_of` gives the target
+/// namespace of a dependency (`None` when it is not loaded).
+pub fn dependency_problems(
+    source: &str,
+    schema_path: &Path,
+    resolver: &LocationResolver<'_>,
+    target_namespace_of: &dyn Fn(&Path) -> Option<Option<String>>,
+) -> Vec<String> {
+    let mut reader = Reader::from_str(source);
+    let base_directory = schema_path.parent().unwrap_or_else(|| Path::new(""));
+    let mut including: Option<Option<String>> = None;
+    let mut problems = Vec::new();
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element)) | Ok(Event::Empty(element)) => {
+                let name = element.name();
+                let local = local_name(name.as_ref());
+                if local == "schema" && including.is_none() {
+                    including =
+                        Some(attribute(&element, "targetNamespace").filter(|v| !v.is_empty()));
+                    continue;
+                }
+                let including_namespace = including.clone().flatten();
+                let location = attribute(&element, "schemaLocation");
+                match local {
+                    "include" | "redefine" | "override" => {
+                        let Some(location) = location else { continue };
+                        let request = SchemaLocation {
+                            kind: SchemaLocationKind::Include,
+                            namespace: None,
+                            location: Some(location.trim()),
+                            base_directory,
+                        };
+                        let Some(path) = resolve_schema_location(&request, resolver) else {
+                            continue;
+                        };
+                        if local == "redefine" && same_file(&path, schema_path) {
+                            problems.push("a schema cannot redefine itself".to_owned());
+                        }
+                        if let Some(Some(included)) = target_namespace_of(&path)
+                            && including_namespace.as_deref() != Some(included.as_str())
+                        {
+                            problems.push(format!(
+                                "xs:{local} of '{}': its target namespace '{included}' is not the target namespace of the including schema",
+                                location.trim()
+                            ));
+                        }
+                    }
+                    "import" => {
+                        let namespace = attribute(&element, "namespace");
+                        if let Some(namespace) = &namespace
+                            && Some(namespace.as_str()) == including_namespace.as_deref()
+                        {
+                            problems.push(format!(
+                                "xs:import cannot import the target namespace '{namespace}' of its own schema"
+                            ));
+                        }
+                        if namespace.is_none() && including_namespace.is_none() {
+                            problems.push(
+                                "an xs:import without namespace needs a targetNamespace in the importing schema"
+                                    .to_owned(),
+                            );
+                        }
+                        let Some(location) = location else { continue };
+                        let request = SchemaLocation {
+                            kind: SchemaLocationKind::Import,
+                            namespace: namespace.as_deref(),
+                            location: Some(location.trim()),
+                            base_directory,
+                        };
+                        let Some(path) = resolve_schema_location(&request, resolver) else {
+                            continue;
+                        };
+                        if let Some(imported) = target_namespace_of(&path)
+                            && imported != namespace
+                        {
+                            problems.push(format!(
+                                "xs:import of '{}': the imported schema has {} but the import names {}",
+                                location.trim(),
+                                imported.as_deref().map_or_else(
+                                    || "no target namespace".to_owned(),
+                                    |namespace| format!("the target namespace '{namespace}'")
+                                ),
+                                namespace.as_deref().map_or_else(
+                                    || "none".to_owned(),
+                                    |namespace| format!("'{namespace}'")
+                                )
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            Ok(_) => {}
+        }
+    }
+    problems
+}
+
+fn same_file(left: &Path, right: &Path) -> bool {
+    left == right
+        || (!is_remote_location(left) && !is_remote_location(right))
+            && left
+                .canonicalize()
+                .ok()
+                .zip(right.canonicalize().ok())
+                .is_some_and(|(left, right)| left == right)
 }
 
 fn apply_content_extensions(schema: &mut XsdSchema) {
@@ -1885,6 +2018,30 @@ fn validate(
                 ContentCheck::Run(run) => {
                     if let Err(error) = run.step(step.namespace.as_deref(), &step.local) {
                         element_diagnostics.push(unexpected_child(&error, &name, &parent.name));
+                    } else if resolved.is_none()
+                        && !parent
+                            .resolution
+                            .as_ref()
+                            .is_some_and(|parent| parent.skipped)
+                        && let Some(parent_type) = parent
+                            .resolution
+                            .as_ref()
+                            .and_then(|parent| parent.element_type)
+                        && models.strict_wildcard_applies(parent_type, step.namespace.as_deref())
+                        && !step.xsi_type.as_ref().is_some_and(|(namespace, local)| {
+                            models.global_type(namespace.as_deref(), local).is_some()
+                                || namespace.as_deref() == Some(model::XSD_NAMESPACE)
+                        })
+                    {
+                        // The wildcard is `processContents="strict"`: the
+                        // element must be declared.
+                        element_diagnostics.push(XsdDiagnostic {
+                            kind: XsdDiagnosticKind::UnexpectedElement,
+                            message: format!(
+                                "element <{name}> matches a strict wildcard of <{}> but has no declaration",
+                                parent.name
+                            ),
+                        });
                     }
                 }
                 ContentCheck::Unchecked => {}
@@ -2654,6 +2811,14 @@ fn validate_text_content(
         }
     };
     if nil {
+        if fixed.is_some() {
+            return vec![XsdDiagnostic {
+                kind: XsdDiagnosticKind::FixedValue,
+                message: format!(
+                    "element <{name}> has xsi:nil=\"true\" but a fixed value constraint"
+                ),
+            }];
+        }
         // An element with `xsi:nil="true"` has no content (whitespace
         // tolerated, as editors reformat documents).
         return if frame.children.is_empty() && frame.text.trim_matches(XML_WHITESPACE).is_empty() {
@@ -2673,7 +2838,8 @@ fn validate_text_content(
         // Complex content: only the `fixed` value of a text-only element.
         return match fixed {
             Some(fixed)
-                if frame.children.is_empty() && !frame.text.is_empty() && frame.text != fixed =>
+                if !frame.children.is_empty()
+                    || (!frame.text.is_empty() && frame.text != fixed) =>
             {
                 vec![XsdDiagnostic {
                     kind: XsdDiagnosticKind::FixedValue,

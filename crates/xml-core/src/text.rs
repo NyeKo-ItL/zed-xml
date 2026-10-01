@@ -66,11 +66,42 @@ pub fn decode_bytes(bytes: &[u8]) -> Option<String> {
         }
         TextEncoding::Latin1 => body.iter().map(|&byte| char::from(byte)).collect(),
     };
+    if declared_encoding_conflicts(&text, encoding, bom > 0) {
+        return None;
+    }
     // A UTF-8 mark encoded in UTF-16 is not a mark: only one is removed.
     Some(match text.strip_prefix(BYTE_ORDER_MARK) {
         Some(rest) if bom == 0 => rest.to_owned(),
         _ => text,
     })
+}
+
+/// Whether the `encoding` of the XML declaration at the start of `text`
+/// contradicts the encoding the bytes were read in, when that was decided by
+/// a byte order mark or by UTF-16 text (XML 1.0 appendix F): a UTF-8 mark
+/// with another declared encoding, UTF-16 text declaring anything but UTF-16.
+pub fn declared_encoding_conflicts(text: &str, encoding: TextEncoding, has_bom: bool) -> bool {
+    let Some(label) = declared_encoding_label(text) else {
+        return false;
+    };
+    let label = label.to_ascii_lowercase();
+    let utf8 = matches!(label.as_str(), "utf-8" | "utf8");
+    let utf16 = label.starts_with("utf-16") || label == "utf16" || label.starts_with("ucs-2");
+    match encoding {
+        TextEncoding::Utf8 => has_bom && !utf8,
+        TextEncoding::Utf16Le | TextEncoding::Utf16Be => !utf16,
+        TextEncoding::Latin1 => false,
+    }
+}
+
+/// Value of `encoding` in the XML declaration at the start of `text`.
+fn declared_encoding_label(text: &str) -> Option<&str> {
+    let text = text.trim_start_matches(BYTE_ORDER_MARK);
+    let declaration = text.strip_prefix("<?xml")?.split_once("?>")?.0;
+    let value = declaration.split("encoding").nth(1)?;
+    let value = value.trim_start().strip_prefix('=')?.trim_start();
+    let quote = value.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+    value.get(1..)?.split(quote).next().map(str::trim)
 }
 
 /// Single-byte encoding declared by `<?xml ... encoding="..."?>`, when it

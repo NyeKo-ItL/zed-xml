@@ -1,0 +1,1 @@
+idc-keyref-err1_1_0	libxml2 quirk: the selector `.//foo:Link | .//foo:Link` is one node-set per XPath union, so the key L4 exists and the keyref matches (XSD 1.0 §3.11.4); libxml2 reports no match

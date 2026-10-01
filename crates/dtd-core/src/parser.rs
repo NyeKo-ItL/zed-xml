@@ -967,6 +967,25 @@ impl<'l> DtdBuilder<'l> {
                 continue;
             }
             if rest.starts_with("<?") {
+                let target_end = scan_name_chars(&text, index + 2, end);
+                if text[index + 2..target_end].eq_ignore_ascii_case("xml") {
+                    // Only the text declaration that starts an external
+                    // subset is allowed, and it has no `standalone`.
+                    let declaration = rest.split("?>").next().unwrap_or(rest);
+                    if !(external && index == 0) {
+                        self.problem(
+                            DtdProblemKind::Syntax,
+                            Self::at(source, index..target_end),
+                            "a processing instruction target cannot be 'xml'",
+                        );
+                    } else if declaration.contains("standalone") {
+                        self.problem(
+                            DtdProblemKind::Syntax,
+                            Self::at(source, index..target_end),
+                            "a text declaration has no standalone declaration",
+                        );
+                    }
+                }
                 match rest.find("?>") {
                     Some(offset) => index += offset + 2,
                     None => {
@@ -1008,8 +1027,13 @@ impl<'l> DtdBuilder<'l> {
                     ),
                 }
                 if !closed {
+                    let kind = if has_parameter_reference(&text[index..declaration_end]) {
+                        DtdProblemKind::ProperNesting
+                    } else {
+                        DtdProblemKind::Syntax
+                    };
                     self.problem(
-                        DtdProblemKind::Syntax,
+                        kind,
                         Self::at(source, index..keyword_end.max(index + 2)),
                         "unclosed declaration: '>' expected",
                     );
@@ -1095,8 +1119,13 @@ impl<'l> DtdBuilder<'l> {
             .find('[')
             .map(|offset| start + 3 + offset)
         else {
+            let kind = if has_parameter_reference(&text[start..end]) {
+                DtdProblemKind::ProperNesting
+            } else {
+                DtdProblemKind::Syntax
+            };
             self.problem(
-                DtdProblemKind::Syntax,
+                kind,
                 Self::at(source, start..end),
                 "invalid conditional section: '[' expected",
             );
@@ -1320,11 +1349,14 @@ impl<'l> DtdBuilder<'l> {
                 // Error at the end of the declaration: the keyword is reported.
                 range = whole.start..body.start;
             }
-            self.problem(
-                DtdProblemKind::Syntax,
-                Self::at(source, range),
-                error.message,
-            );
+            // A declaration built from parameter entities that does not end
+            // where it starts is a nesting problem (validity constraint).
+            let kind = if has_parameter_reference(&self.dtd.sources[source].text[body.clone()]) {
+                DtdProblemKind::ProperNesting
+            } else {
+                DtdProblemKind::Syntax
+            };
+            self.problem(kind, Self::at(source, range), error.message);
         }
     }
 
@@ -1510,6 +1542,7 @@ impl<'l> DtdBuilder<'l> {
                 "'<' is not allowed in an attribute value",
             );
         }
+        self.check_default_references(raw, location);
         let mut budget = self.default_budget.min(MAX_ENTITY_EXPANSION);
         let before = budget;
         let value = self
@@ -1517,6 +1550,83 @@ impl<'l> DtdBuilder<'l> {
             .normalize_attribute_value_within(raw, cdata, &mut budget);
         self.default_budget -= before - budget;
         value.unwrap_or_else(|| raw.to_owned())
+    }
+
+    /// Whether `text` (a replacement text, CDATA sections excepted)
+    /// references a general entity that is not declared.
+    fn references_undeclared_entity(&self, text: &str) -> bool {
+        let mut rest = text;
+        while let Some(position) = rest.find(['&', '<']) {
+            if rest[position..].starts_with("<![CDATA[") {
+                match rest[position..].find("]]>") {
+                    Some(end) => rest = &rest[position + end + 3..],
+                    None => return false,
+                }
+                continue;
+            }
+            if !rest[position..].starts_with('&') {
+                rest = &rest[position + 1..];
+                continue;
+            }
+            let after = &rest[position + 1..];
+            let Some(end) = after.find(';') else {
+                return false;
+            };
+            let name = &after[..end];
+            rest = &after[end + 1..];
+            if !name.starts_with('#')
+                && !PREDEFINED_ENTITIES
+                    .iter()
+                    .any(|(entity, _)| *entity == name)
+                && !self.dtd.general_index.contains_key(name)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Entity references of a default value (Entity Declared, Parsed Entity
+    /// and No External Entity References WFCs): the entity must be declared
+    /// before (unless the declarations are optional), parsed and internal.
+    fn check_default_references(&mut self, raw: &str, location: &Location) {
+        let mut rest = raw;
+        while let Some(position) = rest.find('&') {
+            let after = &rest[position + 1..];
+            let Some(end) = after.find(';') else {
+                break;
+            };
+            let name = &after[..end];
+            rest = &after[end + 1..];
+            if name.starts_with('#')
+                || PREDEFINED_ENTITIES
+                    .iter()
+                    .any(|(entity, _)| *entity == name)
+            {
+                continue;
+            }
+            let problem = match self.dtd.general_index.get(name) {
+                None if !self.dtd.optional_declarations => Some(format!(
+                    "the entity '{name}' must be declared before it is used in a default value"
+                )),
+                None => None,
+                Some(&index) => match &self.dtd.general_entities[index].value {
+                    EntityValue::External { notation, .. } => Some(if notation.is_some() {
+                        format!("the default value cannot reference the unparsed entity '{name}'")
+                    } else {
+                        format!("the default value cannot reference the external entity '{name}'")
+                    }),
+                    EntityValue::Internal(_) => None,
+                },
+            };
+            if let Some(message) = problem {
+                self.problem(
+                    DtdProblemKind::DefaultEntityReference,
+                    location.clone(),
+                    message,
+                );
+            }
+        }
     }
 
     fn add_attribute(&mut self, attribute: AttributeDecl) {
@@ -1856,6 +1966,14 @@ impl<'l> DtdBuilder<'l> {
                 }
             }
             stack.pop();
+            if result.error.is_none()
+                && !self.dtd.optional_declarations
+                && self.references_undeclared_entity(&text)
+            {
+                // Entity Declared (WFC): reported where the entity is
+                // referenced.
+                result.error = Some(ExpansionError::Undeclared);
+            }
             if result.error.is_none() && result.length > MAX_ENTITY_EXPANSION {
                 result.error = Some(ExpansionError::TooLarge);
                 own_problem = Some((

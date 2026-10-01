@@ -1,0 +1,14 @@
+dtd07	needs an external entity or external parameter entity; the server never reads them (security model: nothing outside the document's DTD subset and catalogs)
+encoding07	needs an external entity or external parameter entity; the server never reads them (security model: nothing outside the document's DTD subset and catalogs)
+ibm-not-wf-P77-ibm77n01.xml	needs an external entity or external parameter entity; the server never reads them (security model: nothing outside the document's DTD subset and catalogs)
+ibm-not-wf-P77-ibm77n02.xml	needs an external entity or external parameter entity; the server never reads them (security model: nothing outside the document's DTD subset and catalogs)
+ibm-not-wf-P78-ibm78n01.xml	needs an external entity or external parameter entity; the server never reads them (security model: nothing outside the document's DTD subset and catalogs)
+ibm-not-wf-P78-ibm78n02.xml	needs an external entity or external parameter entity; the server never reads them (security model: nothing outside the document's DTD subset and catalogs)
+not-wf-ext-sa-001	needs an external entity or external parameter entity; the server never reads them (security model: nothing outside the document's DTD subset and catalogs)
+not-wf-ext-sa-002	needs an external entity or external parameter entity; the server never reads them (security model: nothing outside the document's DTD subset and catalogs)
+not-wf-ext-sa-003	needs an external entity or external parameter entity; the server never reads them (security model: nothing outside the document's DTD subset and catalogs)
+not-wf-sa-050	empty documents are not reported, so that a new blank file has no error
+o-p39fail3	empty documents are not reported, so that a new blank file has no error
+rmt-e2e-38	needs an external entity or external parameter entity; the server never reads them (security model: nothing outside the document's DTD subset and catalogs)
+rmt-ns10-011	depends on DTD attribute-value normalisation of namespace declarations, not modelled
+rmt-ns10-012	depends on DTD attribute-value normalisation of namespace declarations, not modelled

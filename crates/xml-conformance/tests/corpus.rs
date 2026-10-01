@@ -6,12 +6,12 @@
 //! - `tests/fixtures/corpus/libxml2-errors`: libxml2 `test/errors` (MIT),
 //!   documents that once crashed or misled libxml2.
 //!
-//! Known disagreements are listed in `baselines/corpus-<name>.txt`.
+//! Known disagreements are listed in `exclusions/corpus-<name>.txt`.
 
 use std::fs;
 
 use xml_conformance::{
-    Outcome, SuiteRun, check_formatting, decode, fixtures_dir, guarded, well_formedness_errors,
+    Outcome, SuiteRun, check_formatting, decode, fixtures_dir, guarded, server_errors,
 };
 
 #[test]
@@ -46,7 +46,7 @@ fn run_corpus(name: &str) {
             ("not-wf", None) => Outcome::Pass,
             (_, None) => Outcome::Fail("undecodable document".to_owned()),
             ("wf", Some(source)) => {
-                let errors = well_formedness_errors(&source);
+                let errors = server_errors(&source, None, false);
                 if !errors.is_empty() {
                     return Outcome::Fail(format!(
                         "reported not well-formed: {}",
@@ -59,7 +59,7 @@ fn run_corpus(name: &str) {
                 }
             }
             ("not-wf", Some(source)) => {
-                if well_formedness_errors(&source).is_empty() {
+                if server_errors(&source, None, false).is_empty() {
                     Outcome::Fail("accepted a not well-formed document".to_owned())
                 } else {
                     Outcome::Pass
@@ -84,5 +84,5 @@ fn run_corpus(name: &str) {
         files, listed,
         "every .xml file of {name} needs an expectation"
     );
-    run.check_against_baseline();
+    run.check();
 }

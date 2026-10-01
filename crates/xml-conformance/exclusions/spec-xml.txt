@@ -1,0 +1,1 @@
+xml §2.1 [1] empty document	empty documents are not reported, so that a new blank file has no error

@@ -2075,6 +2075,52 @@ impl XsdModelSet {
             .any(|(_, particle)| self.particle_has_skip_wildcard(particle, 0))
     }
 
+    /// Whether every wildcard of the content model of `parent` that allows
+    /// `namespace` is `processContents="strict"` (and there is one): an
+    /// element it matches needs a global declaration (or an `xsi:type`).
+    pub fn strict_wildcard_applies(&self, parent: XsdTypeRef<'_>, namespace: Option<&str>) -> bool {
+        let mut particles = Vec::new();
+        self.content_particles(parent, 0, &mut particles);
+        let mut wildcards = Vec::new();
+        for (_, particle) in particles {
+            self.collect_wildcards(particle, &mut wildcards, 0);
+        }
+        let mut applicable = wildcards
+            .iter()
+            .filter(|wildcard| wildcard.namespaces.allows(namespace))
+            .peekable();
+        applicable.peek().is_some()
+            && applicable.all(|wildcard| wildcard.process_contents == XsdProcessContents::Strict)
+    }
+
+    fn collect_wildcards<'a>(
+        &'a self,
+        particle: &'a XsdParticle,
+        out: &mut Vec<&'a XsdWildcard>,
+        depth: usize,
+    ) {
+        if depth > MAX_DEPTH {
+            return;
+        }
+        match particle {
+            XsdParticle::Any(wildcard) => out.push(wildcard),
+            XsdParticle::Group { particles, .. } => {
+                for inner in particles {
+                    self.collect_wildcards(inner, out, depth + 1);
+                }
+            }
+            XsdParticle::GroupRef { name, .. } => {
+                if let Some(content) = self
+                    .group(name.namespace.as_deref(), &name.local)
+                    .and_then(|group| group.item.content.as_ref())
+                {
+                    self.collect_wildcards(content, out, depth + 1);
+                }
+            }
+            XsdParticle::Element(_) => {}
+        }
+    }
+
     fn particle_has_skip_wildcard(&self, particle: &XsdParticle, depth: usize) -> bool {
         if depth > MAX_DEPTH {
             return false;

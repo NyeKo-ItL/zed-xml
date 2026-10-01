@@ -65,6 +65,70 @@ fn local_type<'a>(declaration: &'a XsdElementDecl, pending: &mut Vec<(&'a XsdTyp
     }
 }
 
+/// Every simple type definition of a model: global ones, anonymous ones of
+/// element and attribute declarations (local declarations of complex types
+/// included) and those nested in other simple types.
+fn simple_types(model: &XsdModel) -> Vec<(&XsdTypeDef, String)> {
+    fn nested<'a>(
+        definition: &'a XsdTypeDef,
+        label: &str,
+        out: &mut Vec<(&'a XsdTypeDef, String)>,
+    ) {
+        for inline in &definition.inline_types {
+            out.push((inline, format!("a simple type of {label}")));
+            nested(inline, label, out);
+        }
+    }
+    let mut found: Vec<(&XsdTypeDef, String)> = Vec::new();
+    for definition in &model.types {
+        if !definition.complex
+            && let Some(name) = &definition.name
+        {
+            found.push((definition, format!("simple type '{name}'")));
+            nested(definition, &format!("simple type '{name}'"), &mut found);
+        }
+    }
+    let mut attributes: Vec<&crate::model::XsdAttributeDecl> = model.attributes.iter().collect();
+    let mut elements: Vec<&XsdElementDecl> = model.elements.iter().collect();
+    for (definition, _) in complex_types(model) {
+        attributes.extend(&definition.attributes);
+        if let Some(content) = &definition.content {
+            let mut particles = vec![content];
+            while let Some(particle) = particles.pop() {
+                match particle {
+                    XsdParticle::Element(declaration) => elements.push(declaration),
+                    XsdParticle::Group {
+                        particles: inner, ..
+                    } => particles.extend(inner),
+                    XsdParticle::GroupRef { .. } | XsdParticle::Any(_) => {}
+                }
+            }
+        }
+    }
+    for group in &model.attribute_groups {
+        attributes.extend(&group.attributes);
+    }
+    for attribute in attributes {
+        if let Some(anonymous) = &attribute.anonymous_type
+            && !anonymous.complex
+        {
+            let label = format!("the type of attribute '{}'", attribute.name);
+            found.push((anonymous, label.clone()));
+            nested(anonymous, &label, &mut found);
+        }
+    }
+    for element in elements {
+        if let Some(anonymous) = &element.anonymous_type
+            && !anonymous.complex
+        {
+            let label = format!("the type of element '{}'", element.name);
+            found.push((anonymous, label.clone()));
+            nested(anonymous, &label, &mut found);
+        }
+    }
+    found
+}
+
 /// Kind of a particle for "Particle Valid (Restriction)".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -101,6 +165,90 @@ impl Kind {
 }
 
 impl XsdModelSet {
+    /// What a simple type can be derived from: a restriction needs a simple
+    /// base type (not a complex type, not `xs:anyType`), a list an atomic or
+    /// union item type, a union simple member types.
+    fn simple_derivation_problems(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+        for (schema, model) in self.models().iter().enumerate() {
+            for (definition, label) in simple_types(model) {
+                let reference = XsdTypeRef {
+                    schema,
+                    name: None,
+                    definition: Some(definition),
+                };
+                let is_any_type = |reference: &XsdTypeRef<'_>| {
+                    reference
+                        .name
+                        .is_some_and(|name| name.is_builtin() && name.local == "anyType")
+                };
+                let complex = |reference: &XsdTypeRef<'_>| {
+                    reference
+                        .definition
+                        .is_some_and(|definition| definition.complex)
+                };
+                let is_list = |reference: &XsdTypeRef<'_>| {
+                    reference.definition.is_some_and(|definition| {
+                        definition.derivation == Some(XsdDerivation::List)
+                    }) || reference.name.is_some_and(|name| {
+                        name.is_builtin()
+                            && BuiltinType::from_local_name(&name.local)
+                                .is_some_and(|builtin| builtin.list_item().is_some())
+                    })
+                };
+                match definition.derivation {
+                    Some(XsdDerivation::Restriction) => {
+                        if let Some(base) = self.base_type(reference)
+                            && (complex(&base) || is_any_type(&base))
+                        {
+                            problems.push(format!(
+                                "{label}: a simple type cannot restrict {}",
+                                if complex(&base) {
+                                    "a complex type"
+                                } else {
+                                    "xs:anyType"
+                                }
+                            ));
+                        }
+                    }
+                    Some(XsdDerivation::List) => {
+                        let item = definition
+                            .item_type
+                            .as_ref()
+                            .map(|name| self.resolve_type(schema, name))
+                            .or_else(|| {
+                                definition.inline_types.first().map(|inline| XsdTypeRef {
+                                    schema,
+                                    name: None,
+                                    definition: Some(inline),
+                                })
+                            });
+                        if let Some(item) = item
+                            && (complex(&item) || is_any_type(&item) || is_list(&item))
+                        {
+                            problems.push(format!(
+                                "{label}: the item type of a list must be an atomic or union simple type"
+                            ));
+                        }
+                    }
+                    Some(XsdDerivation::Union) => {
+                        for name in &definition.member_types {
+                            let member = self.resolve_type(schema, name);
+                            if complex(&member) || is_any_type(&member) {
+                                problems.push(format!(
+                                    "{label}: the member type '{}' of a union must be a simple type",
+                                    name.local
+                                ));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        problems
+    }
+
     /// Kind of the effective particle: groups holding a single particle
     /// that occurs exactly once are "pointless" and looked through, group
     /// references are replaced by the group they name.
@@ -569,6 +717,28 @@ impl XsdModelSet {
     fn local_declaration_problems(&self) -> Vec<String> {
         let mut problems = Vec::new();
         for (schema, model) in self.models().iter().enumerate() {
+            // A global element with a value constraint needs a type with
+            // simple or mixed content.
+            for element in &model.elements {
+                if element.default.is_none() && element.fixed.is_none() {
+                    continue;
+                }
+                let declaration = Located {
+                    schema,
+                    item: element,
+                };
+                if let Some(reference) = self.element_type(declaration)
+                    && let Some(definition) = reference.definition
+                    && definition.complex
+                    && !definition.simple_content
+                    && !definition.mixed
+                {
+                    problems.push(format!(
+                        "element '{}' has a default or fixed value but its type has element-only content",
+                        element.name
+                    ));
+                }
+            }
             for (definition, label) in complex_types(model) {
                 for attribute in &definition.attributes {
                     let local = Located {
@@ -755,6 +925,7 @@ impl XsdModelSet {
     /// the set.
     pub fn component_problems(&self) -> Vec<String> {
         let mut problems: Vec<String> = self.final_problems();
+        problems.extend(self.simple_derivation_problems());
         problems.extend(self.derivation_kind_problems());
         problems.extend(self.local_declaration_problems());
         for (schema, model) in self.models().iter().enumerate() {

@@ -40,7 +40,7 @@ entity_err_005.xml     wf      # billion laughs (well-formed per XML 1.0; roxmlt
 entity_err_006.xml     wf      # billion laughs (well-formed per XML 1.0; roxmltree rejects it by policy)
 entity_err_007.xml     not-wf  # malformed entity inside an attribute
 entity_err_008.xml     not-wf  # malformed entity inside a character data/text
-entity_err_009.xml     not-wf  # escaped `<` inside an attribute inside an entity is an error
+entity_err_009.xml     wf      # `&lt;` inside an attribute of an entity's markup is legal (XML 1.0 §3.1, §4.4.2); roxmltree rejects it, this corpus verdict follows the specification
 ns_001.xml             wf      # attributes with different namespaces
 ns_002.xml             wf      # attribute is not affected by the default namespace
 ns_003.xml             wf      # attributes with different namespaces

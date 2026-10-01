@@ -845,6 +845,117 @@ fn occurs(document: &SchemaDocument<'_>, element: usize) -> (usize, Option<usize
     (min, max)
 }
 
+/// Representation constraints of the components redefined by an
+/// `xs:redefine` (XML Schema 1.0 Part 1, src-redefine 5 to 7): a type
+/// derives from itself, a group contains at most one reference to itself,
+/// with `minOccurs` and `maxOccurs` 1, an attribute group at most one.
+fn check_redefine(
+    document: &SchemaDocument<'_>,
+    redefine: usize,
+    problems: &mut Vec<SchemaProblem>,
+) {
+    let target = document
+        .value(document.root, "targetNamespace")
+        .filter(|namespace| !namespace.is_empty());
+    let names_itself = |element: usize, attribute: &str, name: &str| {
+        let Some(value) = document.value(element, attribute) else {
+            return false;
+        };
+        let value = value.trim();
+        let (prefix, local) = match value.split_once(':') {
+            Some((prefix, local)) => (Some(prefix), local),
+            None => (None, value),
+        };
+        local == name
+            && document
+                .namespace(element, prefix)
+                .map(|namespace| namespace.map(str::to_owned))
+                .unwrap_or(None)
+                == target
+    };
+    for &component in &document.children[redefine] {
+        let Some(name) = document.value(component, "name") else {
+            continue;
+        };
+        match document.local(component) {
+            "simpleType" => {
+                let restriction = document.children[component]
+                    .iter()
+                    .copied()
+                    .find(|&child| document.local(child) == "restriction");
+                if !restriction.is_some_and(|restriction| names_itself(restriction, "base", &name))
+                {
+                    problems.push(problem(
+                        document,
+                        component,
+                        INVALID_VALUE,
+                        format!("the simple type '{name}' of an xs:redefine must restrict itself"),
+                    ));
+                }
+            }
+            "complexType" => {
+                let derivation = document.children[component]
+                    .iter()
+                    .copied()
+                    .filter(|&child| {
+                        matches!(document.local(child), "simpleContent" | "complexContent")
+                    })
+                    .flat_map(|content| document.children[content].iter().copied())
+                    .find(|&child| matches!(document.local(child), "extension" | "restriction"));
+                if !derivation.is_some_and(|derivation| names_itself(derivation, "base", &name)) {
+                    problems.push(problem(
+                        document,
+                        component,
+                        INVALID_VALUE,
+                        format!(
+                            "the complex type '{name}' of an xs:redefine must derive from itself"
+                        ),
+                    ));
+                }
+            }
+            kind @ ("group" | "attributeGroup") => {
+                let mut references = Vec::new();
+                let mut pending = document.children[component].clone();
+                while let Some(child) = pending.pop() {
+                    if document.local(child) == kind && document.has_attribute(child, "ref") {
+                        references.push(child);
+                    }
+                    pending.extend(&document.children[child]);
+                }
+                let own = references
+                    .iter()
+                    .copied()
+                    .filter(|&reference| names_itself(reference, "ref", &name))
+                    .collect::<Vec<_>>();
+                if own.len() > 1 {
+                    problems.push(problem(
+                        document,
+                        component,
+                        INVALID_VALUE,
+                        format!(
+                            "the {kind} '{name}' of an xs:redefine refers to itself more than once"
+                        ),
+                    ));
+                }
+                if kind == "group" {
+                    for reference in own {
+                        let (min, max) = occurs(document, reference);
+                        if min != 1 || max != Some(1) {
+                            problems.push(problem(
+                                document,
+                                reference,
+                                INVALID_VALUE,
+                                "the reference of a redefined group to itself has minOccurs and maxOccurs 1",
+                            ));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 fn check_constraints(
     document: &SchemaDocument<'_>,
     element: usize,
@@ -859,6 +970,9 @@ fn check_constraints(
         .iter()
         .map(|child| document.local(*child))
         .collect::<Vec<_>>();
+    if local == "redefine" {
+        check_redefine(document, element, problems);
+    }
     match local {
         "element" if !top_level => {
             let reference = document.has_attribute(element, "ref");

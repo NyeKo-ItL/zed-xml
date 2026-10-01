@@ -23,6 +23,7 @@ fn caches_files_and_merged_sets_until_they_change_on_disk() {
         vec![SchemaReference {
             namespace: None,
             path: main.clone(),
+            kind: xsd_core::SchemaLocationKind::NoNamespaceSchemaLocation,
         }]
     };
     let mut store = SchemaStore::default();

@@ -1,5 +1,0 @@
-# Known failures of the `corpus-libxml2-errors` suite, one case per line.
-# Regenerate with `BLESS=1 cargo test -p xml-conformance`.
-empty.xml
-ns-ent.xml
-unsupported-encoding.xml

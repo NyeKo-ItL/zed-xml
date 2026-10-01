@@ -174,6 +174,26 @@ impl BuiltinType {
         false
     }
 
+    /// `(minInclusive, maxInclusive)` implied by the derivation of the
+    /// built-in integer types (`xs:byte` is -128 to 127 ...).
+    pub fn implicit_bounds(self) -> (Option<&'static str>, Option<&'static str>) {
+        match self {
+            Self::NonPositiveInteger => (None, Some("0")),
+            Self::NegativeInteger => (None, Some("-1")),
+            Self::Long => (Some("-9223372036854775808"), Some("9223372036854775807")),
+            Self::Int => (Some("-2147483648"), Some("2147483647")),
+            Self::Short => (Some("-32768"), Some("32767")),
+            Self::Byte => (Some("-128"), Some("127")),
+            Self::NonNegativeInteger => (Some("0"), None),
+            Self::UnsignedLong => (Some("0"), Some("18446744073709551615")),
+            Self::UnsignedInt => (Some("0"), Some("4294967295")),
+            Self::UnsignedShort => (Some("0"), Some("65535")),
+            Self::UnsignedByte => (Some("0"), Some("255")),
+            Self::PositiveInteger => (Some("1"), None),
+            _ => (None, None),
+        }
+    }
+
     /// Item type of the built-in list types (`NMTOKENS`, `IDREFS`,
     /// `ENTITIES`).
     pub fn list_item(self) -> Option<Self> {

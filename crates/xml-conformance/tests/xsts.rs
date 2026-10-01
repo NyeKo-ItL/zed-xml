@@ -37,7 +37,7 @@ fn w3c_xsd_test_suite() {
         let path = suite.join(href);
         run_test_set(&path, &mut run);
     }
-    run.check_against_baseline();
+    run.check();
 }
 
 fn run_test_set(path: &Path, run: &mut SuiteRun) {

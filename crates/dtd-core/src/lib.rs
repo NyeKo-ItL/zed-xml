@@ -259,6 +259,9 @@ pub struct EntityExpansion {
 pub enum ExpansionError {
     Recursive,
     TooLarge,
+    /// The replacement text references an undeclared general entity (in a
+    /// document without optional declarations).
+    Undeclared,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -323,6 +326,12 @@ pub enum DtdProblemKind {
     IdAttributeDefault,
     /// Default value outside the enumeration.
     InvalidDefaultValue,
+    /// A markup declaration or conditional section is not properly nested
+    /// in a parameter entity replacement text (a validity constraint).
+    ProperNesting,
+    /// A default value references an undeclared, external or unparsed
+    /// entity (well-formedness constraints).
+    DefaultEntityReference,
     UndeclaredParameterEntity,
     UndeclaredNotation,
     /// Entity referencing itself.
@@ -347,6 +356,8 @@ impl DtdProblemKind {
             DtdProblemKind::MultipleIdAttributes => "multipleIdAttributes",
             DtdProblemKind::IdAttributeDefault => "idAttributeDefault",
             DtdProblemKind::InvalidDefaultValue => "invalidDefaultValue",
+            DtdProblemKind::ProperNesting => "properNesting",
+            DtdProblemKind::DefaultEntityReference => "defaultEntityReference",
             DtdProblemKind::UndeclaredParameterEntity => "undeclaredParameterEntity",
             DtdProblemKind::UndeclaredNotation => "undeclaredNotation",
             DtdProblemKind::EntityRecursion => "entityRecursion",

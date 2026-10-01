@@ -128,10 +128,7 @@ pub(crate) fn validate_attributes(
                         if wildcard.process_contents == XsdProcessContents::Strict
                             // Only when the namespace's schema is loaded: its
                             // declarations may be in a schema not in the set.
-                            && models
-                                .models()
-                                .iter()
-                                .any(|model| model.target_namespace == namespace)
+
                             && models
                                 .global_attribute(namespace.as_deref(), local)
                                 .is_none_or(|found| found.item.namespace != namespace) =>

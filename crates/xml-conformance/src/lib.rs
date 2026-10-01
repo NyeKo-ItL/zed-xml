@@ -11,10 +11,9 @@
 //!   is set, as it is in CI;
 //! - hand-written cases derived from the specifications.
 //!
-//! External suites are compared against a baseline of known failures in
-//! `crates/xml-conformance/baselines/`, so a regression fails the build while
-//! the suite pass rate is still being raised. Run a suite with `BLESS=1` to
-//! rewrite its baseline after an intended change.
+//! Every case of every suite must pass. The only escape hatch is
+//! `crates/xml-conformance/exclusions/<suite>.txt`, where a case that tests
+//! something deliberately out of scope is listed with the reason.
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
@@ -76,7 +75,15 @@ pub fn external_suite(name: &str, marker: &str) -> Option<PathBuf> {
 pub fn decode(bytes: &[u8]) -> Option<String> {
     if let Some((encoding, bom_length)) = encoding_rs::Encoding::for_bom(bytes) {
         let (text, had_errors) = encoding.decode_without_bom_handling(&bytes[bom_length..]);
-        return (!had_errors).then(|| text.into_owned());
+        let kind = if encoding == encoding_rs::UTF_16LE {
+            xml_core::text::TextEncoding::Utf16Le
+        } else if encoding == encoding_rs::UTF_16BE {
+            xml_core::text::TextEncoding::Utf16Be
+        } else {
+            xml_core::text::TextEncoding::Utf8
+        };
+        return (!had_errors && !xml_core::text::declared_encoding_conflicts(&text, kind, true))
+            .then(|| text.into_owned());
     }
     // UTF-16 without a byte order mark, recognised from `<?` (appendix F.1).
     let utf16 = match bytes {
@@ -182,6 +189,7 @@ pub fn server_errors(source: &str, path: Option<&Path>, validate: bool) -> Vec<S
                             | dtd_core::DtdProblemKind::MultipleIdAttributes
                             | dtd_core::DtdProblemKind::IdAttributeDefault
                             | dtd_core::DtdProblemKind::InvalidDefaultValue
+                            | dtd_core::DtdProblemKind::ProperNesting
                             | dtd_core::DtdProblemKind::UndeclaredNotation
                     )
                 })
@@ -349,6 +357,17 @@ pub fn load_schema_set(path: &Path) -> Result<XsdSchema, String> {
         let source = decode(&bytes).ok_or_else(|| format!("{}: undecodable", path.display()))?;
         let schema = parse_xsd(&source).map_err(|error| format!("{}: {error}", path.display()))?;
         schemas.push(schema);
+        let namespace_of = |dependency: &Path| {
+            let bytes = fs::read(dependency).ok()?;
+            xsd_core::schema_target_namespace(&decode(&bytes)?)
+        };
+        if let Some(problem) =
+            xsd_core::dependency_problems(&source, &path, &|_| None, &namespace_of)
+                .into_iter()
+                .next()
+        {
+            return Err(format!("invalid schema: {}: {problem}", path.display()));
+        }
         for reference in resolve_schema_dependencies(&source, &path)? {
             if reference.path.exists() {
                 queue.push(reference.path);
@@ -447,59 +466,59 @@ impl SuiteRun {
             .collect()
     }
 
-    /// Compares the failures with `baselines/<name>.txt`: a case failing
-    /// outside the baseline is a regression, a baseline case now passing
-    /// must be removed from it. `BLESS=1` rewrites the baseline instead.
-    pub fn check_against_baseline(&self) {
+    /// Checks the run against `exclusions/<name>.txt`: every failing case
+    /// must be listed there with a reason (`<id><TAB><reason>`), and an
+    /// excluded case that passes (or does not exist any more) must be removed
+    /// from it. A suite without exclusions has no file: any failure fails the
+    /// build.
+    pub fn check(&self) {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("baselines")
+            .join("exclusions")
             .join(format!("{}.txt", self.name));
         let failures = self.failures();
         eprintln!("{self}");
 
-        if env::var_os("BLESS").is_some() {
-            let mut content = format!(
-                "# Known failures of the `{}` suite, one case per line.\n# Regenerate with `BLESS=1 cargo test -p xml-conformance`.\n",
-                self.name
-            );
-            for id in &failures {
-                content.push_str(id);
-                content.push('\n');
+        let listing = fs::read_to_string(&path).unwrap_or_default();
+        let mut excluded = BTreeMap::new();
+        let mut problems = String::new();
+        for line in listing.lines() {
+            let line = line.trim_end();
+            if line.trim().is_empty() || line.starts_with('#') {
+                continue;
             }
-            fs::write(&path, content).expect("baseline should be writable");
-            return;
+            match line.split_once('\t') {
+                Some((id, reason)) if !reason.trim().is_empty() => {
+                    excluded.insert(id.trim().to_owned(), reason.trim().to_owned());
+                }
+                _ => problems.push_str(&format!(
+                    "{}: `{line}` has no reason (expected `<id><TAB><reason>`)\n",
+                    path.display()
+                )),
+            }
         }
-
-        let baseline = fs::read_to_string(&path).unwrap_or_default();
-        let known = baseline
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty() && !line.starts_with('#'))
-            .collect::<BTreeSet<_>>();
-        let regressions = failures
+        let unexpected = failures
             .iter()
-            .filter(|id| !known.contains(*id))
+            .filter(|id| !excluded.contains_key(**id))
             .map(|id| format!("  {id}: {:?}", self.outcomes[*id]))
             .collect::<Vec<_>>();
-        let fixed = known
-            .iter()
-            .filter(|id| matches!(self.outcomes.get(**id), Some(Outcome::Pass)))
+        let stale = excluded
+            .keys()
+            .filter(|id| !failures.contains(id.as_str()))
             .collect::<Vec<_>>();
-        let mut problems = String::new();
-        if !regressions.is_empty() {
+        if !unexpected.is_empty() {
             problems.push_str(&format!(
-                "{} case(s) fail but are not in {}:\n{}\n",
-                regressions.len(),
-                path.display(),
-                regressions.join("\n")
+                "{} case(s) of `{}` fail:\n{}\n",
+                unexpected.len(),
+                self.name,
+                unexpected.join("\n")
             ));
         }
-        if !fixed.is_empty() {
+        if !stale.is_empty() {
             problems.push_str(&format!(
-                "{} case(s) now pass; remove them from {} (or run with BLESS=1): {:?}\n",
-                fixed.len(),
+                "{} excluded case(s) now pass or no longer exist; remove them from {}: {:?}\n",
+                stale.len(),
                 path.display(),
-                fixed
+                stale
             ));
         }
         assert!(problems.is_empty(), "{problems}");
