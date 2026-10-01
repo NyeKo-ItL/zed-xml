@@ -111,7 +111,7 @@ jobs:
           targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@v2
       - run: cargo build -p zed-xml --target wasm32-wasip2 --release --locked
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: zed-xml-extension-wasm
           path: target/wasm32-wasip2/release/zed_xml.wasm
@@ -157,7 +157,7 @@ jobs:
             cat coverage/summary.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: coverage
           path: coverage
@@ -411,7 +411,7 @@ jobs:
             exit 1
           fi
           echo "name=$ASSET" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: xml-lsp-${{ matrix.target }}
           path: dist/${{ steps.asset.outputs.name }}
