@@ -2,6 +2,7 @@
 //! catalog (re)loading and the file watchers that keep them fresh.
 
 use super::*;
+use crate::dispatch::ResponseExt;
 
 impl XmlLanguageServer {
     /// Recomputes the list of catalogs (settings and workspace folders);
@@ -157,7 +158,7 @@ impl XmlLanguageServer {
         }
         self.pending_configuration = None;
         let section = response
-            .result
+            .result()
             .as_ref()
             .and_then(|result| result.get(0))
             .cloned()
