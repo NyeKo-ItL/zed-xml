@@ -504,9 +504,7 @@ fn has_text_at_top_level(content: &str) -> Option<bool> {
         match reader.read_event().ok()? {
             Event::Start(_) => depth += 1,
             Event::End(_) => depth = depth.checked_sub(1)?,
-            Event::Text(text)
-                if depth == 0 && !String::from_utf8_lossy(text.as_ref()).trim().is_empty() =>
-            {
+            Event::Text(text) if depth == 0 && !text.as_ref().trim().is_empty() => {
                 return Some(true);
             }
             Event::CData(_) if depth == 0 => return Some(true),
@@ -703,7 +701,7 @@ impl<'a> Formatter<'a> {
                     self.emit(Event::End(element.into_owned()))?;
                 }
                 Event::Text(text) => {
-                    let raw = String::from_utf8_lossy(text.as_ref()).into_owned();
+                    let raw = text.as_ref().to_owned();
                     // Whitespace between the children of an element that has
                     // text (mixed content) is content: it is kept as written.
                     let significant = self.pending_start.is_none() && self.has_text();
@@ -734,8 +732,8 @@ impl<'a> Formatter<'a> {
                         self.write_indent()?;
                     }
                     if self.options.trim_trailing_whitespace {
-                        let raw = String::from_utf8_lossy(comment.as_ref());
-                        let trimmed = trim_trailing_whitespace(&raw);
+                        let raw = comment.as_ref();
+                        let trimmed = trim_trailing_whitespace(raw);
                         self.emit(Event::Comment(BytesText::from_escaped(trimmed)))?;
                     } else {
                         self.emit(Event::Comment(comment.into_owned()))?;
@@ -813,7 +811,7 @@ impl<'a> Formatter<'a> {
         let rebuilt = if self.options.keeps_raw_tags(self_closing) {
             None
         } else {
-            let source = std::str::from_utf8(&start).map_err(|error| error.to_string())?;
+            let source = start.as_ref();
             let name_length = start.name().as_ref().len();
             layout_start_tag(
                 self.options,

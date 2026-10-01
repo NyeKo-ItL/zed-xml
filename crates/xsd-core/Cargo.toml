@@ -9,7 +9,7 @@ license = "MIT"
 path = "src/lib.rs"
 
 [dependencies]
-quick-xml = "0.38"
+quick-xml = "0.42"
 regex = "1"
 xml-core = { path = "../xml-core" }
 

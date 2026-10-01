@@ -180,7 +180,7 @@ pub(crate) fn xsd_element_name_offset(source: &str, expected_name: &str) -> Opti
         match reader.read_event() {
             Ok(Event::Start(element)) | Ok(Event::Empty(element)) => {
                 let qname = element.name();
-                let local = String::from_utf8_lossy(qname.as_ref());
+                let local = qname.as_ref();
                 let event_end = reader.buffer_position() as usize;
                 let event_start = source[search_from..event_end]
                     .find('<')
@@ -191,8 +191,10 @@ pub(crate) fn xsd_element_name_offset(source: &str, expected_name: &str) -> Opti
                     continue;
                 }
                 for attribute in element.attributes().flatten() {
-                    if attribute.key.as_ref() == b"name" {
-                        let value = attribute.unescape_value().ok()?.into_owned();
+                    if attribute.key.as_ref() == "name" {
+                        let value = quick_xml::escape::unescape(attribute.value.as_ref())
+                            .ok()?
+                            .into_owned();
                         if value != expected_name {
                             continue;
                         }

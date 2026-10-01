@@ -58,9 +58,7 @@ pub(crate) fn validate_attributes(
     let mut diagnostics = Vec::new();
     let mut present: Vec<(Option<String>, String)> = Vec::new();
     for attribute in element.attributes().flatten() {
-        let Ok(key) = std::str::from_utf8(attribute.key.as_ref()) else {
-            continue;
-        };
+        let key = attribute.key.as_ref();
         if key == "xmlns" || key.starts_with("xmlns:") {
             continue;
         }
@@ -179,9 +177,7 @@ pub(crate) fn validate_nil(
     lookup: &dyn Fn(&str) -> Option<String>,
 ) -> Vec<XsdDiagnostic> {
     let is_nil = element.attributes().flatten().any(|attribute| {
-        let Ok(key) = std::str::from_utf8(attribute.key.as_ref()) else {
-            return false;
-        };
+        let key = attribute.key.as_ref();
         // Any `xsi:nil` (even `false`) on a declaration that is not
         // nillable is an error (cvc-elt 3.1).
         key.split_once(':').is_some_and(|(prefix, local)| {
