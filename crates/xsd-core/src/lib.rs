@@ -563,11 +563,11 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                     schema.elements.push(XsdElement {
                         name: name.clone(),
                         occurs: XsdOccurs {
-                            min: attribute(&element, "minOccurs")
-                                .as_deref()
-                                .unwrap_or("1")
-                                .parse()
-                                .map_err(|_| "invalid minOccurs".to_owned())?,
+                            min: match attribute(&element, "minOccurs") {
+                                None => 1,
+                                Some(value) => parse_count(&value)
+                                    .ok_or_else(|| "invalid minOccurs".to_owned())?,
+                            },
                             max: parse_max_occurs(attribute(&element, "maxOccurs"))?,
                         },
                         type_name: attribute(&element, "type"),
@@ -788,11 +788,11 @@ pub fn parse_xsd(source: &str) -> Result<XsdSchema, String> {
                     schema.elements.push(XsdElement {
                         name,
                         occurs: XsdOccurs {
-                            min: attribute(&element, "minOccurs")
-                                .as_deref()
-                                .unwrap_or("1")
-                                .parse()
-                                .map_err(|_| "invalid minOccurs".to_owned())?,
+                            min: match attribute(&element, "minOccurs") {
+                                None => 1,
+                                Some(value) => parse_count(&value)
+                                    .ok_or_else(|| "invalid minOccurs".to_owned())?,
+                            },
                             max: parse_max_occurs(attribute(&element, "maxOccurs"))?,
                         },
                         type_name: attribute(&element, "type"),
@@ -1787,16 +1787,16 @@ fn validate(
             .map_or(event_start, |offset| event_start + offset);
         let location = start..(start + 1 + element.name().as_ref().len()).min(source.len());
         let namespaces = namespace_declarations(&element);
-        if !root_checked {
-            root_checked = true;
-            diagnostics.extend(located(
-                validate_root_element(&name, &namespaces, &models, schema),
-                &location,
-            ));
-        }
         bindings.bind(&namespaces);
         let lookup = |prefix: &str| bindings.lookup(prefix);
         let step = instance_step(&name, &element, &lookup);
+        if !root_checked {
+            root_checked = true;
+            diagnostics.extend(located(
+                validate_root_element(&name, &namespaces, &models, schema, step.xsi_type.as_ref()),
+                &location,
+            ));
+        }
         // Each open element keeps its own resolution: resolving a child from
         // its parent's is constant time, the whole path would be quadratic.
         let chain = match stack.last() {
@@ -1867,7 +1867,18 @@ fn validate(
                 fixed: resolved.declaration.item.fixed.as_deref(),
                 nil: is_nil(&element),
             },
-            None => ValueCheck::Flat,
+            // No declaration: an `xsi:type` naming a simple type still
+            // decides the value.
+            None => match undeclared_xsi_simple_type(&models, &step) {
+                Some(value_type) => ValueCheck::Model {
+                    value_type: Some(value_type),
+                    element_only: false,
+                    default: None,
+                    fixed: None,
+                    nil: is_nil(&element),
+                },
+                None => ValueCheck::Flat,
+            },
         };
         if let Some(parent) = stack.last_mut() {
             match &mut parent.content {
@@ -2101,6 +2112,7 @@ fn validate_root_element(
     namespaces: &[(String, String)],
     models: &XsdModelSet,
     schema: &XsdSchema,
+    xsi_type: Option<&(Option<String>, String)>,
 ) -> Vec<XsdDiagnostic> {
     if models.models().is_empty() {
         return validate_root(name, schema);
@@ -2112,9 +2124,24 @@ fn validate_root_element(
         .find(|(declared, _)| declared == prefix)
         .map(|(_, namespace)| namespace.clone())
         .filter(|namespace| !namespace.is_empty());
-    if models.global_elements().any(|declaration| {
-        declaration.item.name == local && declaration.item.namespace == namespace
-    }) {
+    // `global_element` also finds the elements of chameleon schemas, which
+    // take the namespace of a schema in the set that includes them.
+    let declared = models
+        .global_element(namespace.as_deref(), local)
+        .is_some_and(|found| {
+            found.item.namespace == namespace
+                || models
+                    .models()
+                    .iter()
+                    .any(|model| model.target_namespace == namespace)
+        });
+    // Without declaration, an `xsi:type` naming a known type is enough (the
+    // element is then assessed by that type).
+    let typed = xsi_type.is_some_and(|(namespace, local)| {
+        models.global_type(namespace.as_deref(), local).is_some()
+            || namespace.as_deref() == Some(model::XSD_NAMESPACE)
+    });
+    if declared || typed {
         Vec::new()
     } else {
         vec![XsdDiagnostic {
@@ -2257,6 +2284,26 @@ fn instance_step(
     }
 }
 
+/// Simple type named by the `xsi:type` of an element without declaration.
+fn undeclared_xsi_simple_type<'s>(
+    models: &'s XsdModelSet,
+    step: &XsdInstanceStep,
+) -> Option<SimpleType<'s>> {
+    let (namespace, local) = step.xsi_type.as_ref()?;
+    if let Some(builtin) = builtin_xsi_type(step) {
+        return Some(builtin);
+    }
+    let found = models.global_type(namespace.as_deref(), local)?;
+    if found.item.complex {
+        return None;
+    }
+    models.simple_type(model::XsdTypeRef {
+        schema: found.schema,
+        name: None,
+        definition: Some(found.item),
+    })
+}
+
 /// `xsi:type` naming a built-in simple type (`xsi:type="xs:int"`).
 fn builtin_xsi_type<'s>(step: &XsdInstanceStep) -> Option<SimpleType<'s>> {
     let (namespace, local) = step.xsi_type.as_ref()?;
@@ -2314,7 +2361,24 @@ fn validate_attribute_values<'s>(
         };
         let range =
             borrowed_range(source, attribute.value.as_ref()).unwrap_or_else(|| location.clone());
-        let value_type = resolved.and_then(|resolved| {
+        // An attribute matched only by a `processContents="skip"` wildcard
+        // is not assessed, even when a global declaration exists.
+        let skipped = resolved
+            .and_then(|resolved| resolved.element_type)
+            .is_some_and(|element_type| {
+                !models.attribute_uses(element_type).iter().any(|usage| {
+                    usage.item.usage != model::XsdUse::Prohibited
+                        && usage.item.name == local
+                        && usage.item.namespace == namespace
+                }) && models
+                    .attribute_wildcards(element_type)
+                    .iter()
+                    .find(|wildcard| wildcard.namespaces.allows(namespace.as_deref()))
+                    .is_some_and(|wildcard| {
+                        wildcard.process_contents == model::XsdProcessContents::Skip
+                    })
+            });
+        let value_type = resolved.filter(|_| !skipped).and_then(|resolved| {
             let declaration = models
                 .resolve_attribute(Some(resolved), namespace.as_deref(), local)
                 .map(|found| found.declaration)
@@ -2589,7 +2653,19 @@ fn validate_text_content(
             };
         }
     };
-    if nil || frame.unresolved_text {
+    if nil {
+        // An element with `xsi:nil="true"` has no content (whitespace
+        // tolerated, as editors reformat documents).
+        return if frame.children.is_empty() && frame.text.trim_matches(XML_WHITESPACE).is_empty() {
+            Vec::new()
+        } else {
+            vec![XsdDiagnostic {
+                kind: XsdDiagnosticKind::InvalidContent,
+                message: format!("element <{name}> has xsi:nil=\"true\" and must be empty"),
+            }]
+        };
+    }
+    if frame.unresolved_text {
         return Vec::new();
     }
     let lookup = |prefix: &str| bindings.lookup(prefix);
@@ -2752,9 +2828,8 @@ fn validate_attributes(
         if let Some(fixed) = schema
             .attribute_fixed
             .get(&format!("{element_name}:{name}"))
-            && attribute
-                .unescape_value()
-                .is_ok_and(|value| !same_value(&name, value.as_ref(), fixed))
+            && model::normalized_attribute_value(&attribute)
+                .is_some_and(|value| !same_value(&name, &value, fixed))
         {
             diagnostics.push(XsdDiagnostic {
                 kind: XsdDiagnosticKind::FixedValue,
@@ -2840,14 +2915,23 @@ fn parse_optional_usize(value: Option<String>) -> Result<Option<usize>, String> 
         .transpose()
 }
 
+/// Value of an occurrence bound: a non-negative integer of any size (larger
+/// than `usize` counts as `usize::MAX`).
+pub(crate) fn parse_count(text: &str) -> Option<usize> {
+    let digits = text.trim().strip_prefix('+').unwrap_or(text.trim());
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some(digits.parse().unwrap_or(usize::MAX))
+}
+
 fn parse_max_occurs(value: Option<String>) -> Result<Option<usize>, String> {
     match value.as_deref() {
         None => Ok(Some(1)),
         Some("unbounded") => Ok(None),
-        Some(value) => value
-            .parse()
+        Some(value) => parse_count(value)
             .map(Some)
-            .map_err(|_| "invalid maxOccurs".to_owned()),
+            .ok_or_else(|| "invalid maxOccurs".to_owned()),
     }
 }
 

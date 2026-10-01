@@ -170,7 +170,10 @@ fn strength(process: Option<XsdProcessContents>) -> u8 {
 }
 
 /// Whether every namespace `inner` allows is allowed by `outer`.
-fn wildcard_covers(outer: &XsdWildcardNamespaces, inner: &XsdWildcardNamespaces) -> bool {
+pub(crate) fn wildcard_covers(
+    outer: &XsdWildcardNamespaces,
+    inner: &XsdWildcardNamespaces,
+) -> bool {
     match (outer, inner) {
         (XsdWildcardNamespaces::Any, _) => true,
         (_, XsdWildcardNamespaces::Any) => false,
