@@ -23,6 +23,10 @@ wasm:
 	cargo build -p zed-xml --target wasm32-wasip2 --release --locked
 
 deny:
+	@command -v cargo-deny >/dev/null 2>&1 || { \
+		echo "cargo-deny is required; install it with: cargo install cargo-deny --locked" >&2; \
+		exit 127; \
+	}
 	cargo deny check advisories bans licenses sources
 
 coverage:

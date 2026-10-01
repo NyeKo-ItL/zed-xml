@@ -103,7 +103,7 @@ cargo build -p xml-lsp                  # server binary for XML_LSP_PATH
 cargo test -p xml-lsp -- <name filter>  # focused tests
 ```
 
-Run `make ci` before pushing. It mirrors all pull-request validation jobs, including coverage, conformance suites, query checks and benchmarks. It requires the local tools used by CI (`cargo-deny`, `cargo-llvm-cov`, the query-check toolchain and the downloaded conformance suites). CI denies every clippy warning (with the toolchain pinned by `CLIPPY_TOOLCHAIN` in `ci.yml`), runs the tests on Linux, Windows and macOS, and builds with the minimum supported Rust version (`rust-version` in every `Cargo.toml`, currently 1.88): do not use newer standard library APIs or language features without raising it everywhere.
+Run `make ci` before pushing. It mirrors all pull-request validation jobs, including coverage, conformance suites, query checks and benchmarks. It requires the local tools used by CI (`cargo-deny`, `cargo-llvm-cov`, the query-check toolchain and the downloaded conformance suites). Install the Rust tools with `cargo install cargo-deny cargo-llvm-cov --locked` when they are missing. CI denies every clippy warning (with the toolchain pinned by `CLIPPY_TOOLCHAIN` in `ci.yml`), runs the tests on Linux, Windows and macOS, and builds with the minimum supported Rust version (`rust-version` in every `Cargo.toml`, currently 1.88): do not use newer standard library APIs or language features without raising it everywhere.
 
 ## Coding conventions
 
