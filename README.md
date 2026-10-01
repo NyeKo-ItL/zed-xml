@@ -8,6 +8,8 @@ Install the extension from Zed's extensions page (`zed: extensions`), or from a 
 
 ## Features
 
+New to the extension? The [user guide](docs/user-guide.md) walks through validating against a schema, catalogs for remote schemas, formatting and troubleshooting by task.
+
 - Tree-sitter syntax highlighting, indentation and outline support.
 - Around fifty XML file types recognized by their suffix (XAML, `.resx`, storyboards, XLIFF, KML, GPX, RELAX NG, WiX, `.pom`, …; see [File types](#file-types)), all served by `xml-lsp` (diagnostics, completion, formatting, and workspace symbols and `workspace/didChangeWatchedFiles` for the files on disk).
 - Matching start/end tag pairs and delimiters (`<`/`>`, `<?`/`?>`, quotes) for bracket highlighting and jumping.
