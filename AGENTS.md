@@ -4,6 +4,8 @@ Guidance for coding agents (and humans) working in this repository. It complemen
 
 - [README.md](README.md): user-facing features, installation, editor settings, troubleshooting.
 - [docs/configuration.md](docs/configuration.md): reference of the `xml.*` server settings, XML catalogs and DTD behaviour.
+- [docs/diagnostics.md](docs/diagnostics.md): every diagnostic `code`, `data.kind` and `data.rule` (a stable API: add new identifiers there, never rename).
+- [docs/zed-checklist.md](docs/zed-checklist.md): what only Zed can exercise, run before a release.
 - [CONTRIBUTING.md](CONTRIBUTING.md): development setup, dev extension install, checks, pull requests, release process.
 - [CHANGELOG.md](CHANGELOG.md): notable changes per version.
 
@@ -112,7 +114,7 @@ CI denies every clippy warning (with the toolchain pinned by `CLIPPY_TOOLCHAIN` 
 - Diagnostics are computed only in `XmlLanguageServer::diagnostics()`, called by the diagnostics worker (`worker.rs`) on its replica: the request loop never publishes diagnostics itself; it forwards every state change the diagnostics depend on (documents, settings, workspace folders) to the worker as a `worker::Job`. A new such state must be forwarded too.
 - Positions: never compute an LSP `character` by hand; use `position_at`/`offset_at`/`LineIndex`, which follow the negotiated encoding (installed per thread by `run()` and the worker).
 - Request handlers run under `catch_unwind` (`dispatch.rs`); this is a safety net, not a licence to panic.
-- Diagnostic identifiers: the `code` values (`xml-syntax`, `xml-structure`, `xsd-validation`, `dtd-grammar`, `dtd-validation`, `xml-entity`, `no-grammar`, `doctype-disallowed`, `catalog-target-missing`, ...) and `data.kind`/`data.rule` identifiers (`XmlProblemKind::id()`, `XsdDiagnosticKind::id()`, `DtdProblemKind::id()`, `InstanceProblemKind::id()`) are a stable API used by code actions and users: add new ones, do not rename existing ones.
+- Diagnostic identifiers: the `code` values (`xml-syntax`, `xml-structure`, `xsd-validation`, `dtd-grammar`, `dtd-validation`, `xml-entity`, `no-grammar`, `doctype-disallowed`, `catalog-target-missing`, ...) and `data.kind`/`data.rule` identifiers (`XmlProblemKind::id()`, `XsdDiagnosticKind::id()`, `DtdProblemKind::id()`, `InstanceProblemKind::id()`) are a stable API used by code actions and users: add new ones (and list them in `docs/diagnostics.md`), do not rename existing ones.
 - Settings: new options go into `settings.rs` with a default that keeps the current behaviour, and are documented in `docs/configuration.md`. `FormatOptions::default()` must keep producing the historical output.
 
 ## Testing
