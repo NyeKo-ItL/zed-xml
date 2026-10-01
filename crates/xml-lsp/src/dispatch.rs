@@ -25,6 +25,7 @@ use serde_json::Value;
 /// them in one `Result`).
 pub(crate) trait ResponseExt {
     fn result(&self) -> Option<Value>;
+    #[cfg(test)]
     fn error(&self) -> Option<lsp_server::ResponseError>;
 }
 
@@ -33,6 +34,7 @@ impl ResponseExt for Response {
         self.response_result.as_ref().ok().cloned()
     }
 
+    #[cfg(test)]
     fn error(&self) -> Option<lsp_server::ResponseError> {
         self.response_result.as_ref().err().cloned()
     }
