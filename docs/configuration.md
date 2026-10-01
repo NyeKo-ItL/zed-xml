@@ -41,6 +41,9 @@ When validation settings, file associations or catalogs change (including a cata
 | `xml.format.closingBracketNewLine` | boolean | `false` | Put `>` / `/>` on its own line when `splitAttributes` spreads the attributes over several lines. |
 | `xml.format.emptyElements` | `"ignore"` \| `"expand"` \| `"collapse"` | `"ignore"` | Turn `<a/>` into `<a></a>` (`expand`), or empty/whitespace-only `<a></a>` into `<a/>` (`collapse`). Document formatting only: range formatting changes whitespace only. |
 | `xml.format.preserveAttributeLineBreaks` | boolean | `true` | Keep existing line breaks before attributes. With `splitAttributes: "preserve"` and no `maxLineWidth`, start tags are copied verbatim; `false` joins the attributes on the tag line with single spaces. (LemMinX defaults to `false`.) |
+| `xml.format.spaceBeforeEmptyCloseTag` | boolean | `false` | Write `<a />` instead of `<a/>`. (LemMinX defaults to `true`.) |
+| `xml.format.enforceQuoteStyle` | `"ignore"` \| `"preferred"` | `"ignore"` | With `"preferred"`, attribute values are re-quoted with `xml.preferences.quoteStyle`; a quote character inside a value becomes `&quot;` / `&apos;`. |
+| `xml.preferences.quoteStyle` | `"double"` \| `"single"` | `"double"` | Quote used by `xml.format.enforceQuoteStyle`. |
 | `xml.format.tabSize` | number | editor value, else `2` | Indentation width, used when the formatting request does not provide `tabSize`. |
 | `xml.format.insertSpaces` | boolean | editor value, else `true` | Indent with spaces, used when the request does not provide `insertSpaces`. |
 | `xml.format.trimFinalNewlines` | boolean | editor value, else `true` | Keep a single final newline, used when the request does not provide it. |

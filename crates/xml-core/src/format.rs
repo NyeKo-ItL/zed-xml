@@ -90,6 +90,19 @@ pub enum EmptyElements {
     Collapse,
 }
 
+/// Quotes of attribute values (LemMinX `xml.format.enforceQuoteStyle` with
+/// `xml.preferences.quoteStyle`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum QuoteStyle {
+    /// Quotes are kept as written.
+    #[default]
+    Preserve,
+    /// Values are delimited by `"` (a `"` inside becomes `&quot;`).
+    Double,
+    /// Values are delimited by `'` (a `'` inside becomes `&apos;`).
+    Single,
+}
+
 /// Formatting options.
 ///
 /// The defaults reproduce the historical formatting: two spaces per level,
@@ -138,6 +151,10 @@ pub struct FormatOptions {
     /// `false` puts all attributes on the tag line, separated by a
     /// space.
     pub preserve_attribute_line_breaks: bool,
+    /// Writes `<a />` instead of `<a/>` (`xml.format.spaceBeforeEmptyCloseTag`).
+    pub space_before_empty_close_tag: bool,
+    /// Quote style of attribute values (`xml.format.enforceQuoteStyle`).
+    pub quote_style: QuoteStyle,
 }
 
 impl Default for FormatOptions {
@@ -155,6 +172,8 @@ impl Default for FormatOptions {
             closing_bracket_new_line: false,
             empty_elements: EmptyElements::Ignore,
             preserve_attribute_line_breaks: true,
+            space_before_empty_close_tag: false,
+            quote_style: QuoteStyle::Preserve,
         }
     }
 }
@@ -173,11 +192,14 @@ impl FormatOptions {
         self.indent_unit().repeat(depth)
     }
 
-    /// Start tags are copied without being rebuilt.
-    fn keeps_raw_tags(&self) -> bool {
+    /// Start tags are copied without being rebuilt (an empty-element tag
+    /// with `space_before_empty_close_tag` is always rebuilt).
+    fn keeps_raw_tags(&self, self_closing: bool) -> bool {
         self.split_attributes == SplitAttributes::Preserve
             && self.preserve_attribute_line_breaks
             && self.max_line_width == 0
+            && self.quote_style == QuoteStyle::Preserve
+            && !(self_closing && self.space_before_empty_close_tag)
     }
 
     /// Displayed width of an indentation (a tab counts as `tab_size`).
@@ -767,7 +789,7 @@ impl<'a> Formatter<'a> {
     /// Writes a start (or empty) tag, copied or rebuilt according to the
     /// attribute layout options.
     fn write_start_tag(&mut self, start: BytesStart<'_>, self_closing: bool) -> Result<(), String> {
-        let rebuilt = if self.options.keeps_raw_tags() {
+        let rebuilt = if self.options.keeps_raw_tags(self_closing) {
             None
         } else {
             let source = std::str::from_utf8(&start).map_err(|error| error.to_string())?;
@@ -830,12 +852,24 @@ impl TagAttribute<'_> {
         self.name.chars().count() + self.value.chars().count() + 3
     }
 
-    fn push_to(&self, output: &mut String) {
+    fn push_to(&self, output: &mut String, style: QuoteStyle) {
+        let quote = match style {
+            QuoteStyle::Preserve => self.quote,
+            QuoteStyle::Double => '"',
+            QuoteStyle::Single => '\'',
+        };
         output.push_str(self.name);
         output.push('=');
-        output.push(self.quote);
-        output.push_str(self.value);
-        output.push(self.quote);
+        output.push(quote);
+        if quote == self.quote {
+            output.push_str(self.value);
+        } else {
+            // The other quote character may be used freely in the value;
+            // `quote` itself must be escaped.
+            let entity = if quote == '"' { "&quot;" } else { "&apos;" };
+            output.push_str(&self.value.replace(quote, entity));
+        }
+        output.push(quote);
     }
 }
 
@@ -929,15 +963,18 @@ fn layout_start_tag(
             tag.push(' ');
             width += 1;
         }
-        attribute.push_to(&mut tag);
+        attribute.push_to(&mut tag, options.quote_style);
         width += attribute.width();
     }
-    if multiline
+    let bracket_on_own_line = multiline
         && options.closing_bracket_new_line
-        && options.split_attributes != SplitAttributes::Preserve
-    {
+        && options.split_attributes != SplitAttributes::Preserve;
+    if bracket_on_own_line {
         tag.push_str(newline);
         tag.push_str(&element_indent);
+    }
+    if self_closing && options.space_before_empty_close_tag && !bracket_on_own_line {
+        tag.push(' ');
     }
     tag.push_str(if self_closing { "/>" } else { ">" });
     Some(tag)
@@ -1055,6 +1092,55 @@ mod tests {
         assert_eq!(
             format("<p>\n  <![CDATA[x]]></p>\n"),
             "<p>\n  <![CDATA[x]]></p>\n"
+        );
+    }
+
+    #[test]
+    fn writes_a_space_before_the_empty_close_tag_and_enforces_quotes() {
+        let source = "<r a='1' b=\"x'y\"><e/><f c='&quot;q'></f><g/></r>\n";
+        let space = FormatOptions {
+            space_before_empty_close_tag: true,
+            ..FormatOptions::default()
+        };
+        assert_eq!(
+            format_xml_with(source, &space).unwrap(),
+            "<r a='1' b=\"x'y\">\n  <e />\n  <f c='&quot;q'>\n  </f>\n  <g />\n</r>\n"
+        );
+        let collapse = FormatOptions {
+            empty_elements: EmptyElements::Collapse,
+            ..space.clone()
+        };
+        assert!(
+            format_xml_with(source, &collapse)
+                .unwrap()
+                .contains("<f c='&quot;q' />")
+        );
+        let double = FormatOptions {
+            quote_style: QuoteStyle::Double,
+            ..FormatOptions::default()
+        };
+        assert_eq!(
+            format_xml_with(source, &double).unwrap(),
+            "<r a=\"1\" b=\"x'y\">\n  <e/>\n  <f c=\"&quot;q\">\n  </f>\n  <g/>\n</r>\n"
+        );
+        let single = FormatOptions {
+            quote_style: QuoteStyle::Single,
+            ..FormatOptions::default()
+        };
+        let formatted = format_xml_with(source, &single).unwrap();
+        assert!(formatted.contains("<r a='1' b='x&apos;y'>"), "{formatted}");
+        // Idempotent.
+        assert_eq!(format_xml_with(&formatted, &single).unwrap(), formatted);
+        // The closing bracket on its own line takes no space.
+        let own_line = FormatOptions {
+            split_attributes: SplitAttributes::SplitNewLine,
+            closing_bracket_new_line: true,
+            space_before_empty_close_tag: true,
+            ..FormatOptions::default()
+        };
+        assert_eq!(
+            format_xml_with("<a x=\"1\" y=\"2\"/>", &own_line).unwrap(),
+            "<a\n  x=\"1\"\n  y=\"2\"\n/>\n"
         );
     }
 

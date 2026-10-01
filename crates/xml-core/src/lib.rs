@@ -10,8 +10,8 @@ pub mod text;
 pub mod wellformed;
 
 pub use format::{
-    EmptyElements, FormatOptions, FormattedRange, LineEnding, SplitAttributes, format_xml,
-    format_xml_range, format_xml_with,
+    EmptyElements, FormatOptions, FormattedRange, LineEnding, QuoteStyle, SplitAttributes,
+    format_xml, format_xml_range, format_xml_with,
 };
 
 use std::collections::BTreeSet;
