@@ -84,6 +84,7 @@ pub struct FormatSettings {
     pub preserve_attribute_line_breaks: bool,
     pub space_before_empty_close_tag: bool,
     pub quote_style: QuoteStyle,
+    pub preserve_empty_content: bool,
     /// Fallback values when the request does not provide the matching LSP
     /// option.
     pub insert_spaces: Option<bool>,
@@ -106,6 +107,7 @@ impl Default for FormatSettings {
             preserve_attribute_line_breaks: defaults.preserve_attribute_line_breaks,
             space_before_empty_close_tag: defaults.space_before_empty_close_tag,
             quote_style: defaults.quote_style,
+            preserve_empty_content: defaults.preserve_empty_content,
             insert_spaces: None,
             tab_size: None,
             trim_final_newlines: None,
@@ -127,6 +129,7 @@ impl FormatSettings {
         options.preserve_attribute_line_breaks = self.preserve_attribute_line_breaks;
         options.space_before_empty_close_tag = self.space_before_empty_close_tag;
         options.quote_style = self.quote_style;
+        options.preserve_empty_content = self.preserve_empty_content;
         if let Some(value) = self.insert_spaces {
             options.insert_spaces = value;
         }
@@ -272,6 +275,9 @@ impl Settings {
         }
         if let Some(value) = flag("format.preserveAttributeLineBreaks") {
             format.preserve_attribute_line_breaks = value;
+        }
+        if let Some(value) = flag("format.preserveEmptyContent") {
+            format.preserve_empty_content = value;
         }
         if let Some(value) = flag("format.spaceBeforeEmptyCloseTag") {
             format.space_before_empty_close_tag = value;
