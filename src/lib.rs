@@ -1,6 +1,6 @@
 mod sha256;
 
-use std::fs;
+use std::{fs, path::Path};
 
 use zed_extension_api::{
     self as zed,
@@ -141,8 +141,15 @@ impl XmlExtension {
             == format!("{LANGUAGE_SERVER_ID} {EXPECTED_LSP_VERSION}")
     }
 
-    fn installed_version(executable: &str) -> zed::Result<String> {
+    fn installed_version(
+        executable: &str,
+        executable_path: Option<&str>,
+        worktree: Option<&zed::Worktree>,
+    ) -> zed::Result<String> {
         let mut command = zed::process::Command::new(executable.to_owned()).arg("--version");
+        if let (Some(executable_path), Some(worktree)) = (executable_path, worktree) {
+            Self::add_download_directory_to_path(&mut command, executable_path, worktree);
+        }
         let output = command
             .output()
             .map_err(|error| format!("could not run --version: {error}"))?;
@@ -152,8 +159,12 @@ impl XmlExtension {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
     }
 
-    fn check_installed_version(executable: &str) -> zed::Result<()> {
-        let version = Self::installed_version(executable)?;
+    fn check_installed_version(
+        executable: &str,
+        executable_path: Option<&str>,
+        worktree: Option<&zed::Worktree>,
+    ) -> zed::Result<()> {
+        let version = Self::installed_version(executable, executable_path, worktree)?;
         let expected = format!("{LANGUAGE_SERVER_ID} {EXPECTED_LSP_VERSION}");
         if Self::version_output_matches(version.as_bytes()) {
             Ok(())
@@ -162,8 +173,50 @@ impl XmlExtension {
         }
     }
 
-    fn installed_version_matches(executable: &str) -> bool {
-        Self::check_installed_version(executable).is_ok()
+    fn extension_path(path: &str) -> zed::Result<String> {
+        std::env::current_dir()
+            .map(|directory| directory.join(path).to_string_lossy().into_owned())
+            .map_err(|error| format!("could not locate the extension working directory: {error}"))
+    }
+
+    fn add_download_directory_to_path(
+        command: &mut zed::process::Command,
+        executable_path: &str,
+        worktree: &zed::Worktree,
+    ) {
+        let Some(directory) = Path::new(executable_path).parent() else {
+            return;
+        };
+        let inherited = Self::environment(worktree, "PATH")
+            .or_else(|| std::env::var("PATH").ok())
+            .unwrap_or_default();
+        let separator = match zed::current_platform().0 {
+            zed::Os::Windows => ";",
+            zed::Os::Linux | zed::Os::Mac => ":",
+        };
+        command.env.push((
+            "PATH".to_owned(),
+            format!("{}{separator}{inherited}", directory.to_string_lossy()),
+        ));
+    }
+
+    fn downloaded_process_command(
+        executable: &str,
+        executable_path: &str,
+        worktree: &zed::Worktree,
+    ) -> zed::Command {
+        let mut command = Self::command(executable.to_owned());
+        let mut process = zed::process::Command::new(executable.to_owned());
+        Self::add_download_directory_to_path(&mut process, executable_path, worktree);
+        command.env = process.env;
+        command
+    }
+
+    fn installed_version_matches(executable: &str, worktree: &zed::Worktree) -> bool {
+        let Ok(path) = Self::extension_path(executable) else {
+            return false;
+        };
+        Self::check_installed_version(executable, Some(&path), Some(worktree)).is_ok()
     }
 
     /// `workspace/configuration` configuration: the `xml` section of the Zed
@@ -281,14 +334,18 @@ impl XmlExtension {
 
     /// The cached binary is reused only when it reports the expected version
     /// and still matches the checksum recorded when it was downloaded.
-    fn cached_binary_is_valid(executable: &str, asset_name: &str) -> bool {
+    fn cached_binary_is_valid(
+        executable: &str,
+        asset_name: &str,
+        worktree: &zed::Worktree,
+    ) -> bool {
         let Ok(recorded) = fs::read_to_string(Self::checksum_file_name(executable)) else {
             return false;
         };
         Self::parse_checksum(&recorded, asset_name)
             .and_then(|expected| Self::verify_file(executable, &expected))
             .is_ok()
-            && Self::installed_version_matches(executable)
+            && Self::installed_version_matches(executable, worktree)
     }
 
     /// Expected checksum of the binary: `XML_LSP_DOWNLOAD_SHA256` when set,
@@ -322,15 +379,20 @@ impl XmlExtension {
         let (os, architecture) = zed::current_platform();
         let asset_name = Self::release_asset(os, architecture)?;
         let executable = Self::executable_name(os);
+        let executable_path = Self::extension_path(&executable)?;
         let checksum_path = Self::checksum_file_name(&executable);
         let override_url = Self::environment(worktree, XML_LSP_DOWNLOAD_URL_ENV);
 
-        if Self::cached_binary_is_valid(&executable, asset_name) {
+        if Self::cached_binary_is_valid(&executable, asset_name, worktree) {
             zed::set_language_server_installation_status(
                 language_server_id,
                 &zed::LanguageServerInstallationStatus::None,
             );
-            return Ok(Self::command(executable));
+            return Ok(Self::downloaded_process_command(
+                &executable,
+                &executable_path,
+                worktree,
+            ));
         }
 
         zed::set_language_server_installation_status(
@@ -358,7 +420,7 @@ impl XmlExtension {
                 // expected binary; never hide an error for an outdated one.
                 if !(error.contains("os error 32")
                     && Self::verify_file(&executable, &expected).is_ok()
-                    && Self::installed_version_matches(&executable))
+                    && Self::installed_version_matches(&executable, worktree))
                 {
                     return Err(error);
                 }
@@ -372,19 +434,25 @@ impl XmlExtension {
             if !matches!(os, zed::Os::Windows) {
                 zed::make_file_executable(&executable)?;
             }
-            if let Err(error) = Self::check_installed_version(&executable) {
-                return Err(format!("Downloaded xml-lsp {error}"));
+            if let Err(error) =
+                Self::check_installed_version(&executable, Some(&executable_path), Some(worktree))
+            {
+                return Err(format!("Downloaded xml-lsp at {executable_path} {error}"));
             }
             Ok(executable.clone())
         })();
 
         match result {
-            Ok(executable_path) => {
+            Ok(_) => {
                 zed::set_language_server_installation_status(
                     language_server_id,
                     &zed::LanguageServerInstallationStatus::None,
                 );
-                Ok(Self::command(executable_path))
+                Ok(Self::downloaded_process_command(
+                    &executable,
+                    &executable_path,
+                    worktree,
+                ))
             }
             Err(error) => {
                 zed::set_language_server_installation_status(
@@ -392,7 +460,7 @@ impl XmlExtension {
                     &zed::LanguageServerInstallationStatus::Failed(error.clone()),
                 );
                 Err(format!(
-                    "Could not install xml-lsp asset {asset_name}: {error}. Set {XML_LSP_PATH_ENV} to a local binary."
+                    "Could not install xml-lsp asset {asset_name} at download path {executable_path}: {error}. Set {XML_LSP_PATH_ENV} to a local binary."
                 ))
             }
         }
