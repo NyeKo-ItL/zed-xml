@@ -496,7 +496,7 @@ jobs:
             echo "Each binary has a \`.sha256\` file and \`SHA256SUMS\` lists them all; the Zed extension checks the checksum before it starts a downloaded server. To check a download manually: \`sha256sum --check --ignore-missing SHA256SUMS\` (or \`shasum -a 256 -c\` on macOS)."
           } > release-notes.md
           cat release-notes.md
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.tag.outputs.release_tag }}
           files: dist/*
