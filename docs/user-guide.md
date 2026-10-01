@@ -54,7 +54,7 @@ The server never downloads anything. A schema referenced by an `http(s)://` loca
 { "lsp": { "xml-lsp": { "settings": { "xml": { "catalogs": ["catalog.xml"] } } } } }
 ```
 
-Download the schema once (`curl -O`) into the catalog's directory, next to `catalog.xml`. `xml.autoDetectCatalogs` also uses a `catalog.xml` at the root of each workspace folder.
+The schema of the XML namespace (`xml:lang`, `xml:space`, …), imported by many schemas from `http://www.w3.org/2001/xml.xsd`, needs no catalog entry: the server carries a copy. For any other schema, download it once (`curl -O`) into the catalog's directory, next to `catalog.xml`. `xml.autoDetectCatalogs` also uses a `catalog.xml` at the root of each workspace folder.
 
 ## 3. Validate against a DTD
 

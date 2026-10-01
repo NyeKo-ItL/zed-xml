@@ -1,6 +1,7 @@
 //! Native XML LSP server.
 
 mod analysis;
+mod builtin;
 mod catalog;
 mod code_actions;
 mod colors;

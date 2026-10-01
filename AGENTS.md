@@ -67,6 +67,7 @@ Keep the dependency direction: core crates never depend on `xml-lsp` or on LSP J
 | `analysis.rs` | `AnalysisCache`: per-version analyses of open documents (the `XmlTagTree`), shared by highlights, linked editing, folding and document symbols, invalidated by the document store. |
 | `positions.rs` | `PositionEncoding` negotiation (`utf-8`/`utf-16`/`utf-32`), per-thread current encoding, CRLF-safe offset helpers. |
 | `settings.rs` | `Settings::from_value` (tolerant parsing of `xml.*`), format/validation settings, `fileAssociations` globbing (`glob_match`, `associated_schemas`). |
+| `builtin.rs` | Schemas embedded in the server for locations that would need the network (the XML namespace, `builtin/xml.xsd`), consulted after the catalogs by `Catalogs::resolve_schema`; written once to the temp directory. Add one only for a schema that is tiny, stable and imported everywhere, written for this project or under a licence compatible with MIT. |
 | `catalog.rs` | OASIS XML Catalogs 1.1: parsing, resolution (`resolve_uri`/`resolve_system`/`resolve_external`/`resolve_schema`), mtime cache, catalog diagnostics. |
 | `dtd.rs` | DTD integration: `DtdCache`, `load`, diagnostics (`dtd-grammar`, `xml-entity`, `dtd-validation`), completion, hover, definition, quick fixes, DTD document symbols. |
 | `hover.rs` | Hover (XSD documentation, types, facets), `ModelCache` of `XsdModel`s, schema graph loading preferring open buffers. |
@@ -135,7 +136,7 @@ CI denies every clippy warning (with the toolchain pinned by `CLIPPY_TOOLCHAIN` 
 
 The user-facing rules are in [docs/configuration.md](docs/configuration.md#security-model) and [SECURITY.md](SECURITY.md); keep them true.
 
-- The server never downloads anything: remote schemas, DTDs and entities (any non-`file:` scheme) are resolved only through XML catalogs to local files, otherwise reported as a warning. Network paths (UNC, `file://host/…`) count as remote: check `is_network_path`/`is_remote_location` before any `metadata`, `is_file` or `exists` call on a path that comes from a document or a catalog.
+- The server never downloads anything: remote schemas, DTDs and entities (any non-`file:` scheme) are resolved only through XML catalogs to local files (or the few schemas of `builtin.rs`), otherwise reported as a warning. Network paths (UNC, `file://host/…`) count as remote: check `is_network_path`/`is_remote_location` before any `metadata`, `is_file` or `exists` call on a path that comes from a document or a catalog.
 - Read referenced files only through `xml_core::resource::read_text_file` with a size limit, never `fs::read_to_string`.
 - External general entities are never read; DTD entity expansion is computed, not materialized, and bounded (`dtd_core::MAX_ENTITY_EXPANSION`, `MAX_PARAMETER_EXPANSION`, `MAX_ENTITY_DEPTH`, `MAX_DOCUMENT_EXPANSION` for attribute values). Keep these limits for any new expansion code ("billion laughs", "quadratic blowup").
 - Graphs of referenced documents are bounded and cycle-safe (`xsd_core::MAX_SCHEMA_DOCUMENTS`, the catalog file limit, `dtd_core::MAX_SOURCES`).

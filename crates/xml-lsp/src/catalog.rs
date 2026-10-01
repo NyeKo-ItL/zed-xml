@@ -705,6 +705,11 @@ impl Catalogs {
     /// (system entries, then `uri`). `xs:include` is only resolved by its
     /// location.
     pub fn resolve_schema(&self, request: &SchemaLocation<'_>) -> Option<PathBuf> {
+        self.resolve_catalog_schema(request)
+            .or_else(|| crate::builtin::resolve(request))
+    }
+
+    fn resolve_catalog_schema(&self, request: &SchemaLocation<'_>) -> Option<PathBuf> {
         if self.is_empty() {
             return None;
         }
