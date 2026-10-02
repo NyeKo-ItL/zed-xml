@@ -253,7 +253,10 @@ fn filters_actions_by_requested_kinds() {
         .iter()
         .map(|action| action["kind"].as_str().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(kinds, vec!["refactor.rewrite", "source"]);
+    assert_eq!(
+        kinds,
+        vec!["refactor.rewrite", "source", "source.copyXPath"]
+    );
     let refactors = fixture.actions(source, at(source, "empty>"), json!({"only": ["refactor"]}));
     assert_eq!(refactors.len(), 1);
     assert!(
@@ -421,7 +424,8 @@ fn binds_documents_to_sibling_or_placeholder_schemas() {
     assert!(
         fixture
             .actions(&format!("{BOUND}</catalog>"), 0..0, source_actions.clone())
-            .is_empty()
+            .iter()
+            .all(|action| action["kind"] == "source.copyXPath")
     );
 
     let mut empty = Fixture::new("bind-placeholder", None);
@@ -430,7 +434,10 @@ fn binds_documents_to_sibling_or_placeholder_schemas() {
     let actions = empty.actions(source, 0..0, source_actions);
     assert_eq!(
         titles(&actions),
-        vec!["Bind the document to an XSD schema (placeholder schema.xsd)"]
+        vec![
+            "Bind the document to an XSD schema (placeholder schema.xsd)",
+            "Copy XPath: /t:root"
+        ]
     );
     assert_eq!(
         empty.apply(

@@ -2035,6 +2035,7 @@ fn serves_code_actions_that_fix_published_diagnostics() {
         vec![
             ("refactor.rewrite", "Convert <a></a> to self-closing <a/>"),
             ("source", "Bind the document to the XSD schema items.xsd"),
+            ("source.copyXPath", "Copy XPath: /root/a"),
         ]
     );
     assert_eq!(
@@ -3015,6 +3016,7 @@ fn serves_initialize_diagnostics_shutdown_and_exit() {
                         "selectionRangeProvider": true,
                         "documentLinkProvider": {"resolveProvider": false},
                         "codeActionProvider": {"codeActionKinds": ["quickfix", "refactor", "source"]},
+                        "executeCommandProvider": {"commands": ["xml.copyXPath"]},
                         "workspaceSymbolProvider": true,
                         "colorProvider": true,
                         "workspace": {"workspaceFolders": {"supported": true, "changeNotifications": true}},
@@ -4406,4 +4408,60 @@ fn completes_elements_allowed_by_the_xsd_and_end_tags_while_typing() {
     let items = labels(&text, 2, 5);
     assert_eq!(items, vec!["CustomsHeader".to_owned()]);
     std::fs::remove_dir_all(directory).expect("directory should be removed");
+}
+
+#[test]
+fn offers_a_copy_xpath_action_and_rejects_unknown_commands() {
+    let uri = "file:///xpath.xml".to_owned();
+    let text = "<r>\n  <a/>\n  <a x=\"1\"/>\n</r>";
+    let mut server = XmlLanguageServer::new();
+    server.documents.insert(uri.clone(), text.to_owned());
+    let mut actions = |line: u32, character: u32, only: Value| {
+        server
+            .code_action(&json!({
+                "textDocument": {"uri": uri},
+                "range": {
+                    "start": {"line": line, "character": character},
+                    "end": {"line": line, "character": character},
+                },
+                "context": {"diagnostics": [], "only": only},
+            }))
+            .unwrap()
+    };
+    let found = actions(2, 8, json!(["source"]));
+    let copy = found
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|action| action["kind"] == "source.copyXPath")
+        .expect("the copy action should be offered");
+    assert_eq!(copy["title"], "Copy XPath: /r/a[2]/@x");
+    assert_eq!(copy["command"]["command"], "xml.copyXPath");
+    assert_eq!(copy["command"]["arguments"], json!(["/r/a[2]/@x"]));
+    let found = actions(1, 3, json!(["source.copyXPath"]));
+    assert_eq!(found[0]["command"]["arguments"], json!(["/r/a[1]"]));
+    // Not requested.
+    assert!(
+        actions(1, 3, json!(["quickfix"]))
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
+    assert!(
+        server
+            .handle_request(
+                "workspace/executeCommand",
+                &json!({"command": "xml.unknown", "arguments": []})
+            )
+            .is_err()
+    );
+    assert!(
+        server
+            .handle_request(
+                "workspace/executeCommand",
+                &json!({"command": "xml.copyXPath", "arguments": []})
+            )
+            .is_err()
+    );
 }

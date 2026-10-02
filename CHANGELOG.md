@@ -13,6 +13,7 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- Code action `Copy XPath` (kind `source.copyXPath`, command `xml.copyXPath` of `workspace/executeCommand`): copies the XPath of the node at the cursor (`/root/item[2]/@id`: siblings of the same name are numbered, attributes give `/@name`, names are written as in the document) to the clipboard. The server declares `executeCommandProvider` and writes the clipboard itself with `pbcopy`, `wl-copy`/`xclip`/`xsel` or `clip`.
 - `make install-local-lsp` builds the server locally and installs it as the extension's cached binary (`xml-lsp --version` then reports `(local)`, which the extension accepts), to test server changes in Zed without `XML_LSP_PATH` or a release.
 - Formatting option `xml.format.preserveEmptyContent` (as in LemMinX): elements whose content is only whitespace keep it as written. Off by default.
 - Formatting options `xml.format.spaceBeforeEmptyCloseTag` (`<a />`) and `xml.format.enforceQuoteStyle` with `xml.preferences.quoteStyle` (attribute values re-quoted, inner quotes escaped), as in LemMinX. Both are off by default, so the default output is unchanged.

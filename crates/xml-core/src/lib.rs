@@ -8,6 +8,7 @@ pub mod strict;
 pub mod tags;
 pub mod text;
 pub mod wellformed;
+pub mod xpath;
 
 pub use format::{
     EmptyElements, FormatOptions, FormattedRange, LineEnding, QuoteStyle, SplitAttributes,

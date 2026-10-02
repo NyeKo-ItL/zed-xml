@@ -25,6 +25,7 @@ The automated tests cover the language server (round trips over the LSP, conform
 ## Editing features
 
 - [ ] Completion: elements, attributes and values from an XSD (`xsi:schemaLocation` fixture), automatic closing tag after `>`, `<?xml` templates.
+- [ ] `editor: toggle code actions` on an element or attribute lists `Copy XPath: /root/item[2]/@id`; picking it puts the path in the clipboard and shows a confirmation message.
 - [x] Hover (XSD documentation), go to definition on `schemaLocation`, `xs:include`, `xsl:import`, `DOCTYPE`.
 - [ ] Diagnostics appear while typing (debounced) and disappear when fixed; quick fixes from the lightbulb (mismatched tag, quote a value, declare `xsi`).
 - [x] Format document and format selection with `"formatter": "language_server"`; formatting is idempotent.
