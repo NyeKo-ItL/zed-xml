@@ -28,6 +28,7 @@ mod schemas;
 mod selection;
 mod settings;
 mod symbols;
+mod value_completion;
 mod worker;
 mod xslt;
 
@@ -313,15 +314,27 @@ impl XmlLanguageServer {
             let items = dtd::completions(grammar.as_ref(), uri, &source, offset);
             return Some(json!({"isIncomplete": false, "items": items}));
         }
-        let mut items = complete_xml(&source, offset)
-            .into_iter()
-            .map(|completion| {
-                json!({
-                    "label": completion.label,
-                    "insertText": completion.insert_text,
-                })
-            })
-            .collect::<Vec<_>>();
+        let element_items = value_completion::element_completions(
+            &mut self.hover_context(uri),
+            uri,
+            &source,
+            offset,
+        );
+        let mut items = element_items.clone();
+        items.extend(value_completion::end_tag_completions(&source, offset));
+        if element_items.is_empty() {
+            items.extend(
+                complete_xml(&source, offset)
+                    .into_iter()
+                    .filter(|completion| !completion.insert_text.starts_with("</"))
+                    .map(|completion| {
+                        json!({
+                            "label": completion.label,
+                            "insertText": completion.insert_text,
+                        })
+                    }),
+            );
+        }
         if self.settings.auto_close_tags
             && let Some(completion) = auto_close_tag(&source, offset)
         {
@@ -331,7 +344,12 @@ impl XmlLanguageServer {
             }));
         }
         if let Some(schema) = self.load_schema(uri, &source) {
-            let schema_items = complete_elements(&source, offset, &schema)
+            let flat_elements = if element_items.is_empty() {
+                complete_elements(&source, offset, &schema)
+            } else {
+                Vec::new()
+            };
+            let schema_items = flat_elements
                 .into_iter()
                 .chain(complete_attributes(&source, offset, &schema))
                 .chain(complete_attribute_values(&source, offset, &schema))
@@ -344,6 +362,12 @@ impl XmlLanguageServer {
             items.extend(schema_items);
         }
         items.extend(dtd::completions(grammar.as_ref(), uri, &source, offset));
+        items.extend(value_completion::completions(
+            &mut self.hover_context(uri),
+            uri,
+            &source,
+            offset,
+        ));
         items.extend(xslt::completions(
             &self.xslt_context(),
             uri,
@@ -873,7 +897,7 @@ fn run(connection: Connection) -> Result<i32, Box<dyn Error + Send + Sync>> {
             "capabilities": server_capabilities(encoding),
             "serverInfo": {
                 "name": "xml-lsp",
-                "version": env!("CARGO_PKG_VERSION"),
+                "version": format!("{}{}", env!("CARGO_PKG_VERSION"), LOCAL_BUILD_SUFFIX),
             },
         }),
     )?;
@@ -962,9 +986,21 @@ fn run(connection: Connection) -> Result<i32, Box<dyn Error + Send + Sync>> {
     Ok(exit_code)
 }
 
+/// Marks the binaries built by `make install-local-lsp` (`XML_LSP_LOCAL_BUILD`
+/// set at compile time), which the extension accepts without a download.
+const LOCAL_BUILD_SUFFIX: &str = if option_env!("XML_LSP_LOCAL_BUILD").is_some() {
+    " (local)"
+} else {
+    ""
+};
+
 fn main() {
     if std::env::args().any(|argument| argument == "--version") {
-        println!("xml-lsp {}", env!("CARGO_PKG_VERSION"));
+        println!(
+            "xml-lsp {}{}",
+            env!("CARGO_PKG_VERSION"),
+            LOCAL_BUILD_SUFFIX
+        );
         return;
     }
 

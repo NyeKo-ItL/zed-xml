@@ -62,6 +62,8 @@ Zed compiles the extension itself when it is installed as a dev extension; build
 4. Open an XML file. Use `zed: open log` if the server does not start and `dev: open language server logs` to inspect the LSP traffic.
 5. After changing the server, rebuild it with Cargo and run `editor: restart language server`. After changing `src/lib.rs`, `extension.toml` or `languages/`, use **Rebuild** in the dev extensions list (`zed: extensions`).
 
+Alternatively, `make install-local-lsp` builds the server in release mode (`target/local`, `--version` reports `xml-lsp <version> (local)`) and installs it in Zed's extension work directory under the name and checksum the extension expects, so the published extension (or the dev extension) runs it without downloading anything and without `XML_LSP_PATH`. Run it again after each change, then `editor: restart language server`. It picks the Zed data directory of the OS (`~/Library/Application Support/Zed`, `$XDG_DATA_HOME/zed` or `~/.local/share/zed`, `%LOCALAPPDATA%\\Zed`); set `ZED_DATA_DIR` to override it. A later release of the extension downloads its own binary again.
+
 Keep `XML_LSP_PATH` set when opening XML files outside this repository, otherwise the extension downloads the released binary matching `extension.toml`'s version.
 
 ## Checks

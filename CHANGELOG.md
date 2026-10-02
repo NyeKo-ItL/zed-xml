@@ -4,8 +4,16 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Fixed
+
+- Zed showed no element or end tag suggestion while typing (`<Int`, `</Cus`): the language declared `<`, `/`, `>`, space, `=`, `"` and `?` as completion query characters, so Zed filtered every item against the whole text before the cursor (`    <CustomsHeader></Cus`). The setting is removed; the query is now the name being typed.
+- Completing a start tag name (`<Int|`) now offers the elements the XSD allows at that position (content model of the parent run over the preceding siblings, global elements at the root, prefixes resolved), instead of every name of the schema; the end tag completion (`</Cus|`) replaces the typed name and adds the `>` instead of inserting `</` twice.
+- `<?xml-model href="..." schematypens="http://www.w3.org/2001/XMLSchema"?>` (or an `href` ending in `.xsd` without `schematypens`) now binds the XSD to the document, like `xsi:noNamespaceSchemaLocation`: schema validation, completion and hover documentation were silently missing for documents using only an `xml-model` header. Other schema languages (RELAX NG, Schematron) are still ignored.
+- Enumerated values of the XSD are now offered by completion, for attribute values (`<a status="|">`) and text content (`<status>|</status>`), with the documentation of each value and the typed prefix replaced; previously only a flat, name-keyed lookup existed that missed most cases.
+
 ### Added
 
+- `make install-local-lsp` builds the server locally and installs it as the extension's cached binary (`xml-lsp --version` then reports `(local)`, which the extension accepts), to test server changes in Zed without `XML_LSP_PATH` or a release.
 - Formatting option `xml.format.preserveEmptyContent` (as in LemMinX): elements whose content is only whitespace keep it as written. Off by default.
 - Formatting options `xml.format.spaceBeforeEmptyCloseTag` (`<a />`) and `xml.format.enforceQuoteStyle` with `xml.preferences.quoteStyle` (attribute values re-quoted, inner quotes escaped), as in LemMinX. Both are off by default, so the default output is unchanged.
 - `docs/user-guide.md`: task-oriented guide (first file, binding an XSD or DTD, remote schemas through catalogs, formatting, navigation, XSLT, large files, common problems, comparison with other XML editors).

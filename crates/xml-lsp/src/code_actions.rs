@@ -831,7 +831,10 @@ fn is_nil(document: &Document<'_>, index: usize) -> bool {
 
 /// Enumerated values of a simple type (facets accumulated along the
 /// restrictions); `None` without an enumeration or for a list.
-fn enumeration_values(set: &XsdModelSet, value_type: XsdTypeRef<'_>) -> Option<Vec<String>> {
+pub(crate) fn enumeration_values(
+    set: &XsdModelSet,
+    value_type: XsdTypeRef<'_>,
+) -> Option<Vec<String>> {
     let info = set.simple_type_info(value_type);
     if info.item_type.is_some() || info.facets.enumerations.is_empty() {
         return None;
@@ -878,7 +881,11 @@ fn escape(value: &str) -> String {
 
 /// Prefix declared (`xmlns:prefix`) for `namespace` in the scope of the
 /// element.
-fn prefix_for<'a>(document: &Document<'a>, index: usize, namespace: &str) -> Option<&'a str> {
+pub(crate) fn prefix_for<'a>(
+    document: &Document<'a>,
+    index: usize,
+    namespace: &str,
+) -> Option<&'a str> {
     let source = document.source;
     std::iter::once(index)
         .chain(document.tree.ancestors(index))

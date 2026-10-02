@@ -25,10 +25,10 @@ The automated tests cover the language server (round trips over the LSP, conform
 ## Editing features
 
 - [ ] Completion: elements, attributes and values from an XSD (`xsi:schemaLocation` fixture), automatic closing tag after `>`, `<?xml` templates.
-- [ ] Hover (XSD documentation), go to definition on `schemaLocation`, `xs:include`, `xsl:import`, `DOCTYPE`.
+- [x] Hover (XSD documentation), go to definition on `schemaLocation`, `xs:include`, `xsl:import`, `DOCTYPE`.
 - [ ] Diagnostics appear while typing (debounced) and disappear when fixed; quick fixes from the lightbulb (mismatched tag, quote a value, declare `xsi`).
-- [ ] Format document and format selection with `"formatter": "language_server"`; formatting is idempotent.
-- [ ] Rename an element (both tags change), linked editing of start/end tags, matching tag highlight.
+- [x] Format document and format selection with `"formatter": "language_server"`; formatting is idempotent.
+- [x] Rename an element (both tags change), linked editing of start/end tags, matching tag highlight.
 - [ ] Outline, workspace symbols, folding (`document_folding_ranges`), colors in an SVG.
 - [ ] Rename of an XSD component across open instance documents.
 

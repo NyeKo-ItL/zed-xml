@@ -276,7 +276,12 @@ impl<'a> Document<'a> {
     /// being typed), resolved through the catalogs.
     fn schema_locations(&self, document_path: &Path, catalogs: &Catalogs) -> Vec<PathBuf> {
         let base = document_path.parent().unwrap_or_else(|| Path::new(""));
-        let mut paths = Vec::new();
+        let mut paths = xsd_core::resolve_xml_model_locations(self.source, base, &|request| {
+            catalogs.resolve_schema(request)
+        })
+        .into_iter()
+        .map(|reference| reference.path)
+        .collect::<Vec<_>>();
         for element in 0..self.tree.elements().len() {
             for attribute in &self.attributes[element] {
                 let (prefix, local) = qualified_name_parts(self.source, attribute.name.clone());

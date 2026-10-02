@@ -4264,3 +4264,146 @@ fn limits_documents_larger_than_max_file_size_to_well_formedness() {
     assert_eq!(server_thread.join().expect("server should stop"), 0);
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+#[test]
+fn xml_model_binds_a_schema_for_diagnostics_hover_and_enumeration_completion() {
+    let directory = std::env::temp_dir().join(format!("xml-lsp-xml-model-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).expect("directory should be written");
+    std::fs::write(
+        directory.join("order.xsd"),
+        concat!(
+            "<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\">\n",
+            "  <xs:element name=\"order\"><xs:annotation><xs:documentation>A customer order.</xs:documentation></xs:annotation>\n",
+            "    <xs:complexType><xs:sequence>\n",
+            "      <xs:element name=\"status\" type=\"Status\"/>\n",
+            "    </xs:sequence>\n",
+            "    <xs:attribute name=\"kind\" type=\"Status\"/>\n",
+            "    </xs:complexType>\n",
+            "  </xs:element>\n",
+            "  <xs:simpleType name=\"Status\"><xs:restriction base=\"xs:string\">\n",
+            "    <xs:enumeration value=\"open\"><xs:annotation><xs:documentation>Not shipped yet.</xs:documentation></xs:annotation></xs:enumeration>\n",
+            "    <xs:enumeration value=\"closed\"/>\n",
+            "  </xs:restriction></xs:simpleType>\n",
+            "</xs:schema>",
+        ),
+    )
+    .expect("schema should be written");
+    let uri = path_to_uri(&directory.join("order.xml"));
+    let header = "<?xml version=\"1.0\"?>\n<?xml-model href=\"order.xsd\" type=\"application/xml\" schematypens=\"http://www.w3.org/2001/XMLSchema\"?>\n";
+    let mut server = XmlLanguageServer::new();
+    let params = |line: usize, character: usize| {
+        json!({
+            "textDocument": {"uri": uri},
+            "position": {"line": line, "character": character},
+        })
+    };
+
+    // Diagnostics.
+    let invalid = format!("{header}<order><unknown/></order>");
+    server.documents.insert(uri.clone(), invalid.clone());
+    let diagnostics = server.schema_diagnostics(&uri, &invalid);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic["code"] == "xsd-validation"),
+        "{diagnostics:?}"
+    );
+
+    // Hover shows the documentation of the schema.
+    let valid = format!("{header}<order kind=\"open\"><status>open</status></order>");
+    server.documents.insert(uri.clone(), valid.clone());
+    let hover = server
+        .hover(&params(2, 3))
+        .expect("hover should be returned");
+    assert!(
+        hover["contents"]["value"]
+            .as_str()
+            .unwrap()
+            .contains("A customer order."),
+        "{hover}"
+    );
+
+    // Attribute value completion.
+    let labels = |value: Option<Value>| {
+        value.unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|item| item["label"].as_str().map(str::to_owned))
+            .collect::<Vec<_>>()
+    };
+    let typing = format!("{header}<order kind=\"");
+    server.documents.insert(uri.clone(), typing);
+    let items = labels(server.completion(&params(2, 13)));
+    assert!(items.contains(&"open".to_owned()), "{items:?}");
+    assert!(items.contains(&"closed".to_owned()), "{items:?}");
+    let typing = format!("{header}<order kind=\"cl");
+    server.documents.insert(uri.clone(), typing);
+    let items = labels(server.completion(&params(2, 15)));
+    assert!(!items.contains(&"open".to_owned()), "{items:?}");
+    assert!(items.contains(&"closed".to_owned()), "{items:?}");
+
+    // Text content completion.
+    let typing = format!("{header}<order><status>");
+    server.documents.insert(uri.clone(), typing);
+    let items = labels(server.completion(&params(2, 15)));
+    assert!(items.contains(&"open".to_owned()), "{items:?}");
+    assert!(items.contains(&"closed".to_owned()), "{items:?}");
+    std::fs::remove_dir_all(directory).expect("directory should be removed");
+}
+
+#[test]
+fn completes_elements_allowed_by_the_xsd_and_end_tags_while_typing() {
+    let directory = std::env::temp_dir().join(format!("xml-lsp-elements-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).expect("directory should be written");
+    std::fs::write(
+        directory.join("customs.xsd"),
+        concat!(
+            "<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\">\n",
+            "  <xs:element name=\"CustomsHeader\"><xs:complexType><xs:sequence>\n",
+            "    <xs:element name=\"CusActCod\" type=\"xs:string\"/>\n",
+            "    <xs:element name=\"Int\" type=\"xs:string\" minOccurs=\"0\"/>\n",
+            "    <xs:element name=\"Inv\" type=\"xs:string\" minOccurs=\"0\"/>\n",
+            "    <xs:element name=\"Other\" type=\"xs:string\"/>\n",
+            "  </xs:sequence></xs:complexType></xs:element>\n",
+            "</xs:schema>",
+        ),
+    )
+    .expect("schema should be written");
+    let uri = path_to_uri(&directory.join("doc.xml"));
+    let header =
+        "<?xml-model href=\"customs.xsd\" schematypens=\"http://www.w3.org/2001/XMLSchema\"?>\n";
+    let mut server = XmlLanguageServer::new();
+    let mut labels = |text: &str, line: usize, character: usize| {
+        server.documents.insert(uri.clone(), text.to_owned());
+        server
+            .completion(&json!({
+                "textDocument": {"uri": uri},
+                "position": {"line": line, "character": character},
+            }))
+            .unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|item| item["label"].as_str().map(str::to_owned))
+            .collect::<Vec<_>>()
+    };
+
+    // Children allowed after CusActCod: Int, Inv and Other, not CusActCod.
+    let text = format!("{header}<CustomsHeader>\n  <CusActCod>1</CusActCod>\n  <In");
+    let items = labels(&text, 3, 5);
+    assert_eq!(items, vec!["Int".to_owned(), "Inv".to_owned()]);
+    let text = format!("{header}<CustomsHeader>\n  <CusActCod>1</CusActCod>\n  <");
+    let items = labels(&text, 3, 3);
+    assert!(items.contains(&"Other".to_owned()), "{items:?}");
+    assert!(!items.contains(&"CusActCod".to_owned()), "{items:?}");
+
+    // End tag of the open element.
+    let text = format!("{header}<CustomsHeader>\n</Cus");
+    let items = labels(&text, 2, 5);
+    assert_eq!(items, vec!["CustomsHeader".to_owned()]);
+    let text = format!("{header}<CustomsHeader>\n</Cus>\n");
+    let items = labels(&text, 2, 5);
+    assert_eq!(items, vec!["CustomsHeader".to_owned()]);
+    std::fs::remove_dir_all(directory).expect("directory should be removed");
+}

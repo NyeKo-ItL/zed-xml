@@ -136,9 +136,13 @@ impl XmlExtension {
         }
     }
 
+    /// `xml-lsp <version>`, or `xml-lsp <version> (local)` for a binary
+    /// installed by `make install-local-lsp`.
     fn version_output_matches(stdout: &[u8]) -> bool {
-        String::from_utf8_lossy(stdout).trim()
-            == format!("{LANGUAGE_SERVER_ID} {EXPECTED_LSP_VERSION}")
+        let output = String::from_utf8_lossy(stdout);
+        let expected = format!("{LANGUAGE_SERVER_ID} {EXPECTED_LSP_VERSION}");
+        let output = output.trim();
+        output == expected || output == format!("{expected} (local)")
     }
 
     fn installed_version(
@@ -692,6 +696,16 @@ mod tests {
     fn accepts_the_expected_version_output() {
         assert!(XmlExtension::version_output_matches(
             format!("{LANGUAGE_SERVER_ID} {EXPECTED_LSP_VERSION}\n").as_bytes()
+        ));
+    }
+
+    #[test]
+    fn accepts_a_local_build_of_the_expected_version() {
+        assert!(XmlExtension::version_output_matches(
+            format!("{LANGUAGE_SERVER_ID} {EXPECTED_LSP_VERSION} (local)\n").as_bytes()
+        ));
+        assert!(!XmlExtension::version_output_matches(
+            b"xml-lsp 0.0.0 (local)\n"
         ));
     }
 

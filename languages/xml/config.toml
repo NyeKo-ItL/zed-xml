@@ -34,4 +34,3 @@ brackets = [
     { start = "[", end = "]", close = true, newline = true, not_in = ["comment", "string"] },
     { start = "(", end = ")", close = true, newline = false, not_in = ["comment", "string"] },
 ]
-completion_query_characters = ["<", "/", ">", " ", "=", "\"", "?"]

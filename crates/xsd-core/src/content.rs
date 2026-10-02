@@ -955,6 +955,42 @@ impl<'a> Builder<'a> {
 }
 
 impl XsdModelSet {
+    /// Child elements of `parent` that the content model accepts next, after
+    /// the `preceding` children (namespace, local name) already present.
+    /// Without a checkable content model, or when the preceding children
+    /// already break it, every child the type declares is returned.
+    pub fn child_elements_after<'a>(
+        &'a self,
+        parent: XsdTypeRef<'a>,
+        preceding: &[(Option<String>, String)],
+    ) -> Vec<Located<'a, XsdElementDecl>> {
+        let candidates = self.child_elements(parent);
+        let Some(model) = self.content_model(parent).map(Rc::new) else {
+            return candidates;
+        };
+        let accepts = |next: Option<(&Option<String>, &str)>| {
+            let mut run = ContentRun::new(model.clone());
+            for (namespace, local) in preceding {
+                if run.step(namespace.as_deref(), local).is_err() {
+                    return None;
+                }
+            }
+            match next {
+                Some((namespace, local)) => Some(run.step(namespace.as_deref(), local).is_ok()),
+                None => Some(true),
+            }
+        };
+        if accepts(None).is_none() {
+            return candidates;
+        }
+        candidates
+            .into_iter()
+            .filter(|candidate| {
+                accepts(Some((&candidate.item.namespace, &candidate.item.name))) != Some(false)
+            })
+            .collect()
+    }
+
     /// Content model of a complex type with element-only or mixed content,
     /// including the content inherited by extension; `None` when the type
     /// has no content model to check (simple content, unresolved base type

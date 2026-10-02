@@ -1,4 +1,4 @@
-.PHONY: ci fmt generated clippy test msrv wasm deny coverage conformance queries benchmarks
+.PHONY: install-local-lsp ci fmt generated clippy test msrv wasm deny coverage conformance queries benchmarks
 
 # Run every pull-request validation job locally.
 ci: fmt generated clippy test msrv wasm deny coverage conformance queries benchmarks
@@ -47,3 +47,8 @@ queries:
 benchmarks:
 	cargo bench -p xml-core --bench xml_core -p xsd-core --bench xsd_core -p xml-lsp --bench server -- --quick --noplot
 	cargo test --release -p xml-lsp latency -- --nocapture
+
+# Build xml-lsp (reporting "(local)" in --version) and install it in place of
+# the downloaded binary in the Zed extension work directory.
+install-local-lsp:
+	scripts/install-local-lsp.sh
