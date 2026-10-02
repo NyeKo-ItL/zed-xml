@@ -969,9 +969,21 @@ fn run(connection: Connection) -> Result<i32, Box<dyn Error + Send + Sync>> {
     Ok(exit_code)
 }
 
+/// Marks the binaries built by `make install-local-lsp` (`XML_LSP_LOCAL_BUILD`
+/// set at compile time), which the extension accepts without a download.
+const LOCAL_BUILD_SUFFIX: &str = if option_env!("XML_LSP_LOCAL_BUILD").is_some() {
+    " (local)"
+} else {
+    ""
+};
+
 fn main() {
     if std::env::args().any(|argument| argument == "--version") {
-        println!("xml-lsp {}", env!("CARGO_PKG_VERSION"));
+        println!(
+            "xml-lsp {}{}",
+            env!("CARGO_PKG_VERSION"),
+            LOCAL_BUILD_SUFFIX
+        );
         return;
     }
 

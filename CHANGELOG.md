@@ -11,6 +11,7 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- `make install-local-lsp` builds the server locally and installs it as the extension's cached binary (`xml-lsp --version` then reports `(local)`, which the extension accepts), to test server changes in Zed without `XML_LSP_PATH` or a release.
 - Formatting option `xml.format.preserveEmptyContent` (as in LemMinX): elements whose content is only whitespace keep it as written. Off by default.
 - Formatting options `xml.format.spaceBeforeEmptyCloseTag` (`<a />`) and `xml.format.enforceQuoteStyle` with `xml.preferences.quoteStyle` (attribute values re-quoted, inner quotes escaped), as in LemMinX. Both are off by default, so the default output is unchanged.
 - `docs/user-guide.md`: task-oriented guide (first file, binding an XSD or DTD, remote schemas through catalogs, formatting, navigation, XSLT, large files, common problems, comparison with other XML editors).
