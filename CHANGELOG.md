@@ -4,6 +4,11 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Fixed
+
+- `<?xml-model href="..." schematypens="http://www.w3.org/2001/XMLSchema"?>` (or an `href` ending in `.xsd` without `schematypens`) now binds the XSD to the document, like `xsi:noNamespaceSchemaLocation`: schema validation, completion and hover documentation were silently missing for documents using only an `xml-model` header. Other schema languages (RELAX NG, Schematron) are still ignored.
+- Enumerated values of the XSD are now offered by completion, for attribute values (`<a status="|">`) and text content (`<status>|</status>`), with the documentation of each value and the typed prefix replaced; previously only a flat, name-keyed lookup existed that missed most cases.
+
 ### Added
 
 - Formatting option `xml.format.preserveEmptyContent` (as in LemMinX): elements whose content is only whitespace keep it as written. Off by default.

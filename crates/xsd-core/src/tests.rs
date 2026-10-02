@@ -1673,3 +1673,25 @@ fn checks_the_namespaces_of_includes_and_imports() {
     let redefine = r#"<xs:redefine schemaLocation="a.xsd"/>"#;
     assert_eq!(problems(&schema(own, redefine), None).len(), 1);
 }
+
+#[test]
+fn xml_model_binds_only_xml_schemas() {
+    let source = concat!(
+        "<?xml version=\"1.0\"?>\n",
+        "<?xml-model href=\"a.xsd\" schematypens=\"http://www.w3.org/2001/XMLSchema\"?>\n",
+        "<?xml-model href='b.xsd'?>\n",
+        "<?xml-model href=\"c.rng\" schematypens=\"http://relaxng.org/ns/structure/1.0\"?>\n",
+        "<?xml-model href=\"d.sch\"?>\n",
+        "<?xml-modelx href=\"e.xsd\"?>\n",
+        "<r/>",
+    );
+    let references = resolve_xml_model_locations(source, Path::new("/dir"), &|_| None);
+    let paths = references
+        .iter()
+        .map(|reference| reference.path.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        paths,
+        vec![PathBuf::from("/dir/a.xsd"), PathBuf::from("/dir/b.xsd")]
+    );
+}

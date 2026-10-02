@@ -1075,7 +1075,95 @@ pub fn resolve_schema_locations_with(
         }
     }
 
+    references.extend(resolve_xml_model_locations(
+        source,
+        base_directory,
+        resolver,
+    ));
     Ok(references)
+}
+
+/// Schemas bound by `<?xml-model href="..." schematypens="...XMLSchema"?>`
+/// processing instructions, resolved like `xsi:noNamespaceSchemaLocation`
+/// (the schema's own target namespace is read from the schema). Read
+/// tolerantly, so it also serves documents being typed.
+pub fn resolve_xml_model_locations(
+    source: &str,
+    base_directory: &Path,
+    resolver: &LocationResolver<'_>,
+) -> Vec<SchemaReference> {
+    xml_model_xsd_hrefs(source)
+        .iter()
+        .filter_map(|href| {
+            let request = SchemaLocation {
+                kind: SchemaLocationKind::NoNamespaceSchemaLocation,
+                namespace: None,
+                location: Some(href),
+                base_directory,
+            };
+            resolve_schema_location(&request, resolver).map(|path| SchemaReference {
+                namespace: None,
+                path,
+                kind: SchemaLocationKind::NoNamespaceSchemaLocation,
+            })
+        })
+        .collect()
+}
+
+/// `href` of the `xml-model` instructions that designate an XML Schema:
+/// `schematypens` is the XSD namespace, or is absent and the `href` ends in
+/// `.xsd`.
+fn xml_model_xsd_hrefs(source: &str) -> Vec<String> {
+    const XSD_NAMESPACE: &str = "http://www.w3.org/2001/XMLSchema";
+    xml_core::tags::scan_markup(source)
+        .into_iter()
+        .filter(|markup| markup.kind == xml_core::tags::XmlMarkupKind::ProcessingInstruction)
+        .filter_map(|markup| {
+            let content = &source[markup.content];
+            let rest = content.strip_prefix("xml-model")?;
+            if !rest.starts_with(|c: char| c.is_whitespace()) {
+                return None;
+            }
+            let pseudo = pseudo_attributes(rest);
+            let value = |name: &str| {
+                pseudo
+                    .iter()
+                    .find(|(key, _)| key == name)
+                    .map(|(_, value)| value.as_str())
+            };
+            let href = value("href")?.trim();
+            let is_xsd = match value("schematypens") {
+                Some(namespace) => namespace.trim() == XSD_NAMESPACE,
+                None => href.to_ascii_lowercase().ends_with(".xsd"),
+            };
+            (is_xsd && !href.is_empty()).then(|| href.to_owned())
+        })
+        .collect()
+}
+
+/// `name="value"` pairs (either quote) of a processing instruction.
+fn pseudo_attributes(content: &str) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    let mut rest = content;
+    while let Some(equals) = rest.find('=') {
+        let name = rest[..equals]
+            .split_whitespace()
+            .last()
+            .unwrap_or_default()
+            .to_owned();
+        let after = rest[equals + 1..].trim_start();
+        let Some(quote) = after.chars().next().filter(|c| matches!(c, '"' | '\'')) else {
+            rest = &rest[equals + 1..];
+            continue;
+        };
+        let body = &after[1..];
+        let Some(end) = body.find(quote) else { break };
+        if !name.is_empty() {
+            pairs.push((name, body[..end].to_owned()));
+        }
+        rest = &body[end + 1..];
+    }
+    pairs
 }
 
 /// Resolves the `xs:include` and `xs:import` dependencies of an XSD schema.

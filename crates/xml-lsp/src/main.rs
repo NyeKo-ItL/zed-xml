@@ -28,6 +28,7 @@ mod schemas;
 mod selection;
 mod settings;
 mod symbols;
+mod value_completion;
 mod worker;
 mod xslt;
 
@@ -344,6 +345,12 @@ impl XmlLanguageServer {
             items.extend(schema_items);
         }
         items.extend(dtd::completions(grammar.as_ref(), uri, &source, offset));
+        items.extend(value_completion::completions(
+            &mut self.hover_context(uri),
+            uri,
+            &source,
+            offset,
+        ));
         items.extend(xslt::completions(
             &self.xslt_context(),
             uri,

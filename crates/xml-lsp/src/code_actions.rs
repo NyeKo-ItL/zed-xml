@@ -831,7 +831,10 @@ fn is_nil(document: &Document<'_>, index: usize) -> bool {
 
 /// Enumerated values of a simple type (facets accumulated along the
 /// restrictions); `None` without an enumeration or for a list.
-fn enumeration_values(set: &XsdModelSet, value_type: XsdTypeRef<'_>) -> Option<Vec<String>> {
+pub(crate) fn enumeration_values(
+    set: &XsdModelSet,
+    value_type: XsdTypeRef<'_>,
+) -> Option<Vec<String>> {
     let info = set.simple_type_info(value_type);
     if info.item_type.is_some() || info.facets.enumerations.is_empty() {
         return None;
