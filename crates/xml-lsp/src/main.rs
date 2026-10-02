@@ -897,7 +897,7 @@ fn run(connection: Connection) -> Result<i32, Box<dyn Error + Send + Sync>> {
             "capabilities": server_capabilities(encoding),
             "serverInfo": {
                 "name": "xml-lsp",
-                "version": env!("CARGO_PKG_VERSION"),
+                "version": format!("{}{}", env!("CARGO_PKG_VERSION"), LOCAL_BUILD_SUFFIX),
             },
         }),
     )?;
