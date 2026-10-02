@@ -224,7 +224,7 @@ dependencies = [
 
 [[package]]
 name = "dtd-core"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "xml-core",
 ]
@@ -1154,7 +1154,7 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "xml-conformance"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "dtd-core",
  "encoding_rs",
@@ -1165,7 +1165,7 @@ dependencies = [
 
 [[package]]
 name = "xml-core"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "criterion",
  "quick-xml",
@@ -1173,7 +1173,7 @@ dependencies = [
 
 [[package]]
 name = "xml-lsp"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "criterion",
  "dtd-core",
@@ -1188,11 +1188,11 @@ dependencies = [
 
 [[package]]
 name = "xpath-core"
-version = "0.15.0"
+version = "0.16.0"
 
 [[package]]
 name = "xsd-core"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "criterion",
  "quick-xml",
@@ -1225,7 +1225,7 @@ dependencies = [
 
 [[package]]
 name = "zed-xml"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "zed_extension_api",
 ]
