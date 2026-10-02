@@ -53,6 +53,9 @@ pub(crate) const CODE_ACTION_KINDS: [&str; 3] = ["quickfix", "refactor", "source
 pub(crate) const QUICK_FIX: &str = "quickfix";
 const REWRITE: &str = "refactor.rewrite";
 const SOURCE: &str = "source";
+const COPY_XPATH: &str = "source.copyXPath";
+/// `workspace/executeCommand` command copying its argument (an XPath).
+pub(crate) const COPY_XPATH_COMMAND: &str = "xml.copyXPath";
 /// Code of the XSD validation diagnostics.
 const XSD_CODE: &str = "xsd-validation";
 /// Maximum number of enumeration values offered as replacements.
@@ -88,7 +91,60 @@ pub(crate) fn code_actions(
     if actions.wants(SOURCE) {
         bind_schema_actions(&mut actions, &document);
     }
+    if actions.wants(COPY_XPATH) {
+        copy_xpath_action(&mut actions, &document);
+    }
     actions.actions
+}
+
+/// "Copy XPath": the XPath of the element or attribute at the start of the
+/// requested range, copied by the server on `workspace/executeCommand`
+/// (Zed extensions cannot register commands or key bindings of their own).
+fn copy_xpath_action(actions: &mut Actions<'_>, document: &Document<'_>) {
+    let Some(path) = xml_core::xpath::xpath_in_tree(
+        document.source,
+        &document.tree,
+        actions.range.start,
+        xml_core::xpath::XPathIndexes::Ambiguous,
+    ) else {
+        return;
+    };
+    actions.actions.push(json!({
+        "title": format!("Copy XPath: {path}"),
+        "kind": COPY_XPATH,
+        "command": {
+            "title": "Copy XPath",
+            "command": COPY_XPATH_COMMAND,
+            "arguments": [path],
+        },
+    }));
+}
+
+/// Text copied by an `xml.copyXPath` request, for the confirmation message.
+pub(crate) fn copied_text(params: &Value) -> Option<String> {
+    params.get("arguments")?.get(0)?.as_str().map(str::to_owned)
+}
+
+/// Answers `workspace/executeCommand`.
+pub(crate) fn execute_command(params: &Value) -> Result<Value, crate::dispatch::RequestError> {
+    match params.get("command").and_then(Value::as_str) {
+        Some(COPY_XPATH_COMMAND) => {
+            let text = copied_text(params).ok_or_else(|| {
+                crate::dispatch::RequestError::new(
+                    lsp_server::ErrorCode::InvalidParams,
+                    format!("{COPY_XPATH_COMMAND} needs the XPath as its first argument"),
+                )
+            })?;
+            crate::clipboard::copy(&text).map_err(|message| {
+                crate::dispatch::RequestError::new(lsp_server::ErrorCode::InternalError, message)
+            })?;
+            Ok(Value::Null)
+        }
+        other => Err(crate::dispatch::RequestError::new(
+            lsp_server::ErrorCode::InvalidParams,
+            format!("unknown command {}", other.unwrap_or("<missing>")),
+        )),
+    }
 }
 
 /// `xsd-validation` diagnostics (`data.rule` = `invalidEnumeration`) for

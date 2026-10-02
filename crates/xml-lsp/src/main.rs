@@ -3,6 +3,7 @@
 mod analysis;
 mod builtin;
 mod catalog;
+mod clipboard;
 mod code_actions;
 mod colors;
 mod configuration;
@@ -58,6 +59,8 @@ use xsd_core::{
 #[cfg(test)]
 const INITIALIZE_METHOD: &str = "initialize";
 const EXIT_METHOD: &str = "exit";
+const EXECUTE_COMMAND_METHOD: &str = "workspace/executeCommand";
+const SHOW_MESSAGE_METHOD: &str = "window/showMessage";
 const DID_OPEN_METHOD: &str = "textDocument/didOpen";
 const DID_CHANGE_METHOD: &str = "textDocument/didChange";
 const DID_CLOSE_METHOD: &str = "textDocument/didClose";
@@ -792,6 +795,7 @@ fn server_capabilities(encoding: positions::PositionEncoding) -> Value {
         "selectionRangeProvider": true,
         "documentLinkProvider": {"resolveProvider": false},
         "codeActionProvider": {"codeActionKinds": code_actions::CODE_ACTION_KINDS},
+        "executeCommandProvider": {"commands": [code_actions::COPY_XPATH_COMMAND]},
         "workspaceSymbolProvider": true,
         "colorProvider": true,
         "workspace": {"workspaceFolders": {"supported": true, "changeNotifications": true}},
@@ -866,6 +870,7 @@ impl XmlLanguageServer {
             FOLDING_RANGE_METHOD => self.folding_range(params).unwrap_or_else(empty),
             SELECTION_RANGE_METHOD => self.selection_range(params).unwrap_or(Value::Null),
             CODE_ACTION_METHOD => self.code_action(params).unwrap_or_else(empty),
+            EXECUTE_COMMAND_METHOD => code_actions::execute_command(params)?,
             DOCUMENT_COLOR_METHOD => self.document_colors(params).unwrap_or_else(empty),
             COLOR_PRESENTATION_METHOD => self.color_presentations(params).unwrap_or_else(empty),
             DOCUMENT_LINK_METHOD => self.document_links(params).unwrap_or_else(empty),
@@ -959,7 +964,20 @@ fn run(connection: Connection) -> Result<i32, Box<dyn Error + Send + Sync>> {
                         server.handle_request(&request.method, &request.params)
                     })
                 };
+                let copied = (request.method == EXECUTE_COMMAND_METHOD
+                    && response.response_result.is_ok())
+                .then(|| code_actions::copied_text(&request.params))
+                .flatten();
                 connection.sender.send(response.into())?;
+                if let Some(text) = copied {
+                    connection.sender.send(
+                        Notification {
+                            method: SHOW_MESSAGE_METHOD.to_owned(),
+                            params: json!({"type": 3, "message": format!("Copied to the clipboard: {text}")}),
+                        }
+                        .into(),
+                    )?;
+                }
             }
             Message::Notification(notification) if notification.method == EXIT_METHOD => {
                 break if shutdown { 0 } else { 1 };
