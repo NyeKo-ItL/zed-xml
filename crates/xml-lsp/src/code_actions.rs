@@ -881,7 +881,11 @@ fn escape(value: &str) -> String {
 
 /// Prefix declared (`xmlns:prefix`) for `namespace` in the scope of the
 /// element.
-fn prefix_for<'a>(document: &Document<'a>, index: usize, namespace: &str) -> Option<&'a str> {
+pub(crate) fn prefix_for<'a>(
+    document: &Document<'a>,
+    index: usize,
+    namespace: &str,
+) -> Option<&'a str> {
     let source = document.source;
     std::iter::once(index)
         .chain(document.tree.ancestors(index))

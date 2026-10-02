@@ -314,15 +314,27 @@ impl XmlLanguageServer {
             let items = dtd::completions(grammar.as_ref(), uri, &source, offset);
             return Some(json!({"isIncomplete": false, "items": items}));
         }
-        let mut items = complete_xml(&source, offset)
-            .into_iter()
-            .map(|completion| {
-                json!({
-                    "label": completion.label,
-                    "insertText": completion.insert_text,
-                })
-            })
-            .collect::<Vec<_>>();
+        let element_items = value_completion::element_completions(
+            &mut self.hover_context(uri),
+            uri,
+            &source,
+            offset,
+        );
+        let mut items = element_items.clone();
+        items.extend(value_completion::end_tag_completions(&source, offset));
+        if element_items.is_empty() {
+            items.extend(
+                complete_xml(&source, offset)
+                    .into_iter()
+                    .filter(|completion| !completion.insert_text.starts_with("</"))
+                    .map(|completion| {
+                        json!({
+                            "label": completion.label,
+                            "insertText": completion.insert_text,
+                        })
+                    }),
+            );
+        }
         if self.settings.auto_close_tags
             && let Some(completion) = auto_close_tag(&source, offset)
         {
@@ -332,7 +344,12 @@ impl XmlLanguageServer {
             }));
         }
         if let Some(schema) = self.load_schema(uri, &source) {
-            let schema_items = complete_elements(&source, offset, &schema)
+            let flat_elements = if element_items.is_empty() {
+                complete_elements(&source, offset, &schema)
+            } else {
+                Vec::new()
+            };
+            let schema_items = flat_elements
                 .into_iter()
                 .chain(complete_attributes(&source, offset, &schema))
                 .chain(complete_attribute_values(&source, offset, &schema))

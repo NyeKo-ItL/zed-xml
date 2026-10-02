@@ -4351,3 +4351,59 @@ fn xml_model_binds_a_schema_for_diagnostics_hover_and_enumeration_completion() {
     assert!(items.contains(&"closed".to_owned()), "{items:?}");
     std::fs::remove_dir_all(directory).expect("directory should be removed");
 }
+
+#[test]
+fn completes_elements_allowed_by_the_xsd_and_end_tags_while_typing() {
+    let directory = std::env::temp_dir().join(format!("xml-lsp-elements-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).expect("directory should be written");
+    std::fs::write(
+        directory.join("customs.xsd"),
+        concat!(
+            "<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\">\n",
+            "  <xs:element name=\"CustomsHeader\"><xs:complexType><xs:sequence>\n",
+            "    <xs:element name=\"CusActCod\" type=\"xs:string\"/>\n",
+            "    <xs:element name=\"Int\" type=\"xs:string\" minOccurs=\"0\"/>\n",
+            "    <xs:element name=\"Inv\" type=\"xs:string\" minOccurs=\"0\"/>\n",
+            "    <xs:element name=\"Other\" type=\"xs:string\"/>\n",
+            "  </xs:sequence></xs:complexType></xs:element>\n",
+            "</xs:schema>",
+        ),
+    )
+    .expect("schema should be written");
+    let uri = path_to_uri(&directory.join("doc.xml"));
+    let header =
+        "<?xml-model href=\"customs.xsd\" schematypens=\"http://www.w3.org/2001/XMLSchema\"?>\n";
+    let mut server = XmlLanguageServer::new();
+    let mut labels = |text: &str, line: usize, character: usize| {
+        server.documents.insert(uri.clone(), text.to_owned());
+        server
+            .completion(&json!({
+                "textDocument": {"uri": uri},
+                "position": {"line": line, "character": character},
+            }))
+            .unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|item| item["label"].as_str().map(str::to_owned))
+            .collect::<Vec<_>>()
+    };
+
+    // Children allowed after CusActCod: Int, Inv and Other, not CusActCod.
+    let text = format!("{header}<CustomsHeader>\n  <CusActCod>1</CusActCod>\n  <In");
+    let items = labels(&text, 3, 5);
+    assert_eq!(items, vec!["Int".to_owned(), "Inv".to_owned()]);
+    let text = format!("{header}<CustomsHeader>\n  <CusActCod>1</CusActCod>\n  <");
+    let items = labels(&text, 3, 3);
+    assert!(items.contains(&"Other".to_owned()), "{items:?}");
+    assert!(!items.contains(&"CusActCod".to_owned()), "{items:?}");
+
+    // End tag of the open element.
+    let text = format!("{header}<CustomsHeader>\n</Cus");
+    let items = labels(&text, 2, 5);
+    assert_eq!(items, vec!["CustomsHeader".to_owned()]);
+    let text = format!("{header}<CustomsHeader>\n</Cus>\n");
+    let items = labels(&text, 2, 5);
+    assert_eq!(items, vec!["CustomsHeader".to_owned()]);
+    std::fs::remove_dir_all(directory).expect("directory should be removed");
+}
