@@ -1371,8 +1371,21 @@ fn pulls_and_reacts_to_configuration_changes() {
             json!({"settings": {"xml": {"validation": {"enabled": false}, "format": {"insertSpaces": false}}}}),
         );
     assert!(client.take_diagnostics(4).is_empty());
-    let edits = client.request(5, FORMATTING_METHOD, json!({"textDocument": {"uri": uri}}));
-    assert_eq!(edits, json!([]), "malformed documents are not formatted");
+    client.send(
+        Request {
+            id: RequestId::from(5),
+            method: FORMATTING_METHOD.to_owned(),
+            params: json!({"textDocument": {"uri": uri}}),
+        }
+        .into(),
+    );
+    let edits = response(&client, 5)
+        .result()
+        .expect("the unclosed element should be repaired by formatting");
+    assert_eq!(
+        formatting::apply_edits(source, &edits),
+        "<root>\n\t<a>\n\t</a>\n</root>\n"
+    );
 
     // Without a pushed section, the server requests the configuration again.
     client.notify(DID_CHANGE_CONFIGURATION_METHOD, json!({"settings": null}));
@@ -2442,6 +2455,57 @@ i:noNamespaceSchemaLocation=\"missing.xsd\">\r\n  \
 }
 
 #[test]
+fn formats_unclosed_elements_and_keeps_the_structure_diagnostic() {
+    let (client, _, server_thread) = start_server(json!({}));
+    let uri = "file:///recover-formatting.xml";
+    let source = "<root><broken><child/></root>";
+    client.notify(
+        DID_OPEN_METHOD,
+        json!({"textDocument": {"uri": uri, "version": 1, "text": source}}),
+    );
+
+    let publications = client.take_diagnostics(1);
+    let diagnostic = publications
+        .iter()
+        .flat_map(|publication| publication["diagnostics"].as_array().into_iter().flatten())
+        .find(|diagnostic| diagnostic["data"]["kind"] == "unclosedElement")
+        .expect("the original unclosed element should be diagnosed");
+    assert_eq!(diagnostic["code"], "xml-structure");
+
+    let edits = client.request(
+        2,
+        FORMATTING_METHOD,
+        json!({"textDocument": {"uri": uri}, "options": {"tabSize": 2, "insertSpaces": true}}),
+    );
+    let formatted = formatting::apply_edits(source, &edits);
+    assert_eq!(
+        formatted,
+        "<root>\n  <broken>\n    <child/>\n  </broken>\n</root>\n"
+    );
+
+    client.notify(
+        DID_CHANGE_METHOD,
+        json!({
+            "textDocument": {"uri": uri, "version": 2},
+            "contentChanges": [{"text": formatted}],
+        }),
+    );
+    let publications = client.take_diagnostics(3);
+    assert!(
+        publications.iter().any(|publication| {
+            publication["diagnostics"]
+                .as_array()
+                .is_some_and(|diagnostics| diagnostics.is_empty())
+        }),
+        "the formatting edit should remove the structure diagnostic: {publications:?}"
+    );
+
+    assert_eq!(client.request(4, "shutdown", Value::Null), Value::Null);
+    client.notify(EXIT_METHOD, Value::Null);
+    server_thread.join().expect("server thread should stop");
+}
+
+#[test]
 fn serves_document_and_range_formatting_with_options() {
     let (server, client) = Connection::memory();
     let server_thread = thread::spawn(|| run(server).expect("server loop should succeed"));
@@ -2468,6 +2532,7 @@ fn serves_document_and_range_formatting_with_options() {
             }
         }
     };
+
     let notify = |method: &str, params: Value| {
         client
             .sender
@@ -2611,14 +2676,15 @@ fn serves_document_and_range_formatting_with_options() {
         ),
         json!([])
     );
-    // Whole formatting refuses the invalid document.
+    // Whole formatting repairs the unclosed elements as part of the edit.
+    let edits = request(
+        9,
+        FORMATTING_METHOD,
+        json!({"textDocument": {"uri": uri}, "options": tabs}),
+    );
     assert_eq!(
-        request(
-            9,
-            FORMATTING_METHOD,
-            json!({"textDocument": {"uri": uri}, "options": tabs}),
-        ),
-        json!([])
+        formatting::apply_edits(&expanded, &edits),
+        "<root>\n\t<broken>\n\t\t<outer>\n\t\t\t<é>\n\t\t\t\t<b/>\n\t\t\t</é>\n\t\t</outer>\n\t\t<oops>\n\t\t</oops>\n\t</broken>\n</root>\n"
     );
 
     assert_eq!(request(10, "shutdown", json!(null)), Value::Null);
