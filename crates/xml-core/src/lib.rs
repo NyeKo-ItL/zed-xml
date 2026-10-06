@@ -769,8 +769,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_xml() {
-        assert!(format_xml("<root>").is_err());
+    fn formats_recoverable_invalid_xml() {
+        assert_eq!(format_xml("<root>").unwrap(), "<root>\n</root>\n");
     }
 
     /// 100 000 nested elements (and an unclosed variant) go through every

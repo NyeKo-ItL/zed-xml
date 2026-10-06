@@ -24,7 +24,7 @@ New to the extension? The [user guide](docs/user-guide.md) walks through validat
 - Rename symbol (`textDocument/prepareRename` + `textDocument/rename`): element names (start and end tags), namespace prefixes (the `xmlns:ns` declaration and every use in its scope, including `type="ns:T"` in XSD and `xsi:type`, honouring nested redeclarations), and global XSD components (`xs:element`, `xs:attribute`, `xs:complexType`, `xs:simpleType`, `xs:group`, `xs:attributeGroup`) with their `ref`/`type`/`base`/`itemType`/`memberTypes`/`substitutionGroup` references and matching elements in open XML documents bound to the schema. Invalid XML names are rejected.
 - Folding ranges (`textDocument/foldingRange`, LemMinX-style): multi-line elements fold up to the line before their end tag (which stays visible), multi-line start tags with many attributes, comments, CDATA sections, processing instructions, the `<!DOCTYPE ... [...]>` internal subset and nested `<!-- #region -->` / `<!-- #endregion -->` regions. The client `rangeLimit` is honoured. Zed only uses LSP folding ranges when `document_folding_ranges` is `"on"` (see below).
 - Selection ranges (`textDocument/selectionRange`, LemMinX/IntelliJ "extend selection"): prefix or local name → qualified name → attribute value (word, token, without and with quotes) → attribute → tag → element content → element → parent content → parent element … → document, also from text, comments, CDATA sections, processing instructions and end tags. Zed does not request LSP selection ranges today: its "select larger/smaller syntax node" actions use the tree-sitter tree; the provider serves other LSP clients (Helix, Neovim, VS Code-style clients).
-- Document and range formatting (`textDocument/formatting`, `textDocument/rangeFormatting`, Zed "Format Selections"): honours the editor's `tabSize`/`insertSpaces` (tabs or spaces), `trimTrailingWhitespace` (outside CDATA sections), `insertFinalNewline` and `trimFinalNewlines`, keeps the document's line endings (LF or CRLF) and returns minimal line-based edits so cursors stay in place. Like LemMinX, range formatting expands the selection to the enclosing complete elements and re-indents only that region at its depth, even when the rest of the document is malformed; a region that is not well-formed is left untouched.
+- Document and range formatting (`textDocument/formatting`, `textDocument/rangeFormatting`, Zed "Format Selections"): honours the editor's `tabSize`/`insertSpaces` (tabs or spaces), `trimTrailingWhitespace` (outside CDATA sections), `insertFinalNewline` and `trimFinalNewlines`, keeps the document's line endings (LF or CRLF) and returns minimal line-based edits so cursors stay in place. Like LemMinX, range formatting expands the selection to the enclosing complete elements and re-indents only that region at its depth, even when the rest of the document is malformed; a region that is not well-formed is left untouched. Whole-document formatting repairs the unambiguous case of an unclosed element by inserting its matching end tag, while keeping the `xml-structure` diagnostic until the edit is applied; ambiguous malformed XML still returns an LSP `RequestFailed` error.
 - XSD binding through `<?xml-model href="…xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>` (in addition to `xsi:schemaLocation`/`xsi:noNamespaceSchemaLocation`) for validation, completion and hover; completion (`textDocument/completion`) of the `xs:enumeration` values of attributes and text content.
 - XSD-aware hover (`textDocument/hover`, LemMinX-style Markdown with the hovered range): element names resolve their declaration in context (local declarations of the parent's content model, `ref`, groups, extensions, substitution groups, `xsi:type`) and show namespace, type and base type, cardinality, default/fixed values, `xs:annotation/xs:documentation` (untagged or English `xml:lang` preferred, nested XHTML reduced to text) and a link to the source schema; attribute names show type, `use`, default/fixed values and documentation; attribute values and simple-typed text show the enumeration value's documentation and a facet summary (allowed values, pattern, length and bounds, list/union). In XSD files, `type`/`ref`/`base`/`itemType`/`memberTypes`/`substitutionGroup` references and global component names show the referenced component's documentation, including from included/imported schemas and unsaved open buffers. Without a schema, element and attribute names keep a minimal hover (name and namespace).
 - Document links (`textDocument/documentLink`, LemMinX-style) and go to definition on referenced files: each location of `xsi:schemaLocation`, `xsi:noNamespaceSchemaLocation`, `schemaLocation` of `xs:include`/`xs:import`/`xs:redefine`/`xs:override`, `href` of `xi:include`, `xsl:import` and `xsl:include`, `<?xml-stylesheet href?>`, `<?xml-model href?>` and the `<!DOCTYPE>` system identifier. Prefixes are resolved by namespace URI; relative paths (also percent-encoded) are resolved against the document, `http(s)` URLs are kept as-is, and only existing local files and `http(s)` URLs become links (with a tooltip). Zed shows these links on cmd-hover and opens them on cmd-click (`lsp_document_links`, on by default, Zed 1.5.3+, zed-industries/zed#56011); in older Zed versions and other clients, cmd-click on a local file path works through go to definition, which jumps to the start of the file.
@@ -80,15 +80,15 @@ The server never downloads schemas, DTDs or entities: remote locations must be m
 
 The `XML` language (and so `xml-lsp`) is used for files with these suffixes, and for files without a known suffix whose first line starts with `<` and contains `xml` (such as `<?xml version="1.0"?>`):
 
-| Family | Suffixes |
-|--------|----------|
-| XML, schemas, transformations | `xml`, `xsd`, `xsl`, `xslt`, `rng` (RELAX NG, XML syntax), `wsdl`, `xjb` |
-| Web, documents, feeds | `svg`, `xhtml`, `xht`, `rss`, `atom`, `opml`, `opf` (EPUB package), `dita`, `ditamap`, `xul` |
-| Apple | `plist`, `entitlements`, `storyboard`, `xib`, `xcscheme`, `xcworkspacedata`, `tmTheme`, `tmLanguage` |
-| .NET, MSBuild, WiX | `xaml`, `axaml`, `fsproj`, `vbproj`, `vcxproj`, `vcxproj.filters`, `csproj.user`, `nuspec`, `resx`, `pubxml`, `wxs`, `wxi`, `wxl` |
-| Java, Android | `pom`, `fxml`, `iml`, `tld`, `axml` (and `pom.xml`, `AndroidManifest.xml`, … through `xml`) |
-| Localization | `xlf`, `xliff`, `tmx` |
-| Geography, graphs, music, processes | `kml`, `gpx`, `graphml`, `musicxml`, `bpmn` |
+| Family                              | Suffixes                                                                                                                          |
+| ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| XML, schemas, transformations       | `xml`, `xsd`, `xsl`, `xslt`, `rng` (RELAX NG, XML syntax), `wsdl`, `xjb`                                                          |
+| Web, documents, feeds               | `svg`, `xhtml`, `xht`, `rss`, `atom`, `opml`, `opf` (EPUB package), `dita`, `ditamap`, `xul`                                      |
+| Apple                               | `plist`, `entitlements`, `storyboard`, `xib`, `xcscheme`, `xcworkspacedata`, `tmTheme`, `tmLanguage`                              |
+| .NET, MSBuild, WiX                  | `xaml`, `axaml`, `fsproj`, `vbproj`, `vcxproj`, `vcxproj.filters`, `csproj.user`, `nuspec`, `resx`, `pubxml`, `wxs`, `wxi`, `wxl` |
+| Java, Android                       | `pom`, `fxml`, `iml`, `tld`, `axml` (and `pom.xml`, `AndroidManifest.xml`, … through `xml`)                                       |
+| Localization                        | `xlf`, `xliff`, `tmx`                                                                                                             |
+| Geography, graphs, music, processes | `kml`, `gpx`, `graphml`, `musicxml`, `bpmn`                                                                                       |
 
 `.dtd` and `.ent` files use the `DTD` language.
 
@@ -165,9 +165,7 @@ The server reads LemMinX-style settings from an `xml` section. In Zed, put them 
           "symbols": { "enabled": true, "maxItemsComputed": 5000 },
           "colors": { "enabled": true },
           "catalogs": ["catalog.xml"],
-          "fileAssociations": [
-            { "pattern": "**/*.project", "systemId": "schemas/project.xsd" }
-          ]
+          "fileAssociations": [{ "pattern": "**/*.project", "systemId": "schemas/project.xsd" }]
         }
       }
     }

@@ -1,7 +1,7 @@
 //! XML formatting: whole document ([`format_xml_with`]) and range
 //! ([`format_xml_range`]), configured by [`FormatOptions`].
 
-use std::ops::Range;
+use std::{borrow::Cow, ops::Range};
 
 use quick_xml::{
     Reader, Writer,
@@ -11,6 +11,7 @@ use quick_xml::{
 use crate::{
     MAX_XML_SOURCE_BYTES, parse_xml,
     tags::{XmlElement, XmlTagTree},
+    wellformed::{XmlProblemKind, check_well_formedness},
 };
 
 /// Line ending used for the line breaks inserted by the formatter
@@ -222,14 +223,21 @@ impl FormatOptions {
     }
 }
 
-/// Formats a valid XML document with two spaces per level.
+/// Formats an XML document with two spaces per level, recovering an unclosed
+/// element when its matching end tag is unambiguous.
 pub fn format_xml(source: &str) -> Result<String, String> {
     format_xml_with(source, &FormatOptions::default())
 }
 
-/// Formats a valid XML document according to `options`.
+/// Formats an XML document according to `options`, recovering an unclosed
+/// element when its matching end tag is unambiguous.
 pub fn format_xml_with(source: &str, options: &FormatOptions) -> Result<String, String> {
-    if parse_xml(source)
+    // A missing end tag has an unambiguous repair: insert the matching tags
+    // reported by the tolerant checker, then format the repaired source. The
+    // LSP still diagnoses the original source; the synthetic tags are part of
+    // the returned edit and therefore fix the document when applied.
+    let source = recover_unclosed_elements(source)?;
+    if parse_xml(&source)
         .diagnostics
         .iter()
         .any(|diagnostic| diagnostic.blocks_formatting())
@@ -238,7 +246,7 @@ pub fn format_xml_with(source: &str, options: &FormatOptions) -> Result<String, 
     }
 
     let mut formatter = Formatter::new(options, 0, false, false, source.len());
-    formatter.run(source)?;
+    formatter.run(&source)?;
     if !formatter.has_root {
         return Err("the XML document has no root element".to_owned());
     }
@@ -266,6 +274,58 @@ pub fn format_xml_with(source: &str, options: &FormatOptions) -> Result<String, 
         result.push_str(options.line_ending.as_str());
     }
     Ok(result)
+}
+
+/// Repairs only unclosed elements, whose matching end tags are unambiguous.
+/// Other malformed constructs remain rejected by the regular formatter.
+fn recover_unclosed_elements(source: &str) -> Result<Cow<'_, str>, String> {
+    if source.len() > MAX_XML_SOURCE_BYTES {
+        return Err("the XML document is invalid".to_owned());
+    }
+    let mut insertions = Vec::new();
+    for problem in check_well_formedness(source) {
+        match problem.kind {
+            XmlProblemKind::UnclosedElement { insert_at, .. } => {
+                let Some(name) = source.get(problem.range.clone()).map(str::to_owned) else {
+                    return Err("the XML document is invalid".to_owned());
+                };
+                insertions.push((
+                    insert_at.min(source.len()),
+                    problem.range.start,
+                    format!("</{name}>"),
+                ));
+            }
+            XmlProblemKind::UndeclaredPrefix { .. }
+            | XmlProblemKind::InvalidQualifiedName
+            | XmlProblemKind::InvalidNamespaceDeclaration => {}
+            _ => return Err("the XML document is invalid".to_owned()),
+        }
+    }
+    if insertions.is_empty() {
+        return Ok(Cow::Borrowed(source));
+    }
+
+    // At the same insertion point, close the innermost element first. The
+    // later start name is deeper in the open-element stack.
+    insertions.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| right.1.cmp(&left.1)));
+    let extra: usize = insertions.iter().map(|(_, _, text)| text.len()).sum();
+    let mut recovered = String::with_capacity(source.len() + extra);
+    let mut previous = 0;
+    let mut index = 0;
+    while index < insertions.len() {
+        let offset = insertions[index].0;
+        recovered.push_str(&source[previous..offset]);
+        while insertions
+            .get(index)
+            .is_some_and(|(at, _, _)| *at == offset)
+        {
+            recovered.push_str(&insertions[index].2);
+            index += 1;
+        }
+        previous = offset;
+    }
+    recovered.push_str(&source[previous..]);
+    Ok(Cow::Owned(recovered))
 }
 
 /// Replacement computed by [`format_xml_range`]: `text` replaces
@@ -1026,6 +1086,65 @@ mod tests {
             format_xml(source).unwrap(),
             "<root>\n  <a x=\"1\">\n    <b/>\n  </a>\n  <c>text</c>\n  <!-- n -->\n</root>\n"
         );
+    }
+
+    #[test]
+    fn formats_large_documents() {
+        let mut source = String::from("<document>");
+        while source.len() < 1_200_000 {
+            source.push_str("<entry><id>");
+            source.push_str(&source.len().to_string());
+            source.push_str("</id><value>payload</value><empty/></entry>");
+        }
+        source.push_str("</document>");
+        assert!(source.len() >= 1_200_000);
+
+        let entry_count = source.matches("<entry>").count();
+        let formatted = format_xml(&source).expect("a large valid XML document should format");
+
+        assert!(parse_xml(&formatted).diagnostics.is_empty());
+        assert_eq!(formatted.matches("<entry>").count(), entry_count);
+        assert_eq!(
+            formatted.matches("<value>payload</value>").count(),
+            entry_count
+        );
+        assert_eq!(format_xml(&formatted).unwrap(), formatted);
+
+        // The same large document remains formattable when its outer closing
+        // tag is the only recoverable error.
+        let missing_outer_end = source.strip_suffix("</document>").unwrap();
+        let repaired = format_xml(missing_outer_end)
+            .expect("a large document with an unclosed outer element should format");
+        assert!(parse_xml(&repaired).diagnostics.is_empty());
+        assert!(repaired.ends_with("</document>\n"));
+        assert_eq!(format_xml(&repaired).unwrap(), repaired);
+    }
+
+    #[test]
+    fn repairs_unclosed_elements_before_formatting() {
+        let source = "<root><broken><child/></root>";
+        let formatted = format_xml(source).expect("an unclosed element has an unambiguous repair");
+
+        assert_eq!(
+            formatted,
+            "<root>\n  <broken>\n    <child/>\n  </broken>\n</root>\n"
+        );
+        assert!(
+            parse_xml(source)
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.rule == Some("unclosedElement"))
+        );
+        assert_eq!(format_xml(&formatted).unwrap(), formatted);
+
+        let nested = format_xml("<root><outer>").unwrap();
+        assert_eq!(nested, "<root>\n  <outer>\n  </outer>\n</root>\n");
+    }
+
+    #[test]
+    fn still_rejects_ambiguous_structure_errors() {
+        assert!(format_xml("<root><a></b></root>").is_err());
+        assert!(format_xml("<root></root></extra>").is_err());
     }
 
     #[test]

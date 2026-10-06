@@ -622,15 +622,23 @@ impl XmlLanguageServer {
         Value::Array(self.workspace.query(&self.documents, query))
     }
 
+    #[cfg(test)]
     fn formatting(&self, params: &Value) -> Option<Value> {
+        self.formatting_request(params).and_then(Result::ok)
+    }
+
+    fn formatting_request(&self, params: &Value) -> Option<Result<Value, dispatch::RequestError>> {
         let uri = params.get("textDocument")?.get("uri")?.as_str()?;
         let source = self.documents.get(uri)?;
         if !self.settings.format.enabled || dtd::is_dtd_uri(uri) {
             // The XML formatter does not apply to DTD files.
-            return Some(json!([]));
+            return Some(Ok(json!([])));
         }
         let options = formatting::format_options(params, source, &self.settings.format);
-        formatting::document_edits(source, &options)
+        Some(
+            formatting::document_edits(source, &options)
+                .map_err(|message| dispatch::RequestError::new(ErrorCode::RequestFailed, message)),
+        )
     }
 
     fn range_formatting(&self, params: &Value) -> Option<Value> {
@@ -875,7 +883,10 @@ impl XmlLanguageServer {
             COLOR_PRESENTATION_METHOD => self.color_presentations(params).unwrap_or_else(empty),
             DOCUMENT_LINK_METHOD => self.document_links(params).unwrap_or_else(empty),
             HOVER_METHOD => self.hover(params).unwrap_or(Value::Null),
-            FORMATTING_METHOD => self.formatting(params).unwrap_or_else(empty),
+            FORMATTING_METHOD => self
+                .formatting_request(params)
+                .transpose()?
+                .unwrap_or_else(empty),
             RANGE_FORMATTING_METHOD => self.range_formatting(params).unwrap_or_else(empty),
             #[cfg(test)]
             method if method.starts_with(tests::TEST_METHOD_PREFIX) => {

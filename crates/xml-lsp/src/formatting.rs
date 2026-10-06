@@ -49,13 +49,16 @@ pub fn format_options(params: &Value, source: &str, settings: &FormatSettings) -
     options
 }
 
-/// Edits (`TextEdit[]`) formatting the whole document, or `None` if the
-/// document is invalid.
-pub fn document_edits(source: &str, options: &FormatOptions) -> Option<Value> {
+/// Edits (`TextEdit[]`) formatting the whole document.
+///
+/// An invalid document is an error rather than an empty edit list: an empty
+/// list means that formatting succeeded and no changes were needed.
+pub fn document_edits(source: &str, options: &FormatOptions) -> Result<Value, String> {
     // A byte order mark is kept: only the text after it is reformatted.
     let (body, bom) = xml_core::text::strip_bom(source);
-    let formatted = format_xml_with(body, options).ok()?;
-    Some(text_edits(source, bom..source.len(), &formatted))
+    let formatted = format_xml_with(body, options)
+        .map_err(|error| format!("cannot format XML document: {error}"))?;
+    Ok(text_edits(source, bom..source.len(), &formatted))
 }
 
 /// Edits (`TextEdit[]`) formatting the region enclosing `range`, or `None`
