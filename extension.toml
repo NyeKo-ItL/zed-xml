@@ -1,5 +1,5 @@
-id = "xml"
-name = "XML"
+id = "xml-tools"
+name = "XML Tools"
 description = "XML language support with syntax highlighting, schema-aware diagnostics, formatting, completion, and navigation via the native Rust LSP."
 version = "0.16.1"
 schema_version = 1
