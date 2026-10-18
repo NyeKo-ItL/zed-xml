@@ -64,6 +64,8 @@ Zed compiles the extension itself when it is installed as a dev extension; build
 
 Alternatively, `make install-local-lsp` builds the server in release mode (`target/local`, `--version` reports `xml-lsp <version> (local)`) and installs it in Zed's extension work directory under the name and checksum the extension expects, so the published extension (or the dev extension) runs it without downloading anything and without `XML_LSP_PATH`. Run it again after each change, then `editor: restart language server`. It picks the Zed data directory of the OS (`~/Library/Application Support/Zed`, `$XDG_DATA_HOME/zed` or `~/.local/share/zed`, `%LOCALAPPDATA%\\Zed`); set `ZED_DATA_DIR` to override it. A later release of the extension downloads its own binary again.
 
+To see what Zed and the server exchange (methods, sizes, delays), set `lsp.xml-lsp.binary.path` to `scripts/trace-lsp.py`: it relays the messages to the server (`XML_LSP_SERVER`, else the cached binary) and logs them to `/tmp/xml-lsp-trace.log` (`XML_LSP_TRACE` to change it).
+
 Keep `XML_LSP_PATH` set when opening XML files outside this repository, otherwise the extension downloads the released binary matching `extension.toml`'s version.
 
 ## Checks
