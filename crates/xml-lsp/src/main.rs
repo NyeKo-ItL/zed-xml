@@ -405,7 +405,12 @@ impl XmlLanguageServer {
     /// Answers `textDocument/codeAction` (empty list without actions).
     fn code_action(&mut self, params: &Value) -> Option<Value> {
         let uri = params.get("textDocument")?.get("uri")?.as_str()?;
-        let source = self.documents.get(uri)?.clone();
+        let Some(source) = self.documents.get(uri).cloned() else {
+            let context = params.get("context").unwrap_or(&Value::Null);
+            return Some(Value::Array(code_actions::unopened_document_actions(
+                uri, context,
+            )));
+        };
         let range = params.get("range")?;
         let offset = |position: &Value| {
             let line = position.get("line")?.as_u64()? as usize;
@@ -804,7 +809,10 @@ fn server_capabilities(encoding: positions::PositionEncoding) -> Value {
         "selectionRangeProvider": true,
         "documentLinkProvider": {"resolveProvider": false},
         "codeActionProvider": {"codeActionKinds": code_actions::CODE_ACTION_KINDS},
-        "executeCommandProvider": {"commands": [code_actions::COPY_XPATH_COMMAND]},
+        "executeCommandProvider": {"commands": [
+            code_actions::COPY_XPATH_COMMAND,
+            code_actions::FORMAT_FILE_COMMAND,
+        ]},
         "workspaceSymbolProvider": true,
         "colorProvider": true,
         "workspace": {"workspaceFolders": {"supported": true, "changeNotifications": true}},
@@ -879,7 +887,7 @@ impl XmlLanguageServer {
             FOLDING_RANGE_METHOD => self.folding_range(params).unwrap_or_else(empty),
             SELECTION_RANGE_METHOD => self.selection_range(params).unwrap_or(Value::Null),
             CODE_ACTION_METHOD => self.code_action(params).unwrap_or_else(empty),
-            EXECUTE_COMMAND_METHOD => code_actions::execute_command(params)?,
+            EXECUTE_COMMAND_METHOD => code_actions::execute_command(params, &self.settings.format)?,
             DOCUMENT_COLOR_METHOD => self.document_colors(params).unwrap_or_else(empty),
             COLOR_PRESENTATION_METHOD => self.color_presentations(params).unwrap_or_else(empty),
             DOCUMENT_LINK_METHOD => self.document_links(params).unwrap_or_else(empty),
@@ -976,16 +984,19 @@ fn run(connection: Connection) -> Result<i32, Box<dyn Error + Send + Sync>> {
                         server.handle_request(&request.method, &request.params)
                     })
                 };
-                let copied = (request.method == EXECUTE_COMMAND_METHOD
-                    && response.response_result.is_ok())
-                .then(|| code_actions::copied_text(&request.params))
-                .flatten();
+                let notice = (request.method == EXECUTE_COMMAND_METHOD)
+                    .then(|| {
+                        response.response_result.as_ref().ok().and_then(|result| {
+                            code_actions::command_notice(&request.params, result)
+                        })
+                    })
+                    .flatten();
                 connection.sender.send(response.into())?;
-                if let Some(text) = copied {
+                if let Some(message) = notice {
                     connection.sender.send(
                         Notification {
                             method: SHOW_MESSAGE_METHOD.to_owned(),
-                            params: json!({"type": 3, "message": format!("Copied to the clipboard: {text}")}),
+                            params: json!({"type": 3, "message": message}),
                         }
                         .into(),
                     )?;

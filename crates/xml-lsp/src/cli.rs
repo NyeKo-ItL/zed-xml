@@ -59,16 +59,46 @@ fn parse(arguments: &[String]) -> Result<Command, String> {
 
 /// The formatted text of `source`, keeping a byte order mark and the line
 /// ending of the document.
-fn format_source(source: &str, command: &Command) -> Result<String, String> {
+fn format_text(source: &str, base: &FormatOptions) -> Result<String, String> {
     let (body, bom) = strip_bom(source);
     let options = FormatOptions {
-        tab_size: command.tab_size,
-        insert_spaces: !command.tabs,
         line_ending: LineEnding::detect(body),
-        ..FormatOptions::default()
+        ..base.clone()
     };
     let formatted = format_xml_with(body, &options)?;
     Ok(format!("{}{formatted}", &source[..bom]))
+}
+
+fn format_source(source: &str, command: &Command) -> Result<String, String> {
+    format_text(
+        source,
+        &FormatOptions {
+            tab_size: command.tab_size,
+            insert_spaces: !command.tabs,
+            ..FormatOptions::default()
+        },
+    )
+}
+
+/// Largest file formatted in place by [`format_file`].
+const MAX_FORMAT_FILE_SIZE: u64 = 256 * 1024 * 1024;
+
+/// Formats the UTF-8 file `path` in place; `Ok(true)` when it changed. Used
+/// by the `xml.formatFile` command, for documents that the editor does not
+/// send to the server.
+pub(crate) fn format_file(path: &Path, base: &FormatOptions) -> Result<bool, String> {
+    let metadata = fs::metadata(path).map_err(|error| error.to_string())?;
+    if !metadata.is_file() || metadata.len() > MAX_FORMAT_FILE_SIZE {
+        return Err("not a regular file of a supported size".to_owned());
+    }
+    let bytes = fs::read(path).map_err(|error| error.to_string())?;
+    let source = String::from_utf8(bytes).map_err(|_| "the file is not UTF-8".to_owned())?;
+    let formatted = format_text(&source, base)?;
+    if formatted == source {
+        return Ok(false);
+    }
+    fs::write(path, formatted).map_err(|error| error.to_string())?;
+    Ok(true)
 }
 
 fn read_utf8(path: &str) -> Result<String, String> {

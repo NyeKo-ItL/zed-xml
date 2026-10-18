@@ -3082,7 +3082,7 @@ fn serves_initialize_diagnostics_shutdown_and_exit() {
                         "selectionRangeProvider": true,
                         "documentLinkProvider": {"resolveProvider": false},
                         "codeActionProvider": {"codeActionKinds": ["quickfix", "refactor", "source"]},
-                        "executeCommandProvider": {"commands": ["xml.copyXPath"]},
+                        "executeCommandProvider": {"commands": ["xml.copyXPath", "xml.formatFile"]},
                         "workspaceSymbolProvider": true,
                         "colorProvider": true,
                         "workspace": {"workspaceFolders": {"supported": true, "changeNotifications": true}},
@@ -4654,4 +4654,71 @@ fn formats_the_large_samples() {
     assert_eq!(client.request(9999, "shutdown", Value::Null), Value::Null);
     client.notify(EXIT_METHOD, Value::Null);
     server_thread.join().expect("server thread should stop");
+}
+
+/// A document the client never opened (Zed does not send documents with very
+/// long lines) gets a code action formatting the file on disk, and
+/// `xml.formatFile` rewrites it; other files are refused.
+#[test]
+fn formats_an_unopened_file_on_disk() {
+    let directory =
+        std::env::temp_dir().join(format!("xml-lsp-format-file-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&directory);
+    fs::create_dir_all(&directory).unwrap();
+    let xml = directory.join("one-line.xml");
+    fs::write(&xml, "<a><b>x</b></a>").unwrap();
+    let text = directory.join("notes.txt");
+    fs::write(&text, "<a><b>x</b></a>").unwrap();
+    let uri = |path: &Path| format!("file://{}", path.display());
+
+    let (client, _, server_thread) = start_server(json!({"capabilities": {}}));
+    let range = json!({"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}});
+    let actions = client.request(
+        2,
+        CODE_ACTION_METHOD,
+        json!({"textDocument": {"uri": uri(&xml)}, "range": range, "context": {"diagnostics": []}}),
+    );
+    let action = &actions.as_array().unwrap()[0];
+    assert_eq!(action["kind"], "source.formatFile");
+    assert_eq!(action["command"]["command"], "xml.formatFile");
+
+    let none = client.request(
+        3,
+        CODE_ACTION_METHOD,
+        json!({"textDocument": {"uri": uri(&text)}, "range": range, "context": {"diagnostics": []}}),
+    );
+    assert_eq!(none, json!([]));
+
+    client.request(
+        4,
+        EXECUTE_COMMAND_METHOD,
+        json!({"command": "xml.formatFile", "arguments": [uri(&xml)]}),
+    );
+    assert_eq!(fs::read_to_string(&xml).unwrap(), "<a>\n  <b>x</b>\n</a>\n");
+
+    // The command never writes a file that is not XML.
+    let refused = {
+        client.send(
+            Request {
+                id: RequestId::from(5),
+                method: EXECUTE_COMMAND_METHOD.to_owned(),
+                params: json!({"command": "xml.formatFile", "arguments": [uri(&text)]}),
+            }
+            .into(),
+        );
+        loop {
+            match client.next() {
+                Message::Response(response) => break response,
+                Message::Notification(_) => {}
+                message => panic!("unexpected message {message:?}"),
+            }
+        }
+    };
+    assert!(refused.error().is_some());
+    assert_eq!(fs::read_to_string(&text).unwrap(), "<a><b>x</b></a>");
+
+    assert_eq!(client.request(6, "shutdown", Value::Null), Value::Null);
+    client.notify(EXIT_METHOD, Value::Null);
+    server_thread.join().expect("server thread should stop");
+    let _ = fs::remove_dir_all(&directory);
 }

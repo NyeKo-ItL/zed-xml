@@ -56,6 +56,9 @@ const SOURCE: &str = "source";
 const COPY_XPATH: &str = "source.copyXPath";
 /// `workspace/executeCommand` command copying its argument (an XPath).
 pub(crate) const COPY_XPATH_COMMAND: &str = "xml.copyXPath";
+/// Action and `workspace/executeCommand` command formatting a file on disk.
+const FORMAT_FILE: &str = "source.formatFile";
+pub(crate) const FORMAT_FILE_COMMAND: &str = "xml.formatFile";
 /// Code of the XSD validation diagnostics.
 const XSD_CODE: &str = "xsd-validation";
 /// Maximum number of enumeration values offered as replacements.
@@ -120,14 +123,102 @@ fn copy_xpath_action(actions: &mut Actions<'_>, document: &Document<'_>) {
     }));
 }
 
+/// Local XML file designated by a `file:` URI (a known XML suffix, no
+/// network path): the only files `xml.formatFile` writes.
+fn formattable_path(uri: &str) -> Option<std::path::PathBuf> {
+    if !uri.starts_with("file:") {
+        return None;
+    }
+    let path = xsd_core::file_uri_to_path(uri);
+    if xml_core::resource::is_network_path(&path) {
+        return None;
+    }
+    let name = path.file_name()?.to_str()?.to_ascii_lowercase();
+    crate::symbols::XML_PATH_SUFFIXES
+        .iter()
+        .any(|suffix| name.ends_with(&format!(".{suffix}")))
+        .then_some(path)
+}
+
+/// Code actions of a document that the client never opened (Zed does not
+/// send documents with very long lines to the server): formatting the file
+/// on disk, since the server has no text to compute edits from.
+pub(crate) fn unopened_document_actions(uri: &str, request_context: &Value) -> Vec<Value> {
+    let wanted = request_context
+        .get("only")
+        .and_then(Value::as_array)
+        .is_none_or(|kinds| {
+            kinds.is_empty()
+                || kinds
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .any(|kind| FORMAT_FILE.starts_with(kind))
+        });
+    if !wanted
+        || !formattable_path(uri).is_some_and(|path| xml_core::resource::is_local_file(&path))
+    {
+        return Vec::new();
+    }
+    vec![json!({
+        "title": "Format XML file on disk",
+        "kind": FORMAT_FILE,
+        "command": {
+            "title": "Format XML file on disk",
+            "command": FORMAT_FILE_COMMAND,
+            "arguments": [uri],
+        },
+    })]
+}
+
+/// Message shown after a successful `workspace/executeCommand`.
+pub(crate) fn command_notice(params: &Value, result: &Value) -> Option<String> {
+    match params.get("command").and_then(Value::as_str)? {
+        COPY_XPATH_COMMAND => Some(format!("Copied to the clipboard: {}", copied_text(params)?)),
+        FORMAT_FILE_COMMAND => result.as_str().map(str::to_owned),
+        _ => None,
+    }
+}
+
 /// Text copied by an `xml.copyXPath` request, for the confirmation message.
 pub(crate) fn copied_text(params: &Value) -> Option<String> {
     params.get("arguments")?.get(0)?.as_str().map(str::to_owned)
 }
 
 /// Answers `workspace/executeCommand`.
-pub(crate) fn execute_command(params: &Value) -> Result<Value, crate::dispatch::RequestError> {
+pub(crate) fn execute_command(
+    params: &Value,
+    format: &crate::settings::FormatSettings,
+) -> Result<Value, crate::dispatch::RequestError> {
     match params.get("command").and_then(Value::as_str) {
+        Some(FORMAT_FILE_COMMAND) => {
+            let invalid = |message: String| {
+                crate::dispatch::RequestError::new(lsp_server::ErrorCode::InvalidParams, message)
+            };
+            let uri = params
+                .get("arguments")
+                .and_then(|arguments| arguments.get(0))
+                .and_then(Value::as_str)
+                .ok_or_else(|| invalid(format!("{FORMAT_FILE_COMMAND} needs a file URI")))?;
+            let path = formattable_path(uri)
+                .ok_or_else(|| invalid(format!("{uri} is not a local XML file")))?;
+            let mut options = xml_core::FormatOptions::default();
+            format.apply(&mut options);
+            let started = std::time::Instant::now();
+            let name = path
+                .file_name()
+                .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+            let changed = crate::cli::format_file(&path, &options).map_err(|message| {
+                crate::dispatch::RequestError::new(
+                    lsp_server::ErrorCode::InternalError,
+                    format!("cannot format {name}: {message}"),
+                )
+            })?;
+            Ok(json!(if changed {
+                format!("Formatted {name} on disk in {:.2?}", started.elapsed())
+            } else {
+                format!("{name} is already formatted")
+            }))
+        }
         Some(COPY_XPATH_COMMAND) => {
             let text = copied_text(params).ok_or_else(|| {
                 crate::dispatch::RequestError::new(
