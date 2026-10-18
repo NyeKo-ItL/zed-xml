@@ -4669,7 +4669,7 @@ fn formats_an_unopened_file_on_disk() {
     fs::write(&xml, "<a><b>x</b></a>").unwrap();
     let text = directory.join("notes.txt");
     fs::write(&text, "<a><b>x</b></a>").unwrap();
-    let uri = |path: &Path| format!("file://{}", path.display());
+    let uri = path_to_uri;
 
     let (client, _, server_thread) = start_server(json!({"capabilities": {}}));
     let range = json!({"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}});
