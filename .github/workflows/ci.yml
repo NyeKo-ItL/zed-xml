@@ -501,3 +501,23 @@ jobs:
           tag_name: ${{ steps.tag.outputs.release_tag }}
           files: dist/*
           body_path: release-notes.md
+
+  publish_registry:
+    name: Open the Zed registry pull request
+    # Needs the repository variable ZED_REGISTRY_FORK (e.g. "<account>/extensions")
+    # and the secret COMMITTER_TOKEN; skipped until they are set up.
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.action == 'closed' &&
+      github.event.pull_request.merged == true &&
+      startsWith(github.event.pull_request.head.ref, 'release/version-sync-v') &&
+      vars.ZED_REGISTRY_FORK != ''
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: huacnlee/zed-extension-action@v2
+        with:
+          extension-name: xml-tools
+          push-to: ${{ vars.ZED_REGISTRY_FORK }}
+        env:
+          COMMITTER_TOKEN: ${{ secrets.COMMITTER_TOKEN }}
