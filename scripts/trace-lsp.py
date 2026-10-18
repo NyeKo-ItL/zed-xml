@@ -23,9 +23,11 @@ def server_path():
     if os.environ.get("XML_LSP_SERVER"):
         return os.environ["XML_LSP_SERVER"]
     pattern = os.path.expanduser(
-        "~/Library/Application Support/Zed/extensions/work/xml-tools/xml-lsp-*[0-9]"
+        "~/Library/Application Support/Zed/extensions/work/xml-tools/xml-lsp-*"
     )
-    found = sorted(glob.glob(pattern))
+    found = sorted(
+        path for path in glob.glob(pattern) if not path.endswith(".sha256")
+    )
     if not found:
         sys.exit("trace-lsp: no xml-lsp binary found; set XML_LSP_SERVER")
     return found[-1]
