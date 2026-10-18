@@ -4571,7 +4571,27 @@ fn formats_the_large_samples() {
             edits.as_array().is_some_and(|edits| !edits.is_empty()),
             "{path:?}: formatting returned no edit"
         );
-        let formatted = formatting::apply_edits(&source, &edits);
+        // `apply_edits` converts every position from the start of the document,
+        // which is quadratic on a 5.6 MB line: use one `LineIndex`.
+        let line_index = crate::selection::LineIndex::new(&source);
+        let offset = |position: &Value| {
+            line_index.offset(
+                &source,
+                position["line"].as_u64().unwrap() as usize,
+                position["character"].as_u64().unwrap() as usize,
+            )
+        };
+        let mut formatted = source.clone();
+        for edit in edits.as_array().unwrap().iter().rev() {
+            formatted.replace_range(
+                offset(&edit["range"]["start"])..offset(&edit["range"]["end"]),
+                edit["newText"].as_str().unwrap(),
+            );
+        }
+        assert!(
+            edits.as_array().unwrap().len() > 1,
+            "{path:?}: a large single-line document should be edited in several pieces"
+        );
         let expected = xml_core::format_xml_with(
             &source,
             &xml_core::FormatOptions {

@@ -6,6 +6,7 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Fixed
 
+- Formatting a large document written on one or a few lines (a 5.6 MB single-line export) returned a single edit replacing the whole text, which Zed did not apply. When the formatting only changes whitespace, the server now answers with edits of about 4 KB each; the other cases keep the line-based difference.
 - Zed showed no element or end tag suggestion while typing (`<Int`, `</Cus`): the language declared `<`, `/`, `>`, space, `=`, `"` and `?` as completion query characters, so Zed filtered every item against the whole text before the cursor (`    <CustomsHeader></Cus`). The setting is removed; the query is now the name being typed.
 - Completing a start tag name (`<Int|`) now offers the elements the XSD allows at that position (content model of the parent run over the preceding siblings, global elements at the root, prefixes resolved), instead of every name of the schema; the end tag completion (`</Cus|`) replaces the typed name and adds the `>` instead of inserting `</` twice.
 - `<?xml-model href="..." schematypens="http://www.w3.org/2001/XMLSchema"?>` (or an `href` ending in `.xsd` without `schematypens`) now binds the XSD to the document, like `xsi:noNamespaceSchemaLocation`: schema validation, completion and hover documentation were silently missing for documents using only an `xml-model` header. Other schema languages (RELAX NG, Schematron) are still ignored.
