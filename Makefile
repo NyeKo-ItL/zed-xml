@@ -65,7 +65,7 @@ reset-local-lsp:
 else
 install-local-lsp:
 	@set -eu; \
-	version=$$(sed -n 's/^version = "\\(.*\\)"/\\1/p' extension.toml | sed -n '1p'); \
+	version=$$(sed -n 's/^version = "\(.*\)"/\1/p' extension.toml | sed -n '1p'); \
 	[ -n "$$version" ] || { echo "cannot read the version of extension.toml" >&2; exit 1; }; \
 	case "$$(uname -s)" in \
 	  Darwin) data_dir="$${ZED_DATA_DIR:-$$HOME/Library/Application Support/Zed}" ;; \
@@ -78,8 +78,8 @@ install-local-lsp:
 	binary="target/local/release/xml-lsp"; target="$$work_dir/xml-lsp-$$version"; \
 	mkdir -p "$$work_dir"; rm -f "$$target" "$$target.sha256"; cp "$$binary" "$$target"; chmod +x "$$target"; \
 	if command -v sha256sum >/dev/null 2>&1; then hash=$$(sha256sum "$$target" | cut -d ' ' -f 1); else hash=$$(shasum -a 256 "$$target" | cut -d ' ' -f 1); fi; \
-	printf '%s\\n' "$$hash" > "$$target.sha256"; \
-	echo "Installed $$($$target --version) at $$target"; echo "Restart the language server in Zed (editor: restart language server)."
+	printf '%s\n' "$$hash" > "$$target.sha256"; \
+	echo "Installed $$("$$target" --version) at $$target"; echo "Restart the language server in Zed (editor: restart language server)."
 
 reset-local-lsp:
 	@set -eu; \
