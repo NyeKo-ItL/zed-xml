@@ -15,6 +15,7 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- `xml-lsp format [--check] [--tab-size N] [--tabs] FILE...` formats XML files from the command line (`-`: standard input to standard output; exit status 1 when `--check` finds a file to format, 2 on an error). Zed does not hand documents with very long lines (about 50 KB on one line and more) to the language server, so they cannot be formatted through LSP; the command runs the same formatter directly (5.6 MB on a single line in about 0.2 s).
 - Tests format two large single-line samples (`tests/large-samples`: 170 KB and 5.6 MB) through `textDocument/formatting` and `textDocument/rangeFormatting`, and check in the conformance suite that formatting keeps their content and is idempotent.
 - Code action `Copy XPath` (kind `source.copyXPath`, command `xml.copyXPath` of `workspace/executeCommand`): copies the XPath of the node at the cursor (`/root/item[2]/@id`: siblings of the same name are numbered, attributes give `/@name`, names are written as in the document) to the clipboard. The server declares `executeCommandProvider` and writes the clipboard itself with `pbcopy`, `wl-copy`/`xclip`/`xsel` or `clip`.
 - `make install-local-lsp` builds the server locally and installs it as the extension's cached binary (`xml-lsp --version` then reports `(local)`, which the extension accepts), to test server changes in Zed without `XML_LSP_PATH` or a release.

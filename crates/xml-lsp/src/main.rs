@@ -3,6 +3,7 @@
 mod analysis;
 mod builtin;
 mod catalog;
+mod cli;
 mod clipboard;
 mod code_actions;
 mod colors;
@@ -1024,6 +1025,13 @@ const LOCAL_BUILD_SUFFIX: &str = if option_env!("XML_LSP_LOCAL_BUILD").is_some()
 };
 
 fn main() {
+    let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "format")
+    {
+        std::process::exit(cli::run(&arguments[1..]));
+    }
     if std::env::args().any(|argument| argument == "--version") {
         println!(
             "xml-lsp {}{}",
