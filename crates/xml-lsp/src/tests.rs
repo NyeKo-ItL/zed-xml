@@ -1,7 +1,7 @@
 use super::*;
 use crate::dispatch::ResponseExt;
 use lsp_server::{Request, RequestId};
-use std::thread;
+use std::{fs, path::Path, thread};
 
 /// Requests only the tests send, to observe the server deterministically.
 pub(super) const TEST_METHOD_PREFIX: &str = "xml-lsp/test/";
@@ -4530,4 +4530,108 @@ fn offers_a_copy_xpath_action_and_rejects_unknown_commands() {
             )
             .is_err()
     );
+}
+
+/// The samples of `tests/large-samples` (a 170 KB document and a 5.6 MB one,
+/// both written on one or two lines) are formatted by `textDocument/formatting`
+/// and `textDocument/rangeFormatting`: the edits turn them into an indented,
+/// well-formed document with the same content, and formatting that result
+/// again changes nothing.
+#[test]
+fn formats_the_large_samples() {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/large-samples");
+    let mut samples = fs::read_dir(&directory)
+        .expect("the large samples should be present")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "xml"))
+        .collect::<Vec<_>>();
+    samples.sort();
+    assert_eq!(samples.len(), 2, "unexpected samples: {samples:?}");
+
+    let (client, _, server_thread) = start_server(json!({"capabilities": {}}));
+    let mut id = 1;
+    for (index, path) in samples.iter().enumerate() {
+        let source = fs::read_to_string(path).expect("the sample should be readable");
+        let uri = format!("file:///large-samples/{index}.xml");
+        let lines = source.lines().count();
+        client.notify(
+            DID_OPEN_METHOD,
+            json!({"textDocument": {"uri": uri, "text": source}}),
+        );
+        let options = json!({"tabSize": 2, "insertSpaces": true});
+
+        id += 1;
+        let edits = client.request(
+            id,
+            FORMATTING_METHOD,
+            json!({"textDocument": {"uri": uri}, "options": options}),
+        );
+        assert!(
+            edits.as_array().is_some_and(|edits| !edits.is_empty()),
+            "{path:?}: formatting returned no edit"
+        );
+        let formatted = formatting::apply_edits(&source, &edits);
+        let expected = xml_core::format_xml_with(
+            &source,
+            &xml_core::FormatOptions {
+                tab_size: 2,
+                ..Default::default()
+            },
+        )
+        .expect("the sample should be formatted by the core formatter");
+        assert_eq!(
+            formatted, expected,
+            "{path:?}: edits differ from the formatter"
+        );
+        assert!(
+            formatted.lines().count() > lines * 10,
+            "{path:?}: the sample should be spread over many lines"
+        );
+        assert!(
+            xml_core::parse_xml(&formatted).diagnostics.is_empty(),
+            "{path:?}: the formatted sample is not well-formed"
+        );
+
+        // Idempotence through the server: format the formatted text.
+        let reformatted_uri = format!("file:///large-samples/{index}-formatted.xml");
+        client.notify(
+            DID_OPEN_METHOD,
+            json!({"textDocument": {"uri": reformatted_uri, "text": formatted}}),
+        );
+        id += 1;
+        let again = client.request(
+            id,
+            FORMATTING_METHOD,
+            json!({"textDocument": {"uri": reformatted_uri}, "options": options}),
+        );
+        assert_eq!(
+            again,
+            json!([]),
+            "{path:?}: formatting twice must not change the text"
+        );
+
+        // Range formatting of the whole document gives the same text.
+        let end = crate::selection::LineIndex::new(&source).position(&source, source.len());
+        id += 1;
+        let range_edits = client.request(
+            id,
+            RANGE_FORMATTING_METHOD,
+            json!({
+                "textDocument": {"uri": uri},
+                "range": {"start": {"line": 0, "character": 0}, "end": end},
+                "options": options,
+            }),
+        );
+        assert!(
+            range_edits
+                .as_array()
+                .is_some_and(|edits| !edits.is_empty()),
+            "{path:?}: range formatting returned no edit"
+        );
+    }
+
+    assert_eq!(client.request(9999, "shutdown", Value::Null), Value::Null);
+    client.notify(EXIT_METHOD, Value::Null);
+    server_thread.join().expect("server thread should stop");
 }
