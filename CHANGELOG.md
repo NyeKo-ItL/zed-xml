@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-20
+
 ### Fixed
 
 - Formatting a large document written on one or a few lines (a 5.6 MB single-line export) returned a single edit replacing the whole text, which Zed did not apply. When the formatting only changes whitespace, the server now answers with edits of about 4 KB each; the other cases keep the line-based difference.
@@ -152,7 +154,8 @@ Versions 0.7.0 and 0.8.0 were tagged while the release pipeline was being set up
 - Native Rust language server `xml-lsp` (crates `xml-core`, `xsd-core`, `xml-lsp`) replacing LemMinX (#1): well-formedness diagnostics, formatting, completion with automatic closing tags, document symbols, hover, go to definition and references, incremental synchronization.
 - XSD support: `xsi:schemaLocation`/`xsi:noNamespaceSchemaLocation` resolution, recursive `xs:include`/`xs:import`, schema cache, validation of content models (sequence, choice, all, groups, extensions, references, wildcards), attributes (required, fixed, attribute groups), built-in and restricted simple types (length, pattern, bounds, digits, enumerations, whitespace, lists and unions), nillable and fixed elements; schema-aware completion of elements, attributes and enumeration values; revalidation of open documents when a schema changes.
 
-[Unreleased]: https://github.com/NyeKo-ItL/zed-xml/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/NyeKo-ItL/zed-xml/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/NyeKo-ItL/zed-xml/compare/v0.16.2...v1.1.0
 [0.9.0]: https://github.com/NyeKo-ItL/zed-xml/compare/v0.6.0...v0.9.0
 [0.6.0]: https://github.com/NyeKo-ItL/zed-xml/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/NyeKo-ItL/zed-xml/compare/v0.4.0...v0.5.0
