@@ -15,6 +15,7 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- README section "Formatting large or single-line files": Zed does not hand such documents to the language server, so they are formatted with Zed's external formatter calling `xml-lsp format -` (setting, caveats and the `PATH` link for the binary).
 - Code action `Format XML file on disk` (`source.formatFile`, command `xml.formatFile`) for an XML file that the client never opened on the server or that has a line longer than 10 000 bytes: it formats the file on disk (UTF-8, local, XML suffix only), and the editor reloads it.
 - `xml-lsp format [--check] [--tab-size N] [--tabs] FILE...` formats XML files from the command line (`-`: standard input to standard output; exit status 1 when `--check` finds a file to format, 2 on an error). Zed does not hand documents with very long lines (about 50 KB on one line and more) to the language server, so they cannot be formatted through LSP; the command runs the same formatter directly (5.6 MB on a single line in about 0.2 s).
 - Tests format two large single-line samples (`tests/large-samples`: 170 KB and 5.6 MB) through `textDocument/formatting` and `textDocument/rangeFormatting`, and check in the conformance suite that formatting keeps their content and is idempotent.

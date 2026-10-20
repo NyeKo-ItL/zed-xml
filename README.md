@@ -2,6 +2,8 @@
 
 XML language support for Zed, including XML, XSD, XSLT, SVG, WSDL, RELAX NG, XHTML, XAML, plist, storyboards, XLIFF, KML, GPX, Android XML, .NET and WiX project files and DTD files (see [File types](#file-types)), powered by a native Rust language server (`xml-lsp`) with XSD, DTD and XML catalog support.
 
+> **Large or single-line XML files** (an export written on one line, several MB): in our tests Zed did not hand such documents to the language server, so there is no completion or LSP formatting for them. Format them without the server, with Zed's external formatter and `xml-lsp format`: see [Formatting large or single-line files](#formatting-large-or-single-line-files).
+
 ## Installation
 
 Install the extension from Zed's extensions page (`zed: extensions`), or from a clone of this repository with `zed: install dev extension` (see [CONTRIBUTING.md](CONTRIBUTING.md#development-extension)). The first time an XML file is opened, the extension downloads the `xml-lsp` binary matching its version from the [GitHub releases](https://github.com/NyeKo-ItL/zed-xml/releases) (Linux x86_64 and aarch64, macOS x86_64 and Apple silicon, Windows x86_64 and arm64) and verifies its SHA-256 checksum before starting it. On other platforms (such as 32-bit x86), build the server yourself and point `XML_LSP_PATH` at it (see [Language server](#language-server)).
@@ -138,6 +140,37 @@ Document colors are shown as inlay swatches by default. Change how Zed renders t
 }
 ```
 
+## Formatting large or single-line files
+
+Zed may not start the language server, or not send it the document, when a file has very long lines (we observed it with a 10 KB file on one line and with files of several MB). The server then cannot format the file. `xml-lsp format` runs the same formatter without the server (about 0.2 s for 5.6 MB on a single line), and Zed can call it as an external formatter, which works for every XML file and does not depend on the server:
+
+1. Put the binary on your `PATH`. Zed runs commands through the shell, so a path with a space (`Application Support`) does not work: `ln -sf "$HOME/Library/Application Support/Zed/extensions/work/xml-tools/xml-lsp-<version>" ~/.local/bin/xml-lsp` (macOS; the binary is in the extension work directory of your platform, or build it with `cargo build --release -p xml-lsp`). Check it with `xml-lsp --version`.
+2. In `settings.json`:
+
+   ```json
+   {
+     "languages": {
+       "XML": {
+         "formatter": {
+           "external": {
+             "command": "xml-lsp",
+             "arguments": ["format", "-"]
+           }
+         }
+       }
+     }
+   }
+   ```
+
+   Then run `editor: format` (add `"format_on_save": "on"` to format on every save).
+
+Things to know:
+
+- With this setting every XML file is formatted by this command, not by the server: range formatting and the `xml.format.*` settings no longer apply. The command only takes `--tab-size N` and `--tabs` (add them to `arguments`).
+- A document that is not well-formed is left unchanged (the command exits with status 2 and writes nothing).
+- Without the external formatter, the same command works as a task (`.zed/tasks.json`: `{"label": "Format XML", "command": "xml-lsp", "args": ["format", "$ZED_FILE"], "reveal": "no_focus"}`) or from a terminal: `xml-lsp format [--check] [--tab-size N] [--tabs] FILE...`, which rewrites the files in place.
+- Editing an open file while a formatter runs on save rewrites it: keep `format_on_save` off in directories whose files must stay byte-exact (test fixtures, for example).
+
 ## Configuration
 
 The server reads LemMinX-style settings from an `xml` section. In Zed, put them under `lsp.xml-lsp.settings` (the `xml` key is optional); the extension sends them as `initializationOptions` and answers the server's `workspace/configuration` requests, and changes are applied live through `workspace/didChangeConfiguration` (diagnostics of open documents are re-published when validation settings change). `lsp.xml-lsp.initialization_options`, when set, is sent as-is instead. Every setting is optional and the defaults keep the historical behaviour.
@@ -190,6 +223,7 @@ See [docs/configuration.md](docs/configuration.md) for the full reference and [d
 - **Unsupported platform**: the error lists the platforms with prebuilt binaries; elsewhere, build the server (`cargo build -p xml-lsp --release`) and set `XML_LSP_PATH`.
 - **Wrong or outdated binary**: `lsp.xml-lsp.binary.path`, then `XML_LSP_PATH`, always win, so make sure they point at an up-to-date build or remove them. Without them, a cached binary whose `xml-lsp --version` differs from the extension version is replaced by the matching release. `XML_LSP_PATH`, `XML_LSP_DOWNLOAD_URL` and `XML_LSP_DOWNLOAD_SHA256` are read from the shell environment of the project, so set them in the shell Zed is launched from.
 - **No XSD validation or completion**: check that the document declares `xsi:schemaLocation`/`xsi:noNamespaceSchemaLocation`, or add an `xml.fileAssociations` entry. Remote (`http(s)://`) schemas are not downloaded: map them with `xml.catalogs` (a warning diagnostic points at unmapped locations).
+- **Large or single-line file is not formatted, no `xml-lsp` in the status bar**: Zed does not send such documents to the server. Use the external formatter described in [Formatting large or single-line files](#formatting-large-or-single-line-files).
 - **Formatting does nothing**: make sure `formatter` is `language_server` for XML (see [Editor settings](#editor-settings)) and that `xml.format.enabled` is not `false`. Regions that are not well-formed are left untouched by range formatting.
 - **Folding ranges from the server are not used**: set `document_folding_ranges` to `"on"` for XML.
 - **Detailed traces**: `dev: open language server logs` shows the LSP messages exchanged with `xml-lsp`; the server logs errors (unreadable catalogs, schema loading failures) to its stderr, visible there too.
