@@ -1,0 +1,8 @@
+[
+  {
+    "label": "Format XML",
+    "command": "xml-lsp",
+    "args": ["format", "$ZED_FILE"],
+    "reveal": "no_focus"
+  }
+]

@@ -15,6 +15,14 @@ pub struct TextChange {
 /// favour of a single replacement.
 const MAX_EDIT_DISTANCE: usize = 1024;
 
+/// Size (old plus new text, in bytes) of a replacement beyond which
+/// [`split_whitespace_change`] is tried.
+const LARGE_CHANGE: usize = 32 * 1024;
+
+/// Span of old text covered by one replacement produced by
+/// [`split_whitespace_change`].
+const CHUNK_SPAN: usize = 4 * 1024;
+
 /// Computes the sorted, disjoint replacements that turn `old` into
 /// `new`.
 ///
@@ -58,7 +66,14 @@ pub fn diff_text(old: &str, new: &str) -> Vec<TextChange> {
         if old_match > old_index || new_match > new_index {
             let range = old_starts[prefix + old_index]..old_starts[prefix + old_match];
             let text = &new[new_starts[prefix + new_index]..new_starts[prefix + new_match]];
-            changes.push(refine(old, range, text));
+            let change = refine(old, range, text);
+            if change.range.len() + change.text.len() > LARGE_CHANGE
+                && let Some(chunks) = split_whitespace_change(old, &change)
+            {
+                changes.extend(chunks);
+            } else {
+                changes.push(change);
+            }
         }
         old_index = old_match + 1;
         new_index = new_match + 1;
@@ -122,6 +137,63 @@ fn refine(old: &str, range: Range<usize>, text: &str) -> TextChange {
         range: range.start + prefix..range.end - suffix,
         text: text[prefix..text.len() - suffix].to_owned(),
     }
+}
+
+/// Splits a large replacement that only inserts, removes or changes
+/// whitespace (a document written on one line and indented by the
+/// formatter) into replacements of at most about [`CHUNK_SPAN`] bytes of old
+/// text. An editor that diffs each replacement itself (Zed does) then works
+/// on small pieces instead of on the whole document. `None` when the two
+/// texts differ by anything other than whitespace.
+fn split_whitespace_change(old: &str, change: &TextChange) -> Option<Vec<TextChange>> {
+    let before = &old.as_bytes()[change.range.clone()];
+    let after = change.text.as_bytes();
+    let is_space = |byte: u8| matches!(byte, b' ' | b'\t' | b'\r' | b'\n');
+
+    // Differing whitespace runs as (old start, old end, new start, new end).
+    let mut runs: Vec<[usize; 4]> = Vec::new();
+    let (mut i, mut j) = (0, 0);
+    loop {
+        while i < before.len() && j < after.len() && before[i] == after[j] {
+            i += 1;
+            j += 1;
+        }
+        if i == before.len() && j == after.len() {
+            break;
+        }
+        let (mut start_old, mut start_new) = (i, j);
+        let mismatch = (i, j);
+        // A position cannot designate the point inside a CRLF.
+        if start_old > 0 && before[start_old - 1] == b'\r' && before.get(start_old) == Some(&b'\n')
+        {
+            start_old -= 1;
+            start_new -= 1;
+        }
+        while i < before.len() && is_space(before[i]) {
+            i += 1;
+        }
+        while j < after.len() && is_space(after[j]) {
+            j += 1;
+        }
+        if (i, j) == mismatch {
+            return None;
+        }
+        runs.push([start_old, i, start_new, j]);
+    }
+
+    let mut chunks = Vec::new();
+    let mut runs = runs.into_iter().peekable();
+    while let Some([start_old, mut end_old, start_new, mut end_new]) = runs.next() {
+        while let Some(next) = runs.next_if(|next| next[0] - start_old <= CHUNK_SPAN) {
+            end_old = next[1];
+            end_new = next[3];
+        }
+        chunks.push(TextChange {
+            range: change.range.start + start_old..change.range.start + end_old,
+            text: change.text[start_new..end_new].to_owned(),
+        });
+    }
+    Some(chunks)
 }
 
 /// Pairs of identical lines of a shortest edit script (Myers), or `None` if
@@ -222,6 +294,42 @@ mod tests {
     }
 
     #[test]
+    fn splits_a_large_whitespace_only_change_into_chunks() {
+        let record = "<item><name>a</name></item>";
+        let old = format!("<root>{}</root>", record.repeat(2000));
+        let new = format!("<root>\n{}</root>", format!("  {record}\n").repeat(2000));
+        let changes = check(&old, &new);
+        assert!(changes.len() > 5, "{} changes", changes.len());
+        for change in &changes {
+            assert!(change.range.len() < 2 * CHUNK_SPAN, "{:?}", change.range);
+        }
+    }
+
+    #[test]
+    fn splits_a_large_change_with_crlf_and_non_ascii_text() {
+        let record = "<é>ü😀</é>";
+        let old = format!("<r>{}</r>", record.repeat(5000));
+        let new = format!("<r>\r\n{}</r>\r\n", format!("\t{record}\r\n").repeat(5000));
+        let changes = check(&old, &new);
+        assert!(changes.len() > 5);
+        for change in &changes {
+            assert!(old.is_char_boundary(change.range.start));
+            assert!(old.is_char_boundary(change.range.end));
+            assert!(
+                old.as_bytes().get(change.range.start.wrapping_sub(1)) != Some(&b'\r')
+                    || old.as_bytes().get(change.range.start) != Some(&b'\n')
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_one_replacement_when_a_large_change_is_not_whitespace_only() {
+        let old = format!("<r>{}</r>", "<a></a>".repeat(8000));
+        let new = format!("<r>\n{}</r>\n", "  <a/>\n".repeat(8000));
+        assert_eq!(check(&old, &new).len(), 1);
+    }
+
+    #[test]
     fn returns_no_change_for_identical_texts() {
         assert!(diff_text("<a/>\n", "<a/>\n").is_empty());
         assert!(diff_text("", "").is_empty());
@@ -287,7 +395,7 @@ mod tests {
     fn falls_back_to_a_single_change_for_large_distances() {
         let old = (0..3000).map(|i| format!("<a{i}/>\n")).collect::<String>();
         let new = (0..3000)
-            .map(|i| format!("  <a{i}/>\n"))
+            .map(|i| format!("  <b{i}/>\n"))
             .collect::<String>();
         let changes = check(&old, &new);
         assert_eq!(changes.len(), 1);

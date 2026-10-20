@@ -1,7 +1,7 @@
 use super::*;
 use crate::dispatch::ResponseExt;
 use lsp_server::{Request, RequestId};
-use std::thread;
+use std::{fs, path::Path, thread};
 
 /// Requests only the tests send, to observe the server deterministically.
 pub(super) const TEST_METHOD_PREFIX: &str = "xml-lsp/test/";
@@ -3082,7 +3082,7 @@ fn serves_initialize_diagnostics_shutdown_and_exit() {
                         "selectionRangeProvider": true,
                         "documentLinkProvider": {"resolveProvider": false},
                         "codeActionProvider": {"codeActionKinds": ["quickfix", "refactor", "source"]},
-                        "executeCommandProvider": {"commands": ["xml.copyXPath"]},
+                        "executeCommandProvider": {"commands": ["xml.copyXPath", "xml.formatFile"]},
                         "workspaceSymbolProvider": true,
                         "colorProvider": true,
                         "workspace": {"workspaceFolders": {"supported": true, "changeNotifications": true}},
@@ -4530,4 +4530,225 @@ fn offers_a_copy_xpath_action_and_rejects_unknown_commands() {
             )
             .is_err()
     );
+}
+
+/// The samples of `tests/large-samples` (a 170 KB document and a 5.6 MB one,
+/// both written on one or two lines) are formatted by `textDocument/formatting`
+/// and `textDocument/rangeFormatting`: the edits turn them into an indented,
+/// well-formed document with the same content, and formatting that result
+/// again changes nothing.
+#[test]
+fn formats_the_large_samples() {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/large-samples");
+    let mut samples = fs::read_dir(&directory)
+        .expect("the large samples should be present")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "xml"))
+        .collect::<Vec<_>>();
+    samples.sort();
+    assert_eq!(samples.len(), 2, "unexpected samples: {samples:?}");
+
+    let (client, _, server_thread) = start_server(json!({"capabilities": {}}));
+    let mut id = 1;
+    for (index, path) in samples.iter().enumerate() {
+        let source = fs::read_to_string(path).expect("the sample should be readable");
+        let uri = format!("file:///large-samples/{index}.xml");
+        let lines = source.lines().count();
+        client.notify(
+            DID_OPEN_METHOD,
+            json!({"textDocument": {"uri": uri, "text": source}}),
+        );
+        let options = json!({"tabSize": 2, "insertSpaces": true});
+
+        id += 1;
+        let edits = client.request(
+            id,
+            FORMATTING_METHOD,
+            json!({"textDocument": {"uri": uri}, "options": options}),
+        );
+        assert!(
+            edits.as_array().is_some_and(|edits| !edits.is_empty()),
+            "{path:?}: formatting returned no edit"
+        );
+        // `apply_edits` converts every position from the start of the document,
+        // which is quadratic on a 5.6 MB line: use one `LineIndex`.
+        let line_index = crate::selection::LineIndex::new(&source);
+        let offset = |position: &Value| {
+            line_index.offset(
+                &source,
+                position["line"].as_u64().unwrap() as usize,
+                position["character"].as_u64().unwrap() as usize,
+            )
+        };
+        let mut formatted = source.clone();
+        for edit in edits.as_array().unwrap().iter().rev() {
+            formatted.replace_range(
+                offset(&edit["range"]["start"])..offset(&edit["range"]["end"]),
+                edit["newText"].as_str().unwrap(),
+            );
+        }
+        assert!(
+            edits.as_array().unwrap().len() > 1,
+            "{path:?}: a large single-line document should be edited in several pieces"
+        );
+        let expected = xml_core::format_xml_with(
+            &source,
+            &xml_core::FormatOptions {
+                tab_size: 2,
+                ..Default::default()
+            },
+        )
+        .expect("the sample should be formatted by the core formatter");
+        assert_eq!(
+            formatted, expected,
+            "{path:?}: edits differ from the formatter"
+        );
+        assert!(
+            formatted.lines().count() > lines * 10,
+            "{path:?}: the sample should be spread over many lines"
+        );
+        assert!(
+            xml_core::parse_xml(&formatted).diagnostics.is_empty(),
+            "{path:?}: the formatted sample is not well-formed"
+        );
+
+        // Idempotence through the server: format the formatted text.
+        let reformatted_uri = format!("file:///large-samples/{index}-formatted.xml");
+        client.notify(
+            DID_OPEN_METHOD,
+            json!({"textDocument": {"uri": reformatted_uri, "text": formatted}}),
+        );
+        id += 1;
+        let again = client.request(
+            id,
+            FORMATTING_METHOD,
+            json!({"textDocument": {"uri": reformatted_uri}, "options": options}),
+        );
+        assert_eq!(
+            again,
+            json!([]),
+            "{path:?}: formatting twice must not change the text"
+        );
+
+        // Range formatting of the whole document gives the same text.
+        let end = crate::selection::LineIndex::new(&source).position(&source, source.len());
+        id += 1;
+        let range_edits = client.request(
+            id,
+            RANGE_FORMATTING_METHOD,
+            json!({
+                "textDocument": {"uri": uri},
+                "range": {"start": {"line": 0, "character": 0}, "end": end},
+                "options": options,
+            }),
+        );
+        assert!(
+            range_edits
+                .as_array()
+                .is_some_and(|edits| !edits.is_empty()),
+            "{path:?}: range formatting returned no edit"
+        );
+    }
+
+    assert_eq!(client.request(9999, "shutdown", Value::Null), Value::Null);
+    client.notify(EXIT_METHOD, Value::Null);
+    server_thread.join().expect("server thread should stop");
+}
+
+/// A document the client never opened (Zed does not send documents with very
+/// long lines) gets a code action formatting the file on disk, and
+/// `xml.formatFile` rewrites it; other files are refused.
+#[test]
+fn formats_an_unopened_file_on_disk() {
+    let directory =
+        std::env::temp_dir().join(format!("xml-lsp-format-file-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&directory);
+    fs::create_dir_all(&directory).unwrap();
+    let xml = directory.join("one-line.xml");
+    fs::write(&xml, "<a><b>x</b></a>").unwrap();
+    let text = directory.join("notes.txt");
+    fs::write(&text, "<a><b>x</b></a>").unwrap();
+    let uri = path_to_uri;
+
+    let (client, _, server_thread) = start_server(json!({"capabilities": {}}));
+    let range = json!({"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}});
+    let actions = client.request(
+        2,
+        CODE_ACTION_METHOD,
+        json!({"textDocument": {"uri": uri(&xml)}, "range": range, "context": {"diagnostics": []}}),
+    );
+    let action = &actions.as_array().unwrap()[0];
+    assert_eq!(action["kind"], "source.formatFile");
+    assert_eq!(action["command"]["command"], "xml.formatFile");
+
+    // An open document is offered the action only with a very long line.
+    let long_uri = uri(&directory.join("long.xml"));
+    let long = format!("<r>{}</r>", "<a>x</a>".repeat(3_000));
+    fs::write(directory.join("long.xml"), &long).unwrap();
+    fs::write(directory.join("short.xml"), "<r><a>x</a></r>").unwrap();
+    client.notify(
+        DID_OPEN_METHOD,
+        json!({"textDocument": {"uri": long_uri, "text": long}}),
+    );
+    let kinds = |id: i32, uri: &str| -> Vec<String> {
+        let actions = client.request(
+            id,
+            CODE_ACTION_METHOD,
+            json!({"textDocument": {"uri": uri}, "range": range, "context": {"diagnostics": []}}),
+        );
+        actions
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|action| action["kind"].as_str().map(str::to_owned))
+            .collect()
+    };
+    assert!(kinds(20, &long_uri).contains(&"source.formatFile".to_owned()));
+    let short_uri = uri(&directory.join("short.xml"));
+    client.notify(
+        DID_OPEN_METHOD,
+        json!({"textDocument": {"uri": short_uri, "text": "<r><a>x</a></r>"}}),
+    );
+    assert!(!kinds(21, &short_uri).contains(&"source.formatFile".to_owned()));
+
+    let none = client.request(
+        3,
+        CODE_ACTION_METHOD,
+        json!({"textDocument": {"uri": uri(&text)}, "range": range, "context": {"diagnostics": []}}),
+    );
+    assert_eq!(none, json!([]));
+
+    client.request(
+        4,
+        EXECUTE_COMMAND_METHOD,
+        json!({"command": "xml.formatFile", "arguments": [uri(&xml)]}),
+    );
+    assert_eq!(fs::read_to_string(&xml).unwrap(), "<a>\n  <b>x</b>\n</a>\n");
+
+    // The command never writes a file that is not XML.
+    let refused = {
+        client.send(
+            Request {
+                id: RequestId::from(5),
+                method: EXECUTE_COMMAND_METHOD.to_owned(),
+                params: json!({"command": "xml.formatFile", "arguments": [uri(&text)]}),
+            }
+            .into(),
+        );
+        loop {
+            match client.next() {
+                Message::Response(response) => break response,
+                Message::Notification(_) => {}
+                message => panic!("unexpected message {message:?}"),
+            }
+        }
+    };
+    assert!(refused.error().is_some());
+    assert_eq!(fs::read_to_string(&text).unwrap(), "<a><b>x</b></a>");
+
+    assert_eq!(client.request(6, "shutdown", Value::Null), Value::Null);
+    client.notify(EXIT_METHOD, Value::Null);
+    server_thread.join().expect("server thread should stop");
+    let _ = fs::remove_dir_all(&directory);
 }

@@ -4,8 +4,11 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-20
+
 ### Fixed
 
+- Formatting a large document written on one or a few lines (a 5.6 MB single-line export) returned a single edit replacing the whole text, which Zed did not apply. When the formatting only changes whitespace, the server now answers with edits of about 4 KB each; the other cases keep the line-based difference.
 - Zed showed no element or end tag suggestion while typing (`<Int`, `</Cus`): the language declared `<`, `/`, `>`, space, `=`, `"` and `?` as completion query characters, so Zed filtered every item against the whole text before the cursor (`    <CustomsHeader></Cus`). The setting is removed; the query is now the name being typed.
 - Completing a start tag name (`<Int|`) now offers the elements the XSD allows at that position (content model of the parent run over the preceding siblings, global elements at the root, prefixes resolved), instead of every name of the schema; the end tag completion (`</Cus|`) replaces the typed name and adds the `>` instead of inserting `</` twice.
 - `<?xml-model href="..." schematypens="http://www.w3.org/2001/XMLSchema"?>` (or an `href` ending in `.xsd` without `schematypens`) now binds the XSD to the document, like `xsi:noNamespaceSchemaLocation`: schema validation, completion and hover documentation were silently missing for documents using only an `xml-model` header. Other schema languages (RELAX NG, Schematron) are still ignored.
@@ -14,6 +17,10 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- README section "Formatting large or single-line files": Zed does not hand such documents to the language server, so they are formatted with Zed's external formatter calling `xml-lsp format -` (setting, caveats and the `PATH` link for the binary).
+- Code action `Format XML file on disk` (`source.formatFile`, command `xml.formatFile`) for an XML file that the client never opened on the server or that has a line longer than 10 000 bytes: it formats the file on disk (UTF-8, local, XML suffix only), and the editor reloads it.
+- `xml-lsp format [--check] [--tab-size N] [--tabs] FILE...` formats XML files from the command line (`-`: standard input to standard output; exit status 1 when `--check` finds a file to format, 2 on an error). Zed does not hand documents with very long lines (about 50 KB on one line and more) to the language server, so they cannot be formatted through LSP; the command runs the same formatter directly (5.6 MB on a single line in about 0.2 s).
+- Tests format two large single-line samples (`tests/large-samples`: 170 KB and 5.6 MB) through `textDocument/formatting` and `textDocument/rangeFormatting`, and check in the conformance suite that formatting keeps their content and is idempotent.
 - Code action `Copy XPath` (kind `source.copyXPath`, command `xml.copyXPath` of `workspace/executeCommand`): copies the XPath of the node at the cursor (`/root/item[2]/@id`: siblings of the same name are numbered, attributes give `/@name`, names are written as in the document) to the clipboard. The server declares `executeCommandProvider` and writes the clipboard itself with `pbcopy`, `wl-copy`/`xclip`/`xsel` or `clip`.
 - `make install-local-lsp` builds the server locally and installs it as the extension's cached binary (`xml-lsp --version` then reports `(local)`, which the extension accepts), to test server changes in Zed without `XML_LSP_PATH` or a release.
 - Formatting option `xml.format.preserveEmptyContent` (as in LemMinX): elements whose content is only whitespace keep it as written. Off by default.
@@ -147,7 +154,8 @@ Versions 0.7.0 and 0.8.0 were tagged while the release pipeline was being set up
 - Native Rust language server `xml-lsp` (crates `xml-core`, `xsd-core`, `xml-lsp`) replacing LemMinX (#1): well-formedness diagnostics, formatting, completion with automatic closing tags, document symbols, hover, go to definition and references, incremental synchronization.
 - XSD support: `xsi:schemaLocation`/`xsi:noNamespaceSchemaLocation` resolution, recursive `xs:include`/`xs:import`, schema cache, validation of content models (sequence, choice, all, groups, extensions, references, wildcards), attributes (required, fixed, attribute groups), built-in and restricted simple types (length, pattern, bounds, digits, enumerations, whitespace, lists and unions), nillable and fixed elements; schema-aware completion of elements, attributes and enumeration values; revalidation of open documents when a schema changes.
 
-[Unreleased]: https://github.com/NyeKo-ItL/zed-xml/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/NyeKo-ItL/zed-xml/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/NyeKo-ItL/zed-xml/compare/v0.16.2...v1.1.0
 [0.9.0]: https://github.com/NyeKo-ItL/zed-xml/compare/v0.6.0...v0.9.0
 [0.6.0]: https://github.com/NyeKo-ItL/zed-xml/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/NyeKo-ItL/zed-xml/compare/v0.4.0...v0.5.0
