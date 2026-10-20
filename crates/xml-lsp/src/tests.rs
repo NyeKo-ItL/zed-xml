@@ -4682,6 +4682,36 @@ fn formats_an_unopened_file_on_disk() {
     assert_eq!(action["kind"], "source.formatFile");
     assert_eq!(action["command"]["command"], "xml.formatFile");
 
+    // An open document is offered the action only with a very long line.
+    let long_uri = uri(&directory.join("long.xml"));
+    let long = format!("<r>{}</r>", "<a>x</a>".repeat(3_000));
+    fs::write(directory.join("long.xml"), &long).unwrap();
+    fs::write(directory.join("short.xml"), "<r><a>x</a></r>").unwrap();
+    client.notify(
+        DID_OPEN_METHOD,
+        json!({"textDocument": {"uri": long_uri, "text": long}}),
+    );
+    let kinds = |id: i32, uri: &str| -> Vec<String> {
+        let actions = client.request(
+            id,
+            CODE_ACTION_METHOD,
+            json!({"textDocument": {"uri": uri}, "range": range, "context": {"diagnostics": []}}),
+        );
+        actions
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|action| action["kind"].as_str().map(str::to_owned))
+            .collect()
+    };
+    assert!(kinds(20, &long_uri).contains(&"source.formatFile".to_owned()));
+    let short_uri = uri(&directory.join("short.xml"));
+    client.notify(
+        DID_OPEN_METHOD,
+        json!({"textDocument": {"uri": short_uri, "text": "<r><a>x</a></r>"}}),
+    );
+    assert!(!kinds(21, &short_uri).contains(&"source.formatFile".to_owned()));
+
     let none = client.request(
         3,
         CODE_ACTION_METHOD,

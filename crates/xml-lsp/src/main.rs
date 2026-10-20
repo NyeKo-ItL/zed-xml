@@ -407,7 +407,7 @@ impl XmlLanguageServer {
         let uri = params.get("textDocument")?.get("uri")?.as_str()?;
         let Some(source) = self.documents.get(uri).cloned() else {
             let context = params.get("context").unwrap_or(&Value::Null);
-            return Some(Value::Array(code_actions::unopened_document_actions(
+            return Some(Value::Array(code_actions::format_file_actions(
                 uri, context,
             )));
         };
@@ -428,6 +428,9 @@ impl XmlLanguageServer {
         let mut dtd_actions = code_actions::Actions::new(uri, &source, range, request_context);
         dtd::code_actions(&mut dtd_actions, grammar.as_ref());
         actions.extend(dtd_actions.actions);
+        if code_actions::has_very_long_line(&source) {
+            actions.extend(code_actions::format_file_actions(uri, request_context));
+        }
         Some(Value::Array(actions))
     }
 

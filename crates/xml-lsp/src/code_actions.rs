@@ -140,10 +140,20 @@ fn formattable_path(uri: &str) -> Option<std::path::PathBuf> {
         .then_some(path)
 }
 
-/// Code actions of a document that the client never opened (Zed does not
-/// send documents with very long lines to the server): formatting the file
-/// on disk, since the server has no text to compute edits from.
-pub(crate) fn unopened_document_actions(uri: &str, request_context: &Value) -> Vec<Value> {
+/// Length of a line beyond which `source.formatFile` is offered for an open
+/// document (Zed handles such lines badly and may not use the server).
+const VERY_LONG_LINE: usize = 10_000;
+
+/// Whether `source` has a line longer than [`VERY_LONG_LINE`] bytes.
+pub(crate) fn has_very_long_line(source: &str) -> bool {
+    source.len() > VERY_LONG_LINE && source.split('\n').any(|line| line.len() > VERY_LONG_LINE)
+}
+
+/// The `source.formatFile` action of a document that the client never
+/// opened (Zed does not always send documents with very long lines to the
+/// server) or that has a very long line: formatting the file on disk, since
+/// there may be no text to compute edits from.
+pub(crate) fn format_file_actions(uri: &str, request_context: &Value) -> Vec<Value> {
     let wanted = request_context
         .get("only")
         .and_then(Value::as_array)
