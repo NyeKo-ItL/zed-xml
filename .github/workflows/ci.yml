@@ -515,9 +515,17 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     steps:
+      # The merged pull request is not a tag push, so the action cannot read
+      # the tag from the context: pass it (release/version-sync-vX.Y.Z -> vX.Y.Z).
+      - name: Read the release tag
+        id: tag
+        env:
+          RELEASE_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: echo "release_tag=${RELEASE_BRANCH#release/version-sync-}" >> "$GITHUB_OUTPUT"
       - uses: huacnlee/zed-extension-action@v2
         with:
           extension-name: xml-tools
+          tag: ${{ steps.tag.outputs.release_tag }}
           push-to: ${{ vars.ZED_REGISTRY_FORK }}
         env:
           COMMITTER_TOKEN: ${{ secrets.COMMITTER_TOKEN }}
