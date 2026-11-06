@@ -4,20 +4,20 @@ Thanks for helping improve XML support in Zed. This guide covers the development
 
 ## Repository layout
 
-| Path | Content |
-|------|---------|
-| `extension.toml`, `src/lib.rs` | The Zed extension (a `wasm32-wasip2` module): grammars, languages and the command that starts `xml-lsp`. |
-| `languages/xml`, `languages/dtd` | Zed language definitions and tree-sitter queries (highlights, brackets, outline, indents, injections, overrides, text objects). |
-| `crates/xml-core` | XML parsing, tag scanner, well-formedness checks, formatter, text diff, basic completion. |
-| `crates/xsd-core` | XSD parsing, schema resolution, component model, validation and completion. |
-| `crates/dtd-core` | DTD parsing, entity expansion limits, content-model automata and validation. |
-| `crates/xpath-core` | XPath 1.0/2.0/3.1 tokenizer and parser (syntax errors, variable and function references) and XSLT value templates. |
-| `crates/xml-lsp` | The native language server binary (`xml-lsp`). |
-| `crates/xml-conformance` | Test-only crate: specification cases, real-world documents, parser corpora and the W3C/libxml2 conformance suites, with baselines of known failures. |
-| `tests/fixtures` | Shared test inputs: small hand-written cases, `real-world/` documents and `corpus/` files (sources and licences in `SOURCES.md`). |
-| `scripts/fetch-test-suites.sh` | Downloads the pinned external conformance suites into `target/test-suites`. |
-| `docs/` | Detailed user documentation (settings reference). |
-| `.github/workflows/ci.yml` | Pull request checks and the release pipeline. |
+| Path                             | Content                                                                                                                                              |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `extension.toml`, `src/lib.rs`   | The Zed extension (a `wasm32-wasip2` module): grammars, languages and the command that starts `xml-lsp`.                                             |
+| `languages/xml`, `languages/dtd` | Zed language definitions and tree-sitter queries (highlights, brackets, outline, indents, injections, overrides, text objects).                      |
+| `crates/xml-core`                | XML parsing, tag scanner, well-formedness checks, formatter, text diff, basic completion.                                                            |
+| `crates/xsd-core`                | XSD parsing, schema resolution, component model, validation and completion.                                                                          |
+| `crates/dtd-core`                | DTD parsing, entity expansion limits, content-model automata and validation.                                                                         |
+| `crates/xpath-core`              | XPath 1.0/2.0/3.1 tokenizer and parser (syntax errors, variable and function references) and XSLT value templates.                                   |
+| `crates/xml-lsp`                 | The native language server binary (`xml-lsp`).                                                                                                       |
+| `crates/xml-conformance`         | Test-only crate: specification cases, real-world documents, parser corpora and the W3C/libxml2 conformance suites, with baselines of known failures. |
+| `tests/fixtures`                 | Shared test inputs: small hand-written cases, `real-world/` documents and `corpus/` files (sources and licences in `SOURCES.md`).                    |
+| `scripts/fetch-test-suites.sh`   | Downloads the pinned external conformance suites into `target/test-suites`.                                                                          |
+| `docs/`                          | Detailed user documentation (settings reference).                                                                                                    |
+| `.github/workflows/ci.yml`       | Pull request checks and the release pipeline.                                                                                                        |
 
 ## Prerequisites
 
@@ -64,7 +64,7 @@ Zed compiles the extension itself when it is installed as a dev extension; build
 
 Alternatively, `make install-local-lsp` builds the server in release mode (`target/local`, `--version` reports `xml-lsp <version> (local)`) and installs it in Zed's extension work directory under the name and checksum the extension expects, so the published extension (or the dev extension) runs it without downloading anything and without `XML_LSP_PATH`. Run it again after each change, then `editor: restart language server`. It picks the Zed data directory of the OS (`~/Library/Application Support/Zed`, `$XDG_DATA_HOME/zed` or `~/.local/share/zed`, `%LOCALAPPDATA%\\Zed`); set `ZED_DATA_DIR` to override it. A later release of the extension downloads its own binary again.
 
-To see what Zed and the server exchange (methods, sizes, delays), set `lsp.xml-lsp.binary.path` to `scripts/trace-lsp.py`: it relays the messages to the server (`XML_LSP_SERVER`, else the cached binary) and logs them to `/tmp/xml-lsp-trace.log` (`XML_LSP_TRACE` to change it).
+To see what Zed and the server exchange (methods, sizes, delays), set `lsp.xml-lsp.binary.path` to `scripts/trace-lsp.py`. The proxy uses `XML_LSP_SERVER` when set; otherwise it automatically searches this checkout's `target/debug/xml-lsp`, `target/release/xml-lsp` and `target/local/release/xml-lsp`, then the Zed extension caches (`xml-tools` and the legacy `xml` directory). It logs messages to `/tmp/xml-lsp-trace.log` (`XML_LSP_TRACE` changes the path).
 
 Keep `XML_LSP_PATH` set when opening XML files outside this repository, otherwise the extension downloads the released binary matching `extension.toml`'s version.
 
@@ -106,17 +106,17 @@ A change that makes more cases pass must delete their lines from `crates/xml-con
 
 Every pull request runs these jobs of `.github/workflows/ci.yml`; all must pass:
 
-| Job | What it checks |
-|-----|----------------|
-| Format | `cargo fmt --all -- --check`, and that `target/`, `grammars/` and `*.wasm` are not tracked. |
-| Clippy | `cargo clippy --workspace --all-targets -- -D warnings`, and the extension crate for `wasm32-wasip2`, with the pinned toolchain `CLIPPY_TOOLCHAIN` (top of `ci.yml`): any warning fails. |
-| Tests | `cargo test --workspace` on Ubuntu, Windows and macOS. Keep tests portable: paths built with `Path::join` under `std::env::temp_dir()`, `file://` URIs derived from those paths, no assumption about the line endings of files read from disk (`.gitattributes` checks sources out with LF everywhere; fixtures stay byte-exact). |
-| Minimum supported Rust version | Builds the workspace and the extension with the toolchain named by `rust-version` (1.88, required by edition 2024 `let` chains and by dependencies such as `encoding_rs`). The job fails if a crate declares another value. Raise it in every `Cargo.toml` at once, in its own pull request. |
-| Extension (wasm32-wasip2) | Release build of the extension module, uploaded as the `zed-xml-extension-wasm` artifact. |
-| Dependencies (cargo-deny) | `cargo deny check` with [`deny.toml`](deny.toml): licences compatible with MIT, RustSec advisories (vulnerable, unmaintained, unsound or yanked crates), wildcard versions, and crates.io as the only source. Duplicate versions are reported as warnings. |
-| Coverage | `cargo llvm-cov` over the workspace; the summary is written to the job summary and the `coverage` artifact holds `lcov.info` and an HTML report (`html/index.html`). No external service is involved. |
-| Conformance suites | The external suites and the fixture smoke test (below). |
-| CodeQL (`codeql.yml`) | Code scanning of the Rust code and of the workflows on pull requests, `main` and weekly, with `.github/codeql/codeql-config.yml` (test files excluded). It replaces GitHub's default setup, which must stay disabled: both cannot upload results for the same repository. |
+| Job                            | What it checks                                                                                                                                                                                                                                                                                                                    |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Format                         | `cargo fmt --all -- --check`, and that `target/`, `grammars/` and `*.wasm` are not tracked.                                                                                                                                                                                                                                       |
+| Clippy                         | `cargo clippy --workspace --all-targets -- -D warnings`, and the extension crate for `wasm32-wasip2`, with the pinned toolchain `CLIPPY_TOOLCHAIN` (top of `ci.yml`): any warning fails.                                                                                                                                          |
+| Tests                          | `cargo test --workspace` on Ubuntu, Windows and macOS. Keep tests portable: paths built with `Path::join` under `std::env::temp_dir()`, `file://` URIs derived from those paths, no assumption about the line endings of files read from disk (`.gitattributes` checks sources out with LF everywhere; fixtures stay byte-exact). |
+| Minimum supported Rust version | Builds the workspace and the extension with the toolchain named by `rust-version` (1.88, required by edition 2024 `let` chains and by dependencies such as `encoding_rs`). The job fails if a crate declares another value. Raise it in every `Cargo.toml` at once, in its own pull request.                                      |
+| Extension (wasm32-wasip2)      | Release build of the extension module, uploaded as the `zed-xml-extension-wasm` artifact.                                                                                                                                                                                                                                         |
+| Dependencies (cargo-deny)      | `cargo deny check` with [`deny.toml`](deny.toml): licences compatible with MIT, RustSec advisories (vulnerable, unmaintained, unsound or yanked crates), wildcard versions, and crates.io as the only source. Duplicate versions are reported as warnings.                                                                        |
+| Coverage                       | `cargo llvm-cov` over the workspace; the summary is written to the job summary and the `coverage` artifact holds `lcov.info` and an HTML report (`html/index.html`). No external service is involved.                                                                                                                             |
+| Conformance suites             | The external suites and the fixture smoke test (below).                                                                                                                                                                                                                                                                           |
+| CodeQL (`codeql.yml`)          | Code scanning of the Rust code and of the workflows on pull requests, `main` and weekly, with `.github/codeql/codeql-config.yml` (test files excluded). It replaces GitHub's default setup, which must stay disabled: both cannot upload results for the same repository.                                                         |
 
 The Clippy toolchain is pinned so that lints introduced by a new stable Rust release never break an unrelated pull request. To move to a newer release, in a dedicated `ci:` pull request: install it (`rustup toolchain install 1.NN -c clippy -t wasm32-wasip2`), run `cargo +1.NN clippy --workspace --all-targets -- -D warnings` and `cargo +1.NN clippy -p zed-xml --target wasm32-wasip2 -- -D warnings`, fix the new warnings (keeping code within the MSRV), and update `CLIPPY_TOOLCHAIN`. Locally, `cargo clippy` with your own toolchain is fine; when it reports a lint CI does not, fix it too.
 
@@ -152,26 +152,26 @@ Tests live next to the code (`#[cfg(test)] mod tests`; modules that use `std::en
 
 Before tagging, run the manual checklist in [docs/zed-checklist.md](docs/zed-checklist.md) on Linux, macOS and Windows.
 
-
 Versions are kept identical in `Cargo.toml`, `crates/*/Cargo.toml`, `Cargo.lock` and `extension.toml`: the extension downloads the `xml-lsp` release whose version equals its own and checks it with `--version`. The pipeline in `.github/workflows/ci.yml` does the synchronization:
 
 1. Move the `Unreleased` entries of `CHANGELOG.md` under a `## [X.Y.Z] - YYYY-MM-DD` heading and merge that to `main`. `CHANGELOG.md` is written by hand for users and stays the source of truth; to check that nothing is missing, list the conventional commits since the last tag with [git-cliff](https://git-cliff.org) (`cargo install git-cliff`, then `git cliff --unreleased`, configured by `cliff.toml`).
 2. Push a tag `vX.Y.Z` on `main`. The `prepare_release_pr` job bumps every version to `X.Y.Z` (including the versioned `process:exec` and `download_file` capabilities of `extension.toml`), runs `cargo check --workspace` to refresh `Cargo.lock`, pushes the branch `release/version-sync-vX.Y.Z` and opens the pull request `chore: synchronize release version vX.Y.Z`.
 3. Merge that pull request. The `native` job builds `xml-lsp` for the targets below and runs `--version` on those built natively (musl builds must be statically linked). The `release` job writes `SHA256SUMS` and one `<asset>.sha256` per binary, moves the tag to the merge commit, and publishes a GitHub release with the binaries, the checksum files and the release notes.
 
-   | Target | Runner | Used by the extension on |
-   |--------|--------|--------------------------|
-   | `x86_64-unknown-linux-musl` | `ubuntu-latest` | Linux x86_64 |
-   | `aarch64-unknown-linux-musl` | `ubuntu-24.04-arm` | Linux aarch64 |
-   | `x86_64-unknown-linux-gnu` | `ubuntu-latest` | (other clients) |
-   | `aarch64-unknown-linux-gnu` | `ubuntu-24.04-arm` | (other clients) |
-   | `aarch64-apple-darwin` | `macos-latest` | macOS Apple silicon |
-   | `x86_64-apple-darwin` | `macos-latest` (cross-compiled) | macOS Intel |
-   | `x86_64-pc-windows-msvc` | `windows-latest` | Windows x86_64 |
-   | `aarch64-pc-windows-msvc` | `windows-latest` (cross-compiled) | Windows arm64 |
+   | Target                       | Runner                            | Used by the extension on |
+   | ---------------------------- | --------------------------------- | ------------------------ |
+   | `x86_64-unknown-linux-musl`  | `ubuntu-latest`                   | Linux x86_64             |
+   | `aarch64-unknown-linux-musl` | `ubuntu-24.04-arm`                | Linux aarch64            |
+   | `x86_64-unknown-linux-gnu`   | `ubuntu-latest`                   | (other clients)          |
+   | `aarch64-unknown-linux-gnu`  | `ubuntu-24.04-arm`                | (other clients)          |
+   | `aarch64-apple-darwin`       | `macos-latest`                    | macOS Apple silicon      |
+   | `x86_64-apple-darwin`        | `macos-latest` (cross-compiled)   | macOS Intel              |
+   | `x86_64-pc-windows-msvc`     | `windows-latest`                  | Windows x86_64           |
+   | `aarch64-pc-windows-msvc`    | `windows-latest` (cross-compiled) | Windows arm64            |
 
    Adding a platform means adding it to this matrix and to `SUPPORTED_PLATFORMS` in `src/lib.rs` (a unit test checks that every supported platform is built, and the `release` job checks the number of binaries).
    The release notes are the `CHANGELOG.md` section of the version, followed by the commits of the release grouped by type (`git cliff --latest --strip all` with `cliff.toml`; `chore: synchronize release version` commits are skipped) and instructions to verify the checksums.
+
 4. The `publish_registry` job then opens the pull request on [zed-industries/extensions](https://github.com/zed-industries/extensions) (submodule and `version` of `xml-tools` in `extensions.toml`) with [huacnlee/zed-extension-action](https://github.com/huacnlee/zed-extension-action), after the release and its binaries exist. It is skipped until the repository variable `ZED_REGISTRY_FORK` (your fork of that repository, `<account>/extensions`) is set; it also needs the secret `COMMITTER_TOKEN` (a personal access token with the `public_repo` and `workflow` scopes). The Zed maintainers still review and merge that pull request. The first submission of the extension is done by hand, as described in Zed's [publishing guide](https://zed.dev/docs/extensions/developing-extensions).
 
 ## License
